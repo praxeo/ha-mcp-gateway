@@ -1,0 +1,38 @@
+﻿name = "ha-mcp-gateway"
+main = "dist/worker.js"
+compatibility_date = "2024-01-01"
+ai = { binding = "AI" }
+
+[observability]
+enabled = true
+head_sampling_rate = 1
+
+[observability.logs]
+enabled = true
+head_sampling_rate = 1
+persist = true
+invocation_logs = true
+
+[observability.traces]
+enabled = false
+persist = true
+head_sampling_rate = 1
+
+[build]
+command = "npx esbuild src/worker.js --bundle --outdir=dist --format=esm --outbase=src"
+
+[[kv_namespaces]]
+binding = "HA_CACHE"
+id = "d341a11cfff149cdb99e5edee7612132"
+
+[durable_objects]
+bindings = [
+  { name = "HA_WS", class_name = "HAWebSocket" }
+]
+
+[[migrations]]
+tag = "v1"
+new_classes = ["HAWebSocket"]
+
+[triggers]
+crons = ["* * * * *"]
