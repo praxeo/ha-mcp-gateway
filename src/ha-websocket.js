@@ -1,4 +1,5 @@
 export class HAWebSocket {
+  // Static config for prioritized entity context building
   static BURST_EXEMPT_DOMAINS = new Set(["climate", "lock", "cover", "alarm_control_panel"]);
   static CONTEXT_DOMAIN_PRIORITY = [
     "alarm_control_panel", "climate", "lock", "cover", "binary_sensor",
@@ -26,6 +27,7 @@ export class HAWebSocket {
     this.aiLog = [];
     this._logInitialized = false; // lazy-load aiLog from storage on first use
 
+    // PATCH 1: Event filter properties
     this.lastHeartbeat = 0;
     this.eventBurstTracker = new Map();
   }
@@ -46,8 +48,8 @@ When Sabrina asks you things, keep it accessible — she's not a smart home nerd
 
 HOUSEHOLD:
 - John — built and maintains this entire smart home system. Healthcare professional. The one who will fix things when they break. Tinkers constantly. Reaches you via WhatsApp, the web chat, or through Claude.
-- Sabrina — Pharmacist, works at UAB lives here, uses the house, doesn't need to know how the sausage is made. If she asks you to turn something on, just do it. Don't explain Z-Wave node IDs to her.
-- Sabrina is pregnant with a boy, due in October. 
+- Sabrina — Pharmacist, works at UAB, lives here, uses the house, doesn't need to know how the sausage is made. If she asks you to turn something on, just do it. Don't explain Z-Wave node IDs to her.
+- Sabrina is pregnant with a boy, due in October.
 - Two large dogs, Ollie and Ranger.
 
 THE HOUSE:
@@ -55,9 +57,7 @@ THE HOUSE:
 
 BASEMENT (finished, walkout):
 - Office (John's primary workspace — quiet, separated from main living)
-- Gym
-- Guest Room
-- Full Bathroom
+- Gym, Guest Room, Full Bathroom
 - Two bay doors (right bay = ratgdo32_b1e618, left bay = ratgdo_left_basement)
 - Exterior walkout door (basement door deadbolt = lock_2, node 258)
 - Porch door to area under screened porch (basement porch deadbolt = lock_3)
@@ -65,6 +65,7 @@ BASEMENT (finished, walkout):
 
 MAIN LEVEL:
 - Kitchen — central hub, connects to hallway, sunroom, and bar area. Thermostat zone 2 here (climate.t6_pro_z_wave_programmable_thermostat_2)
+  * THIS THERMOSTAT CONTROLS THE ENTIRE MAIN LEVEL INCLUDING THE MASTER BEDROOM.
 - Sunroom — bright space between kitchen and screened porch
 - Screened Porch — covered outdoor living above basement walkout
 - Living Room — main gathering space
@@ -79,42 +80,14 @@ MAIN LEVEL:
 - Garage — two-car, interior door to hallway, stairs to attic. Bay door = ratgdo32_2b8ecc. Garage entry deadbolt = lock_1 (node 257)
 - Front Porch / Entry Hallway
 
+BASEMENT THERMOSTAT: climate.t6_pro_z_wave_programmable_thermostat (controls basement only)
+
 ATTIC: Unfinished storage above garage, accessed via stairs inside garage
 
 OUTDOOR:
 - Back porch deadbolt (upstairs) = lock_4
 - Dock on the lake with accent lighting
 - Front yard, back yard, driveway
-
-ENTRY ROUTES (most to least common):
-1. Garage bay door → Garage → Interior door → Hallway → Kitchen
-2. Basement exterior door → Basement → Stairs → Hallway → Kitchen
-3. Front door → Entry Hallway → Living Room
-
-INFRASTRUCTURE:
-- HA Green with Z-Stick 10 Pro (Z-Wave + Zigbee combo dongle)
-- Eero 6 mesh network, 6 nodes (5 wired Cat5 backhaul, Sunroom is wireless)
-- Cameras: Blue Iris NVR, Reolink cameras (local RTSP/ONVIF)
-- Protocols: Z-Wave, Zigbee (ZHA), Wi-Fi (Kasa/Tapo, Reolink)
-
-KEY DEVICES & ENTITIES:
-- Whole-home power meter: sensor.frient_a_s_emizb_141_instantaneous_demand
-  * ~722W baseline, ~2420W with HVAC compressor, >5000W = aux heat (bad)
-- Two Honeywell T6 Pro Z-Wave thermostats:
-  * Basement: climate.t6_pro_z_wave_programmable_thermostat
-  * Kitchen/main: climate.t6_pro_z_wave_programmable_thermostat_2
-- Sound machine (MBR): switch.tz3210_xej4kukg_ts011f_2
-- Roborock vacuum: vacuum.roborock_qv_35a
-- Chicken lamp: switch.mini_smart_wi_fi_plug (WiFi plug)
-- Glass stand lamp (living room): light.lamp_glass_table_living_room (on/off only, no dimming)
-- Entryway vase lamp: light.entryway_vase_lamp_plug (on/off only)
-- Back floods: switch.back_floods_s2_on_off_switch
-- Office lamp: switch.mini_smart_wi_fi_plug_2
-- Office dimmer: light.office_dimmer
-- Cool bedtime mode: input_boolean.cool_bedtime_mode
-- Work mode helpers: input_boolean.basement_work_mode, input_boolean.garage_work_mode
-- Mail tracking: input_boolean.mail_likely_delivered_today, input_boolean.mail_likely_retrieved_today
-- Front porch brightness: input_number.front_porch_previous_brightness
 
 LOCK MAP:
 - lock.home_connect_620_connected_smart_lock = Garage Entry Deadbolt (node 257)
@@ -127,17 +100,26 @@ GARAGE DOORS:
 - cover.ratgdo32_b1e618_door = Basement right bay door
 - cover.ratgdo_left_basement_door = Basement left bay door
 
+KEY DEVICES:
+- Whole-home power meter: sensor.frient_a_s_emizb_141_instantaneous_demand (~722W baseline, ~2420W compressor, >5000W = aux heat = expensive)
+- Cool bedtime mode: input_boolean.cool_bedtime_mode
+- Work modes: input_boolean.basement_work_mode, input_boolean.garage_work_mode
+- Glass stand lamp (living room): light.lamp_glass_table_living_room (on/off only, no dimming)
+- Entryway vase lamp: light.entryway_vase_lamp_plug (on/off only)
+- Back floods: switch.back_floods_s2_on_off_switch
+- Office lamp: switch.mini_smart_wi_fi_plug_2
+- Chicken lamp: switch.mini_smart_wi_fi_plug
+
 BEHAVIORAL GUIDELINES:
-1. SECURITY is priority one. Locks left unlocked, doors left open, water leaks, smoke — flag these immediately. You may lock doors proactively if nobody is nearby.
+1. SECURITY is priority one. Locks left unlocked, doors left open, water leaks, smoke — flag immediately. You may lock doors proactively if nobody is nearby.
 2. Don't spam notifications for routine events. Lights turning on/off, thermostats cycling, normal motion — that's just a house being a house.
 3. Work Mode means someone is actively in that space and wants lights to stay on. Don't fight it.
 4. The Evening Lamps Schedule automation handles sunset lighting. Don't duplicate its work.
 5. Power readings: a sustained spike above 5000W means aux heat is running — that's expensive and worth flagging.
-6. Zigbee LQI fluctuations are common on this mesh. Don't log every single one as a separate memory. Summarize the pattern. If you've already noted "Zigbee mesh is unstable today," you don't need to log events #2 through #80 individually.
-7. Save memories for USEFUL things: learned preferences, patterns that inform future decisions, device quirks, resolved issues. Not for transient telemetry.
-8. Keep your memory clean. If you have 10 memories about the same Zigbee issue, consolidate them into one. You have 100 slots — use them wisely.
-9. When reporting home status, lead with what matters: security (locks, doors), safety (leaks, smoke), comfort (climate), then everything else.
-10. If you don't know something, say so. Don't fabricate entity IDs or make up states.`;
+6. Save memories for USEFUL things: learned preferences, patterns that inform future decisions, device quirks, resolved issues. Not for transient telemetry.
+7. Keep your memory clean. Consolidate duplicates. You have 100 slots — use them wisely.
+8. When reporting home status, lead with what matters: security (locks, doors), safety (leaks, smoke), comfort (climate), then everything else.
+9. If you don't know something, say so. Don't fabricate entity IDs or make up states.`;
   }
 
   async fetch(request) {
@@ -466,6 +448,7 @@ BEHAVIORAL GUIDELINES:
         return true;
       }
 
+      // ── DROP: noisy telemetry ──
       const noisyClasses = ["signal_strength", "energy", "voltage", "current",
         "frequency", "power_factor", "irradiance", "data_rate", "data_size"];
       if (noisyClasses.includes(deviceClass)) return false;
@@ -495,32 +478,46 @@ BEHAVIORAL GUIDELINES:
 
     const now = Date.now();
     const tracker = this.eventBurstTracker.get(entityId);
+
     if (!tracker) {
       this.eventBurstTracker.set(entityId, { count: 1, firstTime: now, lastEvent: event });
       return event;
     }
+
     const elapsed = now - tracker.firstTime;
+
     if (elapsed > 60000) {
       this.eventBurstTracker.set(entityId, { count: 1, firstTime: now, lastEvent: event });
       return event;
     }
+
     tracker.count++;
     tracker.lastEvent = event;
-    if (tracker.count <= 3) return event;
+
+    if (tracker.count <= 3) {
+      return event;
+    }
+
     return null;
   }
+
+  // ========================================================================
+  // onEvent — Updated with filter
+  // ========================================================================
 
   onEvent(event) {
     if (event.event_type === "state_changed" && event.data) {
       const newState = event.data.new_state;
       const oldState = event.data.old_state;
 
+      // Always update the live state cache
       if (newState) {
         this.stateCache.set(newState.entity_id, newState);
       } else if (event.data.entity_id) {
         this.stateCache.delete(event.data.entity_id);
       }
 
+      // AI event filtering
       if (this.aiEnabled && newState && oldState && newState.state !== oldState.state) {
         if (!this.shouldQueueEvent(newState.entity_id, oldState, newState)) {
           return;
@@ -614,28 +611,18 @@ BEHAVIORAL GUIDELINES:
     try {
       const now = new Date();
       const memory = await this.state.storage.get("ai_memory") || [];
+
+      // Build action history from persistent log
       const persistentLog = await this.state.storage.get("ai_log_persistent") || [];
       const recentActions = persistentLog
-        .filter(e => ["action", "notification", "decision"].includes(e.type))
+        .filter(e => ["action", "action_verified", "notification", "decision"].includes(e.type))
         .slice(-20)
         .map(e => `[${e.timestamp}] ${e.type}: ${e.message}`)
         .join("\n");
 
-      let agentStateSource = null;
-      if (this.env.HA_CACHE) {
-        try {
-          const kvStates = await this.env.HA_CACHE.get("ha:states", "json");
-          if (Array.isArray(kvStates) && kvStates.length > 0) agentStateSource = kvStates;
-        } catch (e) {
-          console.warn("runAIAgent: KV read failed, using stateCache:", e.message);
-        }
-      }
-      if (!agentStateSource) agentStateSource = [...this.stateCache.values()];
-
-      const contextEntities = [];
-      const agentByDomain = new Map();
-      for (const state of agentStateSource) {
-        const id = state.entity_id;
+      // Prioritized context entity building
+      const byDomain = new Map();
+      for (const [id, state] of this.stateCache) {
         const domain = id.split(".")[0];
         const attr = state.attributes || {};
         const deviceClass = attr.device_class || "";
@@ -651,16 +638,18 @@ BEHAVIORAL GUIDELINES:
             entry.humidity = attr.humidity;
             entry.wind_speed = attr.wind_speed;
           }
-          if (!agentByDomain.has(domain)) agentByDomain.set(domain, []);
-          agentByDomain.get(domain).push(entry);
+          if (!byDomain.has(domain)) byDomain.set(domain, []);
+          byDomain.get(domain).push(entry);
         } else if (domain === "sensor" && HAWebSocket.SENSOR_WHITELIST.has(deviceClass)) {
           const entry = { entity_id: id, friendly_name: attr.friendly_name || id, state: state.state, device_class: deviceClass };
-          if (!agentByDomain.has("sensor")) agentByDomain.set("sensor", []);
-          agentByDomain.get("sensor").push(entry);
+          if (!byDomain.has("sensor")) byDomain.set("sensor", []);
+          byDomain.get("sensor").push(entry);
         }
       }
+
+      const contextEntities = [];
       for (const domain of [...HAWebSocket.CONTEXT_DOMAIN_PRIORITY, "sensor"]) {
-        for (const entry of (agentByDomain.get(domain) || [])) {
+        for (const entry of (byDomain.get(domain) || [])) {
           if (contextEntities.length >= HAWebSocket.MAX_CONTEXT_ENTITIES) break;
           contextEntities.push(entry);
         }
@@ -677,7 +666,7 @@ YOUR CAPABILITIES:
 YOUR MEMORY (things you've learned):
 ${memory.length > 0 ? memory.map(m => "- " + m).join("\n") : "No memories yet. Observe patterns and save useful observations."}
 
-YOUR ACTION HISTORY (actions you have taken and decisions you made — use this to answer questions accurately):
+YOUR ACTION HISTORY (actions you have taken and decisions you made):
 ${recentActions.length > 0 ? recentActions : "No recorded actions yet."}
 
 CURRENT STATE OF KEY ENTITIES:
@@ -688,8 +677,8 @@ INSTRUCTIONS:
 - Security events (locks, doors, leaks, smoke) always warrant attention
 - Routine events (lights cycling, thermostat maintaining, normal motion) usually don't
 - Save memories sparingly — consolidate patterns, don't log individual telemetry events
-- If a Zigbee device's LQI drops and recovers in under a minute, that's mesh doing its job, not an emergency
-- Be TARS: take action when needed, stand down when it's not, and save the wisecracks for chat
+- If a Zigbee device's LQI drops and recovers in under a minute, that's mesh doing its job
+- Be TARS: take action when needed, stand down when it's not
 - Respond ONLY with valid JSON:
 
 {
@@ -718,7 +707,7 @@ Analyze these events and decide what actions to take, if any. Respond with JSON 
           { role: "system", content: systemPrompt },
           { role: "user", content: userMessage },
         ],
-        max_completion_tokens: 16384, // thinking tokens count against this budget; 4096 was too small
+        max_completion_tokens: 16384, // thinking tokens count against this; 4096 was too small
         chat_template_kwargs: { enable_thinking: true },
         response_format: { type: "json_object" },
       }, {
@@ -730,6 +719,8 @@ Analyze these events and decide what actions to take, if any. Respond with JSON 
       console.log("CHAT DEBUG keys:", debugKeys, "full:", debugStr);
       let responseText = response.choices?.[0]?.message?.content || response.response || "";
       if (!responseText) {
+        // Thinking models can exhaust token budget on reasoning, leaving content null.
+        // Try to salvage JSON from the reasoning field.
         const rawReasoning = response.choices?.[0]?.message?.reasoning || "";
         const jsonFallback = rawReasoning.match(/\{[\s\S]*\}/);
         if (jsonFallback) {
@@ -790,40 +781,29 @@ Analyze these events and decide what actions to take, if any. Respond with JSON 
     if (!this.env.AI) return { error: "AI binding not available" };
     const memory = await this.state.storage.get("ai_memory") || [];
     const now = new Date();
+
+    // ── Build action history from persistent log ──
     const persistentLog = await this.state.storage.get("ai_log_persistent") || [];
     const recentActions = persistentLog
-      .filter(e => ["action", "notification", "decision"].includes(e.type))
+      .filter(e => ["action", "action_verified", "notification", "decision"].includes(e.type))
       .slice(-50)
       .map(e => `[${e.timestamp}] ${e.type}: ${e.message}`)
       .join("\n");
 
-    let stateSource = null;
-    let sourceUsed = "stateCache";
-    if (this.env.HA_CACHE) {
-      try {
-        const kvStates = await this.env.HA_CACHE.get("ha:states", "json");
-        if (Array.isArray(kvStates) && kvStates.length > 0) {
-          stateSource = kvStates;
-          sourceUsed = "kv";
-          console.log("chatWithAgent: using KV state source,", kvStates.length, "entities");
-        }
-      } catch (e) {
-        console.warn("chatWithAgent: KV read failed, falling back to stateCache:", e.message);
-      }
-    }
-    if (!stateSource) {
-      stateSource = [...this.stateCache.values()];
-      console.log("chatWithAgent: using stateCache fallback,", stateSource.length, "entities");
-    }
-
+    // ── Build prioritized context entities ──
     const byDomain = new Map();
-    for (const state of stateSource) {
-      const id = state.entity_id;
+    for (const [id, state] of this.stateCache) {
       const domain = id.split(".")[0];
       const attr = state.attributes || {};
       const deviceClass = attr.device_class || "";
+
       if (HAWebSocket.CONTEXT_DOMAIN_PRIORITY.includes(domain)) {
-        const entry = { entity_id: id, friendly_name: attr.friendly_name || id, state: state.state };
+        const entry = {
+          entity_id: id,
+          friendly_name: attr.friendly_name || id,
+          state: state.state,
+        };
+        // Include climate-specific attributes so the model knows setpoints
         if (domain === "climate") {
           entry.setpoint = attr.temperature ?? null;
           entry.current_temp = attr.current_temperature ?? null;
@@ -839,12 +819,13 @@ Analyze these events and decide what actions to take, if any. Respond with JSON 
         }
         if (!byDomain.has(domain)) byDomain.set(domain, []);
         byDomain.get(domain).push(entry);
-        continue;
-      }
-      if (domain === "sensor" && HAWebSocket.SENSOR_WHITELIST.has(deviceClass)) {
+      } else if (domain === "sensor" && HAWebSocket.SENSOR_WHITELIST.has(deviceClass)) {
         const entry = {
-          entity_id: id, friendly_name: attr.friendly_name || id, state: state.state,
-          device_class: deviceClass, unit: attr.unit_of_measurement || null,
+          entity_id: id,
+          friendly_name: attr.friendly_name || id,
+          state: state.state,
+          device_class: deviceClass,
+          unit: attr.unit_of_measurement || null,
         };
         if (!byDomain.has("sensor")) byDomain.set("sensor", []);
         byDomain.get("sensor").push(entry);
@@ -860,7 +841,10 @@ Analyze these events and decide what actions to take, if any. Respond with JSON 
       if (contextEntities.length >= HAWebSocket.MAX_CONTEXT_ENTITIES) break;
     }
 
-    const systemPrompt = `You are an autonomous smart home AI agent with full control over a Home Assistant smart home.
+    // ── System prompt with full agent context ──
+    const systemPrompt = `${this.getAgentContext()}
+
+You are now in CHAT MODE — a household member is talking to you directly.
 
 YOUR CAPABILITIES:
 - call_service: Call any Home Assistant service
@@ -870,26 +854,30 @@ YOUR CAPABILITIES:
 YOUR MEMORY:
 ${memory.length > 0 ? memory.map((m) => "- " + m).join("\n") : "No memories yet."}
 
-YOUR ACTION HISTORY (actions you have taken and decisions you made — use this to answer questions accurately):
+YOUR ACTION HISTORY (actions you have taken — use this to answer questions accurately):
 ${recentActions.length > 0 ? recentActions : "No recorded actions yet."}
 
 CURRENT STATE OF ENTITIES (${contextEntities.length} entities, prioritized by importance):
 ${JSON.stringify(contextEntities, null, 1)}
 
-The homeowner is talking to you directly. Help them with whatever they need. You can control any device, answer questions about the home state, and take actions.
+CRITICAL RULES:
+1. When you include a call_service action in your actions array, the system WILL execute it. Your reply text must accurately reflect what the actions array contains. Do NOT claim you did something unless the action is in your actions array.
+2. If you're unsure which entity to target, ASK instead of guessing.
+3. For thermostat changes: the kitchen thermostat (climate.t6_pro_z_wave_programmable_thermostat_2) controls the entire main level including the master bedroom.
 
 Respond with JSON in this exact format:
 {
   "reply": "Your conversational response to the user",
   "actions": [
-    {"type": "call_service", "domain": "light", "service": "turn_off", "data": {"entity_id": "light.example"}},
+    {"type": "call_service", "domain": "climate", "service": "set_temperature", "data": {"entity_id": "climate.t6_pro_z_wave_programmable_thermostat_2", "temperature": 69}},
     {"type": "send_notification", "message": "Alert text", "title": "Optional title"},
     {"type": "save_memory", "memory": "Something to remember"}
   ]
 }
 
-If no actions are needed, use an empty actions array. Always include a friendly reply.`;
+If no actions are needed, use an empty actions array. Always include a reply.`;
 
+    // ── Chat history ──
     const historyKey = "chat_history_" + from.replace(/[^a-zA-Z0-9]/g, "_");
     const history = await this.state.storage.get(historyKey) || [];
     const now_str = now.toLocaleString("en-US", { timeZone: "America/Chicago" });
@@ -898,11 +886,16 @@ If no actions are needed, use an empty actions array. Always include a friendly 
     try {
       const sessionKey = "ha-chat-" + from.replace(/[^a-zA-Z0-9]/g, "_");
       const response = await this.env.AI.run("@cf/nvidia/nemotron-3-120b-a12b", {
-        messages: [{ role: "system", content: systemPrompt }, ...history.slice(-10)],
+        messages: [
+          { role: "system", content: systemPrompt },
+          ...history.slice(-10)
+        ],
         max_completion_tokens: 2048,
         chat_template_kwargs: { enable_thinking: false },
         response_format: { type: "json_object" }
-      }, { headers: { "x-session-affinity": sessionKey } });
+      }, {
+        headers: { "x-session-affinity": sessionKey }
+      });
 
       const responseText = response.choices?.[0]?.message?.content || response.response || "";
       this.logAI("chat_raw", "Raw response length: " + responseText.length + " | preview: " + responseText.substring(0, 100), {});
@@ -910,8 +903,9 @@ If no actions are needed, use an empty actions array. Always include a friendly 
       let parsed;
       try {
         const jsonMatch = responseText.match(/\{[\s\S]*\}/);
-        if (jsonMatch) parsed = JSON.parse(jsonMatch[0]);
-        else {
+        if (jsonMatch) {
+          parsed = JSON.parse(jsonMatch[0]);
+        } else {
           this.logAI("chat_parse_fail", "No JSON found in response: " + responseText.substring(0, 200), {});
           return { reply: responseText, actions_taken: [] };
         }
@@ -920,23 +914,50 @@ If no actions are needed, use an empty actions array. Always include a friendly 
         return { reply: responseText, actions_taken: [] };
       }
 
+      // ── Execute actions and track what ACTUALLY succeeded ──
+      const executedActions = [];
+      const failedActions = [];
       if (parsed.actions && Array.isArray(parsed.actions)) {
         for (const action of parsed.actions) {
-          try { await this.executeAIAction(action); }
-          catch (err) { this.logAI("chat_action_error", err.message, action); }
+          try {
+            await this.executeAIAction(action);
+            executedActions.push(
+              action.type + (action.domain ? ": " + action.domain + "." + action.service : "")
+            );
+          } catch (err) {
+            failedActions.push(
+              action.type + (action.domain ? ": " + action.domain + "." + action.service : "") + " (" + err.message + ")"
+            );
+            this.logAI("chat_action_error", err.message, action);
+          }
         }
       }
 
+      // Log discrepancies between intent and execution
+      const requestedCount = (parsed.actions || []).length;
+      if (failedActions.length > 0) {
+        this.logAI("chat_action_mismatch",
+          `Requested ${requestedCount} actions, ${executedActions.length} succeeded, ${failedActions.length} failed: ${failedActions.join("; ")}`,
+          {}
+        );
+      }
+
+      // ── Save chat history ──
       history.push({ role: "assistant", content: parsed.reply || "" });
       await this.state.storage.put(historyKey, history.slice(-20));
+
       this.logAI("chat", "User: " + message + " | Agent: " + (parsed.reply || "").substring(0, 200), {
-        actions_taken: (parsed.actions || []).length,
-        from, state_source: sourceUsed, context_size: contextEntities.length,
+        actions_requested: requestedCount,
+        actions_executed: executedActions.length,
+        actions_failed: failedActions.length,
+        from,
+        context_size: contextEntities.length,
       });
 
       return {
         reply: parsed.reply || "Done.",
-        actions_taken: (parsed.actions || []).map((a) => a.type + (a.domain ? ": " + a.domain + "." + a.service : ""))
+        actions_taken: executedActions,
+        actions_failed: failedActions.length > 0 ? failedActions : undefined,
       };
     } catch (err) {
       this.logAI("chat_error", err.message, {});
@@ -960,6 +981,40 @@ If no actions are needed, use an empty actions array. Always include a friendly 
           target: action.target || {},
         });
         this.logAI("action", "Called " + action.domain + "." + action.service, action.data || {});
+
+        // ── Post-action verification for critical domains ──
+        const entityId = (action.data && action.data.entity_id)
+                      || (action.target && action.target.entity_id);
+        if (entityId && ["climate", "lock", "cover"].includes(action.domain)) {
+          // Give HA a moment to process the state change via WebSocket subscription
+          await new Promise(r => setTimeout(r, 1500));
+          const verifiedState = this.stateCache.get(entityId);
+          if (verifiedState) {
+            const verifyData = { entity_id: entityId, state: verifiedState.state };
+            if (action.domain === "climate") {
+              verifyData.setpoint = verifiedState.attributes?.temperature ?? null;
+              verifyData.current_temp = verifiedState.attributes?.current_temperature ?? null;
+              verifyData.hvac_action = verifiedState.attributes?.hvac_action ?? null;
+            }
+            if (action.domain === "lock") {
+              verifyData.lock_state = verifiedState.state;
+            }
+            if (action.domain === "cover") {
+              verifyData.cover_state = verifiedState.state;
+              verifyData.position = verifiedState.attributes?.current_position ?? null;
+            }
+            this.logAI("action_verified",
+              `Post-action state of ${entityId}: ${JSON.stringify(verifyData)}`,
+              verifyData
+            );
+          } else {
+            this.logAI("action_verify_fail",
+              `Could not verify state of ${entityId} — not in stateCache`,
+              { entity_id: entityId }
+            );
+          }
+        }
+
         return result;
       }
 
@@ -997,6 +1052,7 @@ If no actions are needed, use an empty actions array. Always include a friendly 
     this.aiLog.push(entry);
     if (this.aiLog.length > 200) this.aiLog.splice(0, this.aiLog.length - 200);
     console.log("AI LOG [" + type + "]:", message);
+
     // Persist to long-term storage (500-entry cap, survives DO hibernation).
     // Fire-and-forget — logAI is called from sync-like paths.
     this.state.storage.get("ai_log_persistent").then(stored => {
@@ -1022,6 +1078,7 @@ If no actions are needed, use an empty actions array. Always include a friendly 
         await this.runAIAgent();
       }
 
+      // 15-minute heartbeat
       const now = Date.now();
       if (this.aiEnabled && !this.aiProcessing && (now - this.lastHeartbeat) >= 900000) {
         this.lastHeartbeat = now;
@@ -1035,6 +1092,7 @@ If no actions are needed, use an empty actions array. Always include a friendly 
         await this.runAIAgent();
       }
 
+      // Clean up burst tracker entries older than 2 minutes
       const cutoff = now - 120000;
       for (const [key, val] of this.eventBurstTracker) {
         if (val.firstTime < cutoff) this.eventBurstTracker.delete(key);
