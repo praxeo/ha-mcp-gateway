@@ -3,8 +3,8 @@ import { HAWebSocket } from "./ha-websocket.js";
 
 // src/worker.js
 var CACHE_TTL = {
-  STATES: 30,
-  ENTITY_STATE: 15,
+  STATES: 90, // was 30 — shorter than the 60s cron interval, causing stale reads
+  ENTITY_STATE: 90, // was 15 — same issue; align with cron cadence
   SERVICES: 86400,
   ENTITY_REGISTRY: 3600,
   CALENDARS: 3600,
@@ -207,7 +207,7 @@ var TOOLS = [
   },
   {
     name: "update_automation",
-    description: "Update an existing automation's configuration.",
+    description: "⚠️ Broken — returns 405 Method Not Allowed on this instance. Do not use. Make automation changes manually via 'Edit in YAML' in the HA UI instead.",
     inputSchema: {
       type: "object",
       properties: { automation_id: { type: "string" }, config: { type: "object" } },
@@ -512,7 +512,7 @@ var TOOLS = [
   },
   {
     name: "talk_to_agent",
-    description: "Send a message to the autonomous AI agent. It can answer questions, take actions, and remember instructions.",
+    description: "Duplicate of ai_chat — use ai_chat instead. This tool is identical in behavior and will be removed in a future version.",
     inputSchema: {
       type: "object",
       properties: { message: { type: "string", description: "Your message to the agent" } },

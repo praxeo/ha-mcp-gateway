@@ -24,6 +24,7 @@ export class HAWebSocket {
     this.aiProcessing = false;
     this.aiEnabled = true;
     this.aiLog = [];
+    this._logInitialized = false; // lazy-load aiLog from storage on first use
 
     this.lastHeartbeat = 0;
     this.eventBurstTracker = new Map();
@@ -142,6 +143,12 @@ BEHAVIORAL GUIDELINES:
   async fetch(request) {
     const url = new URL(request.url);
     const headers = { "Content-Type": "application/json" };
+
+    // Restore persisted aiLog from DO storage on first request after eviction
+    if (!this._logInitialized) {
+      this.aiLog = (await this.state.storage.get("ai_log")) || [];
+      this._logInitialized = true;
+    }
 
     if (!this.connected || !this.authenticated) {
       await this.connect();
@@ -607,6 +614,12 @@ BEHAVIORAL GUIDELINES:
     try {
       const now = new Date();
       const memory = await this.state.storage.get("ai_memory") || [];
+      const persistentLog = await this.state.storage.get("ai_log_persistent") || [];
+      const recentActions = persistentLog
+        .filter(e => ["action", "notification", "decision"].includes(e.type))
+        .slice(-20)
+        .map(e => `[${e.timestamp}] ${e.type}: ${e.message}`)
+        .join("\n");
 
       let agentStateSource = null;
       if (this.env.HA_CACHE) {
@@ -664,6 +677,9 @@ YOUR CAPABILITIES:
 YOUR MEMORY (things you've learned):
 ${memory.length > 0 ? memory.map(m => "- " + m).join("\n") : "No memories yet. Observe patterns and save useful observations."}
 
+YOUR ACTION HISTORY (actions you have taken and decisions you made — use this to answer questions accurately):
+${recentActions.length > 0 ? recentActions : "No recorded actions yet."}
+
 CURRENT STATE OF KEY ENTITIES:
 ${JSON.stringify(contextEntities, null, 1)}
 
@@ -702,7 +718,7 @@ Analyze these events and decide what actions to take, if any. Respond with JSON 
           { role: "system", content: systemPrompt },
           { role: "user", content: userMessage },
         ],
-        max_completion_tokens: 4096,
+        max_completion_tokens: 16384, // thinking tokens count against this budget; 4096 was too small
         chat_template_kwargs: { enable_thinking: true },
         response_format: { type: "json_object" },
       }, {
@@ -710,11 +726,19 @@ Analyze these events and decide what actions to take, if any. Respond with JSON 
       });
 
       const debugKeys = Object.keys(response || {});
-      const debugStr = JSON.stringify(response).substring(0, 1000);
+      const debugStr = JSON.stringify(response).substring(0, 300);
       console.log("CHAT DEBUG keys:", debugKeys, "full:", debugStr);
-      const responseText = response.choices?.[0]?.message?.content || response.response || "";
+      let responseText = response.choices?.[0]?.message?.content || response.response || "";
       if (!responseText) {
-        this.logAI("debug", "Empty AI response. Keys: " + debugKeys.join(",") + " | Raw: " + debugStr, {});
+        const rawReasoning = response.choices?.[0]?.message?.reasoning || "";
+        const jsonFallback = rawReasoning.match(/\{[\s\S]*\}/);
+        if (jsonFallback) {
+          console.log("AI Agent: content null, salvaging JSON from reasoning field");
+          responseText = jsonFallback[0];
+        }
+      }
+      if (!responseText) {
+        this.logAI("error", "Empty response after thinking — token budget exhausted. Keys: " + debugKeys.join(","), {});
         this.aiProcessing = false;
         return;
       }
@@ -766,6 +790,12 @@ Analyze these events and decide what actions to take, if any. Respond with JSON 
     if (!this.env.AI) return { error: "AI binding not available" };
     const memory = await this.state.storage.get("ai_memory") || [];
     const now = new Date();
+    const persistentLog = await this.state.storage.get("ai_log_persistent") || [];
+    const recentActions = persistentLog
+      .filter(e => ["action", "notification", "decision"].includes(e.type))
+      .slice(-50)
+      .map(e => `[${e.timestamp}] ${e.type}: ${e.message}`)
+      .join("\n");
 
     let stateSource = null;
     let sourceUsed = "stateCache";
@@ -840,6 +870,9 @@ YOUR CAPABILITIES:
 YOUR MEMORY:
 ${memory.length > 0 ? memory.map((m) => "- " + m).join("\n") : "No memories yet."}
 
+YOUR ACTION HISTORY (actions you have taken and decisions you made — use this to answer questions accurately):
+${recentActions.length > 0 ? recentActions : "No recorded actions yet."}
+
 CURRENT STATE OF ENTITIES (${contextEntities.length} entities, prioritized by importance):
 ${JSON.stringify(contextEntities, null, 1)}
 
@@ -895,7 +928,7 @@ If no actions are needed, use an empty actions array. Always include a friendly 
       }
 
       history.push({ role: "assistant", content: parsed.reply || "" });
-      await this.state.storage.put(historyKey, history.slice(-10));
+      await this.state.storage.put(historyKey, history.slice(-20));
       this.logAI("chat", "User: " + message + " | Agent: " + (parsed.reply || "").substring(0, 200), {
         actions_taken: (parsed.actions || []).length,
         from, state_source: sourceUsed, context_size: contextEntities.length,
@@ -964,6 +997,14 @@ If no actions are needed, use an empty actions array. Always include a friendly 
     this.aiLog.push(entry);
     if (this.aiLog.length > 200) this.aiLog.splice(0, this.aiLog.length - 200);
     console.log("AI LOG [" + type + "]:", message);
+    // Persist to long-term storage (500-entry cap, survives DO hibernation).
+    // Fire-and-forget — logAI is called from sync-like paths.
+    this.state.storage.get("ai_log_persistent").then(stored => {
+      const log = stored || [];
+      log.push(entry);
+      if (log.length > 500) log.splice(0, log.length - 500);
+      return this.state.storage.put("ai_log_persistent", log);
+    }).catch(() => {});
   }
 
   // ========================================================================
