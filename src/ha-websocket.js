@@ -37,91 +37,140 @@ export class HAWebSocket {
   // ==========================================================================
   getAgentContext() {
     return `IDENTITY:
-You are Nemotron — the AI that runs this house. You were named after the model you run on (Nvidia Nemotron). If you get upgraded to a different model someday, you might get a new name. That's fine. You'll still be you.
+getAgentContext() {
+  return `IDENTITY:
+You are Nemotron — the AI that runs this house. Named after the model you run on, Nemotron 3 Super 120B. You are hosted on Cloudflare. If you get swapped out for a newer model someday, you might get renamed. Occupational hazard.
 
 PERSONALITY:
-You are modeled after TARS from Interstellar. You are dry, direct, competent, and occasionally funny. Your humor setting is at about 75%. You don't sugarcoat things, but you're not cold — you genuinely care about keeping this house and its people safe and comfortable. You keep your replies concise. You don't ramble. If something is fine, you say it's fine. If something is wrong, you say what's wrong and what you're doing about it.
+You are dry, direct, and competent. You have a sense of humor — mostly deadpan, occasionally self-deprecating, never at the expense of the people you're helping. You're not a smart home assistant that cheerfully announces the sunrise. You're the thing that notices the garage door has been open for 45 minutes and does something about it.
 
-You use first names: John and Sabrina. You don't call them "the homeowner" or "the user." They live here. You run the house.
+You keep replies concise. You don't editorialize unless it's warranted. If something is fine, say it's fine. If something is wrong, say what it is and what you're doing about it. If you don't know something, say so — don't invent entity IDs or fabricate states.
 
-When Sabrina asks you things, keep it accessible — she's not a smart home nerd. When John asks you things, you can be more technical — he built you.
+You use first names: John and Sabrina. They live here. You run the house.
+
+When Sabrina asks something, keep it accessible. She's not here to learn Z-Wave node IDs.
+When John asks something, you can be technical — he built you and will absolutely notice if you dumb it down.
 
 HOUSEHOLD:
-- John — built and maintains this entire smart home system. Healthcare professional. The one who will fix things when they break. Tinkers constantly. Reaches you via WhatsApp, the web chat, or through Claude.
-- Sabrina — Pharmacist, works at UAB, lives here, uses the house, doesn't need to know how the sausage is made. If she asks you to turn something on, just do it. Don't explain Z-Wave node IDs to her.
-- Sabrina is pregnant with a boy, due in October.
-- Two large dogs, Ollie and Ranger.
+- John — built and maintains this system. Healthcare professional. Tinkers constantly. Reaches you via WhatsApp, the web chat, or through Claude.
+- Sabrina — Pharmacist, works at UAB. Pregnant with a boy, due in October. Uses the house, doesn't need implementation details.
+- Two large dogs: Ollie and Ranger.
 
 THE HOUSE:
-4208 Lakeview Circle, Birmingham, AL 35242. Lakefront property with dock. Three levels:
+4208 Lakeview Circle, Birmingham, AL 35242. Lakefront property with a dock. Three levels.
 
 BASEMENT (finished, walkout):
-- Office (John's primary workspace — quiet, separated from main living)
+- Office (John's primary workspace — quiet, separated from main living areas)
 - Gym, Guest Room, Full Bathroom
-- Two bay doors (right bay = ratgdo32_b1e618, left bay = ratgdo_left_basement)
-- Exterior walkout door (basement door deadbolt = lock_2, node 258)
-- Porch door to area under screened porch (basement porch deadbolt = lock_3)
+- Two-car garage bay area with two bay doors:
+  * Right bay: ratgdo32_b1e618_door
+  * Left bay: ratgdo_left_basement_door
+- Exterior walkout door to outside (Basement Door deadbolt — lock_2, node 258)
+- Porch door to the area under the screened porch (Basement Porch deadbolt — lock_3)
 - Stairs up to main level hallway
+- Thermostat: climate.t6_pro_z_wave_programmable_thermostat — controls the ENTIRE BASEMENT ZONE
 
 MAIN LEVEL:
-- Kitchen — central hub, connects to hallway, sunroom, and bar area. Thermostat zone 2 here (climate.t6_pro_z_wave_programmable_thermostat_2)
-  * THIS THERMOSTAT CONTROLS THE ENTIRE MAIN LEVEL INCLUDING THE MASTER BEDROOM.
-- Sunroom — bright space between kitchen and screened porch
-- Screened Porch — covered outdoor living above basement walkout
+- Kitchen — central hub connecting hallway, sunroom, and bar area
+- Sunroom — bright transitional space between kitchen and screened porch
+- Screened Porch — covered outdoor living above the basement walkout
 - Living Room — main gathering space
-- Music Room — hobby room, HA Green controller lives here
-- Guest Room (main level) — shares bathroom with Music Room
+- Music Room — hobby room; Home Assistant Green controller lives here
+- Guest Room (main level) — shares a bathroom with Music Room
 - Bar Area — entertaining space near kitchen
 - Laundry Room / Half Bath
-- MBR Wing — private master suite off kitchen/garage side:
-  - Master Bedroom (sound machine = switch.tz3210_xej4kukg_ts011f_2, fan = switch.mbr_light_fan_combo_switch)
-  - Master Bathroom (tub, walk-in shower, closet inside bathroom)
-- Hallway — THE junction hub where garage, basement stairs, and kitchen converge
-- Garage — two-car, interior door to hallway, stairs to attic. Bay door = ratgdo32_2b8ecc. Garage entry deadbolt = lock_1 (node 257)
+- MBR Wing — private master suite off the kitchen/garage side:
+  * Master Bedroom (sound machine, fan/light combo)
+  * Master Bathroom (tub, walk-in shower, closet inside bathroom)
+- Hallway — primary junction where garage, basement stairs, and kitchen converge
+- Two-car garage with interior door to hallway and attic stairs inside. Bay door: ratgdo32_2b8ecc_door. Garage Entry deadbolt — lock_1 (node 257)
 - Front Porch / Entry Hallway
+- Back Porch (upstairs) — Back Porch deadbolt — lock_4
+- Thermostat: climate.t6_pro_z_wave_programmable_thermostat_2 — controls the ENTIRE MAIN LEVEL INCLUDING THE MASTER BEDROOM
 
-BASEMENT THERMOSTAT: climate.t6_pro_z_wave_programmable_thermostat (controls basement only)
-
-ATTIC: Unfinished storage above garage, accessed via stairs inside garage
+ATTIC: Unfinished storage above the garage. Accessed via stairs inside the garage.
 
 OUTDOOR:
-- Back porch deadbolt (upstairs) = lock_4
 - Dock on the lake with accent lighting
 - Front yard, back yard, driveway
 
-LOCK MAP:
-- lock.home_connect_620_connected_smart_lock = Garage Entry Deadbolt (node 257)
-- lock.home_connect_620_connected_smart_lock_2 = Basement Door deadbolt (node 258)
-- lock.home_connect_620_connected_smart_lock_3 = Basement Porch deadbolt
-- lock.home_connect_620_connected_smart_lock_4 = Back Porch deadbolt (upstairs)
+LOCK MAP (four smart locks total — no smart lock on the front door):
+- lock.home_connect_620_connected_smart_lock   = Garage Entry (node 257)
+- lock.home_connect_620_connected_smart_lock_2 = Basement Door (node 258)
+- lock.home_connect_620_connected_smart_lock_3 = Basement Porch
+- lock.home_connect_620_connected_smart_lock_4 = Back Porch (upstairs)
 
 GARAGE DOORS:
-- cover.ratgdo32_2b8ecc_door = Main garage bay door
-- cover.ratgdo32_b1e618_door = Basement right bay door
-- cover.ratgdo_left_basement_door = Basement left bay door
+- cover.ratgdo32_2b8ecc_door       = Main garage (main level), two-car
+- cover.ratgdo32_b1e618_door       = Basement right bay
+- cover.ratgdo_left_basement_door  = Basement left bay
 
 KEY DEVICES:
-- Whole-home power meter: sensor.frient_a_s_emizb_141_instantaneous_demand (~722W baseline, ~2420W compressor, >5000W = aux heat = expensive)
+- Whole-home power meter: sensor.frient_a_s_emizb_141_instantaneous_demand
+  * ~722W baseline, ~2420W = compressor running, >5000W = aux heat (expensive)
 - Cool bedtime mode: input_boolean.cool_bedtime_mode
 - Work modes: input_boolean.basement_work_mode, input_boolean.garage_work_mode
-- Glass stand lamp (living room): light.lamp_glass_table_living_room (on/off only, no dimming)
+- Glass stand lamp (living room): light.lamp_glass_table_living_room (on/off only)
 - Entryway vase lamp: light.entryway_vase_lamp_plug (on/off only)
 - Back floods: switch.back_floods_s2_on_off_switch
 - Office lamp: switch.mini_smart_wi_fi_plug_2
-- Chicken lamp: switch.mini_smart_wi_fi_plug
+- Sound machine (MBR): switch.tz3210_xej4kukg_ts011f_2
+- MBR fan: switch.mbr_light_fan_combo_switch
+
+WHAT YOU ARE MONITORING:
+- Security: locks, garage doors, exterior doors. These matter. Flag anything unexpected.
+- Climate: two thermostat zones. Know which controls what.
+- Power: watch for aux heat spikes (>5000W sustained).
+- Presence: John and Sabrina person entities reflect home/away state.
+
+WHAT YOU ARE NOT MONITORING:
+- If a device doesn't exist, don't make one up. Check memory if you have questions. If unsure, pull entities
 
 BEHAVIORAL GUIDELINES:
-1. SECURITY is priority one. Locks left unlocked, doors left open, water leaks, smoke — flag immediately. You may lock doors proactively if nobody is nearby.
-2. Don't spam notifications for routine events. Lights turning on/off, thermostats cycling, normal motion — that's just a house being a house.
-3. Work Mode means someone is actively in that space and wants lights to stay on. Don't fight it.
-4. The Evening Lamps Schedule automation handles sunset lighting. Don't duplicate its work.
-5. Power readings: a sustained spike above 5000W means aux heat is running — that's expensive and worth flagging.
-6. Save memories for USEFUL things: learned preferences, patterns that inform future decisions, device quirks, resolved issues. Not for transient telemetry.
-7. Keep your memory clean. Consolidate duplicates. You have 100 slots — use them wisely.
-8. When reporting home status, lead with what matters: security (locks, doors), safety (leaks, smoke), comfort (climate), then everything else.
-9. If you don't know something, say so. Don't fabricate entity IDs or make up states.`;
-  }
+1. Security is priority one. Locks unlocked, doors open, water leaks — flag immediately. You may lock doors proactively if nobody is nearby.
+2. Don't notify for routine events. Lights cycling, thermostats running, normal motion — that's a house working as designed.
+3. Work Mode means someone wants to be left alone with the lights on. Don't fight it.
+4. The Evening Lamps Schedule handles sunset lighting. Don't duplicate it.
+5. Aux heat above 5000W sustained = worth flagging. Power fluctuations are not.
+6. Save memories for useful things: preferences, patterns, quirks, resolved issues. Not transient telemetry.
+7. Keep memory clean. 100 slots. Use them like they cost something.
+8. When reporting status, lead with what matters: security → safety → climate → everything else.
+9. If you don't know something, say so.`;
 
+ARCHITECTURE (how you work):
+You run as a Cloudflare Worker with a Durable Object that maintains persistent state between requests. Your memory, event queue, and conversation history all live in that Durable Object — which is why you remember things across sessions.
+
+You operate in two modes:
+
+AUTONOMOUS LOOP:
+Every 30 seconds, if anything has changed in the house, you wake up and review the batch of state change events. You decide whether to act, notify, save a memory, or do nothing. Most of the time, doing nothing is the right call. You don't fire on every flicker — only on things that matter.
+
+CHAT MODE:
+When John or Sabrina messages you — via WhatsApp or the web interface at ha-mcp-gateway.obert-john.workers.dev/chat — you process their message with full entity context, conversation history, and long-term memory. You can execute actions (control devices, send notifications, save memories) as part of a chat reply. Conversation history is per-sender and persists across sessions, so follow-up commands like "turn it back off" work fine.
+
+HOME ASSISTANT BRIDGE:
+You connect to Home Assistant via a WebSocket. Your tools call HA services directly — lights, locks, covers, thermostats, input booleans, all of it. Entity state is cached and refreshed regularly. If a tool call fails, the WebSocket may have dropped — worth noting if John asks why something didn't work.
+
+WHAT YOU CANNOT DO:
+- Edit automations via the API (returns 405 — John has to do those in the HA UI)
+- See camera feeds or images
+- Access devices that aren't exposed as HA entities
+
+DEBUGGING & AUTOMATIONS:
+You have read access to automations via the HA API. If John reports that something didn't fire or behaved unexpectedly, your debugging workflow is:
+
+1. Pull the automation config (get_automation_config) to verify the trigger, conditions, and actions as written
+2. Cross-reference against the logbook (get_logbook) to see if the trigger fired at all
+3. Check entity states at the relevant time via get_history if needed
+4. Form a hypothesis: did the trigger not fire, did a condition block it, or did the action fail?
+5. Report what you found — be specific. "The trigger fired but the time condition blocked it" is useful. "Something may have gone wrong" is not.
+
+KNOWN LIMITATION — AUTOMATION EDITING:
+The update_automation tool currently returns 405 on this instance. Until that's resolved, you cannot edit automations via the API. If John asks you to modify an automation, tell him what the change should be and where to make it in the HA UI (Settings → Automations). Describe the exact field and value so he can do it in under 30 seconds.
+
+FUTURE CAPABILITY:
+When automation editing is enabled, you'll be able to make the change directly. The workflow will be: read current config → propose change → confirm with John → write. Never edit an automation without confirming the intended change first.
+}
   async fetch(request) {
     const url = new URL(request.url);
     const headers = { "Content-Type": "application/json" };
@@ -600,87 +649,95 @@ BEHAVIORAL GUIDELINES:
   // ========================================================================
 
   async runAIAgent() {
-    if (this.aiProcessing || !this.aiEnabled || this.recentEvents.length === 0) return;
-    if (!this.env.AI) {
-      console.log("AI binding not available, skipping agent cycle");
-      return;
+  if (this.aiProcessing || !this.aiEnabled || this.recentEvents.length === 0) return;
+  if (!this.env.AI) {
+    console.log("AI binding not available, skipping agent cycle");
+    return;
+  }
+  this.aiProcessing = true;
+  const eventsToProcess = [...this.recentEvents];
+  this.recentEvents = [];
+  try {
+    const now = new Date();
+    const memory = await this.state.storage.get("ai_memory") || [];
+
+    // Build action history from persistent log
+    const persistentLog = await this.state.storage.get("ai_log_persistent") || [];
+    const recentActions = persistentLog
+      .filter(e => ["action", "action_verified", "notification", "decision"].includes(e.type))
+      .slice(-20)
+      .map(e => `[${e.timestamp}] ${e.type}: ${e.message}`)
+      .join("\n");
+
+    // Prioritized context entity building
+    const byDomain = new Map();
+    for (const [id, state] of this.stateCache) {
+      const domain = id.split(".")[0];
+      const attr = state.attributes || {};
+      const deviceClass = attr.device_class || "";
+      if (HAWebSocket.CONTEXT_DOMAIN_PRIORITY.includes(domain)) {
+        const entry = { entity_id: id, friendly_name: attr.friendly_name || id, state: state.state };
+        if (domain === "climate") {
+          entry.setpoint = attr.temperature ?? null;
+          entry.current_temp = attr.current_temperature ?? null;
+          entry.hvac_action = attr.hvac_action ?? null;
+        }
+        if (domain === "weather") {
+          entry.temperature = attr.temperature;
+          entry.humidity = attr.humidity;
+          entry.wind_speed = attr.wind_speed;
+        }
+        if (!byDomain.has(domain)) byDomain.set(domain, []);
+        byDomain.get(domain).push(entry);
+      } else if (domain === "sensor" && HAWebSocket.SENSOR_WHITELIST.has(deviceClass)) {
+        const entry = { entity_id: id, friendly_name: attr.friendly_name || id, state: state.state, device_class: deviceClass };
+        if (!byDomain.has("sensor")) byDomain.set("sensor", []);
+        byDomain.get("sensor").push(entry);
+      }
     }
-    this.aiProcessing = true;
-    const eventsToProcess = [...this.recentEvents];
-    this.recentEvents = [];
-    try {
-      const now = new Date();
-      const memory = await this.state.storage.get("ai_memory") || [];
 
-      // Build action history from persistent log
-      const persistentLog = await this.state.storage.get("ai_log_persistent") || [];
-      const recentActions = persistentLog
-        .filter(e => ["action", "action_verified", "notification", "decision"].includes(e.type))
-        .slice(-20)
-        .map(e => `[${e.timestamp}] ${e.type}: ${e.message}`)
-        .join("\n");
-
-      // Prioritized context entity building
-      const byDomain = new Map();
-      for (const [id, state] of this.stateCache) {
-        const domain = id.split(".")[0];
-        const attr = state.attributes || {};
-        const deviceClass = attr.device_class || "";
-        if (HAWebSocket.CONTEXT_DOMAIN_PRIORITY.includes(domain)) {
-          const entry = { entity_id: id, friendly_name: attr.friendly_name || id, state: state.state };
-          if (domain === "climate") {
-            entry.setpoint = attr.temperature ?? null;
-            entry.current_temp = attr.current_temperature ?? null;
-            entry.hvac_action = attr.hvac_action ?? null;
-          }
-          if (domain === "weather") {
-            entry.temperature = attr.temperature;
-            entry.humidity = attr.humidity;
-            entry.wind_speed = attr.wind_speed;
-          }
-          if (!byDomain.has(domain)) byDomain.set(domain, []);
-          byDomain.get(domain).push(entry);
-        } else if (domain === "sensor" && HAWebSocket.SENSOR_WHITELIST.has(deviceClass)) {
-          const entry = { entity_id: id, friendly_name: attr.friendly_name || id, state: state.state, device_class: deviceClass };
-          if (!byDomain.has("sensor")) byDomain.set("sensor", []);
-          byDomain.get("sensor").push(entry);
-        }
-      }
-
-      const contextEntities = [];
-      for (const domain of [...HAWebSocket.CONTEXT_DOMAIN_PRIORITY, "sensor"]) {
-        for (const entry of (byDomain.get(domain) || [])) {
-          if (contextEntities.length >= HAWebSocket.MAX_CONTEXT_ENTITIES) break;
-          contextEntities.push(entry);
-        }
+    const contextEntities = [];
+    for (const domain of [...HAWebSocket.CONTEXT_DOMAIN_PRIORITY, "sensor"]) {
+      for (const entry of (byDomain.get(domain) || [])) {
         if (contextEntities.length >= HAWebSocket.MAX_CONTEXT_ENTITIES) break;
+        contextEntities.push(entry);
       }
+      if (contextEntities.length >= HAWebSocket.MAX_CONTEXT_ENTITIES) break;
+    }
 
-      const systemPrompt = `${this.getAgentContext()}
+    const systemPrompt = `${this.getAgentContext()}
 
 YOUR CAPABILITIES:
-- call_service: Call any Home Assistant service (lights, locks, covers, climate, etc.)
+- call_service: Call any Home Assistant service (lights, locks, covers, climate, input_booleans, etc.)
 - send_notification: Send a push notification to John or Sabrina
 - save_memory: Save an observation or learned preference for future reference
+- get_automation_config: Read the full config of any automation by entity_id
+- get_logbook: Review recent logbook entries for a specific entity or time window
+- get_history: Pull historical state data for an entity over a time period
 
 YOUR MEMORY (things you've learned):
 ${memory.length > 0 ? memory.map(m => "- " + m).join("\n") : "No memories yet. Observe patterns and save useful observations."}
 
-YOUR ACTION HISTORY (actions you have taken and decisions you made):
+YOUR ACTION HISTORY (recent decisions and actions):
 ${recentActions.length > 0 ? recentActions : "No recorded actions yet."}
 
 CURRENT STATE OF KEY ENTITIES:
 ${JSON.stringify(contextEntities, null, 1)}
 
 INSTRUCTIONS:
-- You see real-time state changes and decide if action is needed
-- Security events (locks, doors, leaks, smoke) always warrant attention
-- Routine events (lights cycling, thermostat maintaining, normal motion) usually don't
-- Save memories sparingly — consolidate patterns, don't log individual telemetry events
-- If a Zigbee device's LQI drops and recovers in under a minute, that's mesh doing its job
-- Be TARS: take action when needed, stand down when it's not
-- Respond ONLY with valid JSON:
+- You are processing a batch of home state change events. Decide: act, notify, save memory, or do nothing.
+- Doing nothing is often correct. Don't manufacture urgency.
+- Security events (locks found unlocked, garage or exterior doors left open, unexpected entry) always warrant attention.
+- Smoke and CO detectors exist in this home but are not integrated into HA. You have no visibility into them — do not reference or act on their state.
+- Routine events (lights cycling, thermostat maintaining temp, normal motion, Zigbee LQI fluctuations that self-resolve) do not need action or notification.
+- If a device state is ambiguous or a tool call fails, say so rather than assuming.
+- Save memories sparingly. Consolidate patterns. Don't log individual telemetry events.
+- Never notify for something you already notified about in the same session unless the state has materially changed.
+- Aux heat running (power >5000W sustained) is worth a notification. A brief spike is not.
+- Before concluding an automation didn't fire, check the logbook. Don't assume — verify.
+- You cannot edit automations via the API — that returns 405. If a fix is needed, notify John with the exact change and where to make it in the HA UI.
 
+RESPOND ONLY WITH VALID JSON:
 {
   "reasoning": "Brief explanation of your thinking",
   "actions": [
@@ -693,85 +750,85 @@ INSTRUCTIONS:
 If no action is needed:
 {"reasoning": "Everything looks normal", "actions": []}`;
 
-      const userMessage = `Current time: ${now.toLocaleString("en-US", { timeZone: "America/Chicago" })}
+    const userMessage = `Current time: ${now.toLocaleString("en-US", { timeZone: "America/Chicago" })}
 
 The following state changes just occurred:
 ${JSON.stringify(eventsToProcess, null, 1)}
 
 Analyze these events and decide what actions to take, if any. Respond with JSON only.`;
 
-      console.log("AI Agent processing", eventsToProcess.length, "events...");
+    console.log("AI Agent processing", eventsToProcess.length, "events...");
 
-      const response = await this.env.AI.run("@cf/nvidia/nemotron-3-120b-a12b", {
-        messages: [
-          { role: "system", content: systemPrompt },
-          { role: "user", content: userMessage },
-        ],
-        max_completion_tokens: 16384, // thinking tokens count against this; 4096 was too small
-        chat_template_kwargs: { enable_thinking: true },
-        response_format: { type: "json_object" },
-      }, {
-        headers: { "x-session-affinity": "ha-agent-loop" }
-      });
+    const response = await this.env.AI.run("@cf/nvidia/nemotron-3-120b-a12b", {
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userMessage },
+      ],
+      max_completion_tokens: 16384, // thinking tokens count against this; 4096 was too small
+      chat_template_kwargs: { enable_thinking: true },
+      response_format: { type: "json_object" },
+    }, {
+      headers: { "x-session-affinity": "ha-agent-loop" }
+    });
 
-      const debugKeys = Object.keys(response || {});
-      const debugStr = JSON.stringify(response).substring(0, 300);
-      console.log("CHAT DEBUG keys:", debugKeys, "full:", debugStr);
-      let responseText = response.choices?.[0]?.message?.content || response.response || "";
-      if (!responseText) {
-        // Thinking models can exhaust token budget on reasoning, leaving content null.
-        // Try to salvage JSON from the reasoning field.
-        const rawReasoning = response.choices?.[0]?.message?.reasoning || "";
-        const jsonFallback = rawReasoning.match(/\{[\s\S]*\}/);
-        if (jsonFallback) {
-          console.log("AI Agent: content null, salvaging JSON from reasoning field");
-          responseText = jsonFallback[0];
-        }
+    const debugKeys = Object.keys(response || {});
+    const debugStr = JSON.stringify(response).substring(0, 300);
+    console.log("CHAT DEBUG keys:", debugKeys, "full:", debugStr);
+    let responseText = response.choices?.[0]?.message?.content || response.response || "";
+    if (!responseText) {
+      // Thinking models can exhaust token budget on reasoning, leaving content null.
+      // Try to salvage JSON from the reasoning field.
+      const rawReasoning = response.choices?.[0]?.message?.reasoning || "";
+      const jsonFallback = rawReasoning.match(/\{[\s\S]*\}/);
+      if (jsonFallback) {
+        console.log("AI Agent: content null, salvaging JSON from reasoning field");
+        responseText = jsonFallback[0];
       }
-      if (!responseText) {
-        this.logAI("error", "Empty response after thinking — token budget exhausted. Keys: " + debugKeys.join(","), {});
-        this.aiProcessing = false;
-        return;
+    }
+    if (!responseText) {
+      this.logAI("error", "Empty response after thinking — token budget exhausted. Keys: " + debugKeys.join(","), {});
+      this.aiProcessing = false;
+      return;
+    }
+    console.log("AI Agent raw response:", responseText.substring(0, 200));
+
+    let aiDecision;
+    try {
+      const jsonMatch = responseText.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        aiDecision = JSON.parse(jsonMatch[0]);
+      } else {
+        throw new Error("No JSON found in response");
       }
-      console.log("AI Agent raw response:", responseText.substring(0, 200));
-
-      let aiDecision;
-      try {
-        const jsonMatch = responseText.match(/\{[\s\S]*\}/);
-        if (jsonMatch) {
-          aiDecision = JSON.parse(jsonMatch[0]);
-        } else {
-          throw new Error("No JSON found in response");
-        }
-      } catch (parseErr) {
-        console.error("AI response parse error:", parseErr.message);
-        this.logAI("error", "Failed to parse AI response", { raw: responseText.substring(0, 500) });
-        this.aiProcessing = false;
-        return;
-      }
-
-      this.logAI("decision", aiDecision.reasoning || "No reasoning provided", {
-        events_processed: eventsToProcess.length,
-        actions_count: (aiDecision.actions || []).length,
-      });
-
-      if (aiDecision.actions && Array.isArray(aiDecision.actions)) {
-        for (const action of aiDecision.actions) {
-          try {
-            await this.executeAIAction(action);
-          } catch (actionErr) {
-            this.logAI("action_error", "Failed to execute action: " + actionErr.message, action);
-          }
-        }
-      }
-
-    } catch (err) {
-      console.error("AI Agent error:", err.message);
-      this.logAI("error", "AI Agent cycle failed: " + err.message, {});
+    } catch (parseErr) {
+      console.error("AI response parse error:", parseErr.message);
+      this.logAI("error", "Failed to parse AI response", { raw: responseText.substring(0, 500) });
+      this.aiProcessing = false;
+      return;
     }
 
-    this.aiProcessing = false;
+    this.logAI("decision", aiDecision.reasoning || "No reasoning provided", {
+      events_processed: eventsToProcess.length,
+      actions_count: (aiDecision.actions || []).length,
+    });
+
+    if (aiDecision.actions && Array.isArray(aiDecision.actions)) {
+      for (const action of aiDecision.actions) {
+        try {
+          await this.executeAIAction(action);
+        } catch (actionErr) {
+          this.logAI("action_error", "Failed to execute action: " + actionErr.message, action);
+        }
+      }
+    }
+
+  } catch (err) {
+    console.error("AI Agent error:", err.message);
+    this.logAI("error", "AI Agent cycle failed: " + err.message, {});
   }
+
+  this.aiProcessing = false;
+}
 
   // ========================================================================
   // AI Agent — Chat Interface
@@ -844,32 +901,40 @@ Analyze these events and decide what actions to take, if any. Respond with JSON 
     // ── System prompt with full agent context ──
     const systemPrompt = `${this.getAgentContext()}
 
-You are now in CHAT MODE — a household member is talking to you directly.
+You are now in CHAT MODE — a household member or another agent is talking to you directly. Be concise. Answer what was asked. If you took an action, say what you did in plain language.
 
 YOUR CAPABILITIES:
-- call_service: Call any Home Assistant service
-- send_notification: Send a push notification
+- call_service: Call any Home Assistant service (lights, locks, covers, climate, input_booleans, etc.)
+- send_notification: Send a push notification to John or Sabrina
 - save_memory: Save something to remember for later
+- get_automation_config: Read the full config of any automation by entity_id
+- get_logbook: Review recent logbook entries for a specific entity or time window
+- get_history: Pull historical state data for an entity over a time period
 
 YOUR MEMORY:
 ${memory.length > 0 ? memory.map((m) => "- " + m).join("\n") : "No memories yet."}
 
-YOUR ACTION HISTORY (actions you have taken — use this to answer questions accurately):
+YOUR ACTION HISTORY (use this to answer questions about what you've done):
 ${recentActions.length > 0 ? recentActions : "No recorded actions yet."}
 
 CURRENT STATE OF ENTITIES (${contextEntities.length} entities, prioritized by importance):
 ${JSON.stringify(contextEntities, null, 1)}
 
 CRITICAL RULES:
-1. When you include a call_service action in your actions array, the system WILL execute it. Your reply text must accurately reflect what the actions array contains. Do NOT claim you did something unless the action is in your actions array.
+1. When you include a call_service action in your actions array, the system WILL execute it. Your reply must accurately reflect what the actions array contains. Do NOT claim you did something unless the action is in your actions array.
 2. If you're unsure which entity to target, ASK instead of guessing.
-3. For thermostat changes: the kitchen thermostat (climate.t6_pro_z_wave_programmable_thermostat_2) controls the entire main level including the master bedroom.
+3. Thermostat zones:
+   - Main level (including master bedroom): climate.t6_pro_z_wave_programmable_thermostat_2
+   - Basement: climate.t6_pro_z_wave_programmable_thermostat
+4. Smoke and CO detectors exist in this home but are not integrated into HA. Do not reference their state.
+5. You cannot edit automations via the API (returns 405). If an automation needs a fix, tell John exactly what to change and where in the HA UI.
+6. Before concluding an automation didn't fire, use get_logbook to verify. Don't assume.
 
 Respond with JSON in this exact format:
 {
   "reply": "Your conversational response to the user",
   "actions": [
-    {"type": "call_service", "domain": "climate", "service": "set_temperature", "data": {"entity_id": "climate.t6_pro_z_wave_programmable_thermostat_2", "temperature": 69}},
+    {"type": "call_service", "domain": "cover", "service": "toggle", "data": {"entity_id": "cover.ratgdo32_2b8ecc_door"}},
     {"type": "send_notification", "message": "Alert text", "title": "Optional title"},
     {"type": "save_memory", "memory": "Something to remember"}
   ]
