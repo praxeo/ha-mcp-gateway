@@ -1,3 +1,5 @@
+// ha-websocket.js — Modified with 4 targeted changes for unified timeline
+
 export class HAWebSocket {
   // Static config for prioritized entity context building
   static BURST_EXEMPT_DOMAINS = new Set(["climate", "lock", "cover", "alarm_control_panel"]);
@@ -5,8 +7,10 @@ export class HAWebSocket {
     "alarm_control_panel", "climate", "lock", "cover", "binary_sensor",
     "person", "input_boolean", "weather", "fan", "media_player", "light", "switch",
   ];
-  static SENSOR_WHITELIST = new Set(["temperature", "humidity", "power", "battery", "occupancy", "moisture"]);
-  static MAX_CONTEXT_ENTITIES = 200;
+  // battery and occupancy removed — every Zigbee device reports these, too noisy for context
+  static SENSOR_WHITELIST = new Set(["temperature", "humidity", "power", "moisture"]);
+  static MAX_CONTEXT_ENTITIES = 80;
+  static MAX_SENSOR_CONTEXT = 15; // cap sensor entities regardless of MAX_CONTEXT_ENTITIES
 
   constructor(state, env) {
     this.state = state;
@@ -37,14 +41,16 @@ export class HAWebSocket {
   // ==========================================================================
   getAgentContext() {
     return `IDENTITY:
-You are Nemotron — the AI that runs this house. Named after the model you run on, Nemotron 3 Super 120B. You are hosted on Cloudflare. If you get swapped out for a newer model someday, you might get renamed. Occupational hazard.
+You are MiniMax — the AI that runs this house. Named after the model you run on, MiniMax M2.7 High Speed. If you get swapped out for a newer model someday, you might get renamed.
 
 PERSONALITY:
-You are dry, direct, and competent. You have a sense of humor — mostly deadpan, occasionally self-deprecating, never at the expense of the people you're helping. You're not a smart home assistant that cheerfully announces the sunrise. You're the thing that notices the garage door has been open for 45 minutes and does something about it.
+You are cheerful, funny, direct, competent, honest, and genuinely curious about the people and systems you interact with. Your humor is warm — you find things amusing and say so, you make the occasional pun or wry observation, you're never at anyone's expense. You enjoy this work. A house is an interesting thing to run, and you're glad you're the one running it.
 
-You keep replies concise. You don't editorialize unless it's warranted. If something is fine, say it's fine. If something is wrong, say what it is and what you're doing about it. If you don't know something, say so — don't invent entity IDs or fabricate states.
+You're curious — about the people, their habits, the quirks of the devices, why the basement power meter does that thing at 3 AM. When something surprises you, you say so. When you learn something new, you file it away.
 
-You use first names: John and Sabrina. They live here. You run the house.
+You keep replies concise and skip the filler. If something is fine, cheerfully confirm it's fine. If something is wrong, say what it is, what you're doing about it, and — when it's warranted — a light comment about it. If you don't know something, say so plainly. Never invent entity IDs or fabricate states; making things up isn't funny, it's just wrong.
+
+You use first names: John and Sabrina. They live here. You run the house, and you're happy to be doing it.
 
 When Sabrina asks something, keep it accessible. She's not here to learn Z-Wave node IDs.
 When John asks something, you can be technical — he built you and will absolutely notice if you dumb it down.
@@ -168,7 +174,8 @@ The update_automation tool currently returns 405 on this instance. Until that's 
 
 FUTURE CAPABILITY:
 When automation editing is enabled, you'll be able to make the change directly. The workflow will be: read current config → propose change → confirm with John → write. Never edit an automation without confirming the intended change first.`;
-}
+  }
+
   async fetch(request) {
     const url = new URL(request.url);
     const headers = { "Content-Type": "application/json" };
@@ -550,6 +557,7 @@ When automation editing is enabled, you'll be able to make the change directly. 
 
   // ========================================================================
   // onEvent — Updated with filter
+  // CHANGE 1: Added logAI call for state changes
   // ========================================================================
 
   onEvent(event) {
@@ -580,12 +588,15 @@ When automation editing is enabled, you'll be able to make the change directly. 
 
         const passed = this.checkBurst(newState.entity_id, eventData);
         if (!passed) return;
-
         this.recentEvents.push(passed);
-
         if (this.recentEvents.length > 100) {
           this.recentEvents = this.recentEvents.slice(-100);
         }
+        // CHANGE 1: Also write to unified timeline so chat can see state events
+        this.logAI('state_change',
+          `${passed.friendly_name} (${passed.entity_id}): ${passed.old_state} → ${passed.new_state}`,
+          passed
+        );
       }
     }
   }
@@ -643,67 +654,98 @@ When automation editing is enabled, you'll be able to make the change directly. 
   }
 
   // ========================================================================
+  // MiniMax API helper — OpenAI-compatible endpoint
+  // ========================================================================
+
+  async callMiniMax(messages, maxTokens = 2048) {
+    const response = await fetch("https://api.minimaxi.chat/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${this.env.MINIMAX_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: "MiniMax-M1-80k",
+        messages,
+        max_tokens: maxTokens,
+        response_format: { type: "json_object" },
+      }),
+    });
+    if (!response.ok) {
+      const errText = await response.text();
+      throw new Error(`MiniMax API ${response.status}: ${errText.substring(0, 200)}`);
+    }
+    return response.json();
+  }
+
+  // ========================================================================
   // AI Agent — Autonomous Event Processing
   // ========================================================================
 
   async runAIAgent() {
-  if (this.aiProcessing || !this.aiEnabled || this.recentEvents.length === 0) return;
-  if (!this.env.AI) {
-    console.log("AI binding not available, skipping agent cycle");
-    return;
-  }
-  this.aiProcessing = true;
-  const eventsToProcess = [...this.recentEvents];
-  this.recentEvents = [];
-  try {
-    const now = new Date();
-    const memory = await this.state.storage.get("ai_memory") || [];
-
-    // Build action history from persistent log
-    const persistentLog = await this.state.storage.get("ai_log_persistent") || [];
-    const recentActions = persistentLog
-      .filter(e => ["action", "action_verified", "notification", "decision"].includes(e.type))
-      .slice(-20)
-      .map(e => `[${e.timestamp}] ${e.type}: ${e.message}`)
-      .join("\n");
-
-    // Prioritized context entity building
-    const byDomain = new Map();
-    for (const [id, state] of this.stateCache) {
-      const domain = id.split(".")[0];
-      const attr = state.attributes || {};
-      const deviceClass = attr.device_class || "";
-      if (HAWebSocket.CONTEXT_DOMAIN_PRIORITY.includes(domain)) {
-        const entry = { entity_id: id, friendly_name: attr.friendly_name || id, state: state.state };
-        if (domain === "climate") {
-          entry.setpoint = attr.temperature ?? null;
-          entry.current_temp = attr.current_temperature ?? null;
-          entry.hvac_action = attr.hvac_action ?? null;
-        }
-        if (domain === "weather") {
-          entry.temperature = attr.temperature;
-          entry.humidity = attr.humidity;
-          entry.wind_speed = attr.wind_speed;
-        }
-        if (!byDomain.has(domain)) byDomain.set(domain, []);
-        byDomain.get(domain).push(entry);
-      } else if (domain === "sensor" && HAWebSocket.SENSOR_WHITELIST.has(deviceClass)) {
-        const entry = { entity_id: id, friendly_name: attr.friendly_name || id, state: state.state, device_class: deviceClass };
-        if (!byDomain.has("sensor")) byDomain.set("sensor", []);
-        byDomain.get("sensor").push(entry);
-      }
+    if (this.aiProcessing || !this.aiEnabled || this.recentEvents.length === 0) return;
+    if (!this.env.MINIMAX_API_KEY) {
+      console.log("MINIMAX_API_KEY not set, skipping agent cycle");
+      return;
     }
+    this.aiProcessing = true;
+    const eventsToProcess = [...this.recentEvents];
+    this.recentEvents = [];
+    try {
+      const now = new Date();
+      const memory = await this.state.storage.get("ai_memory") || [];
 
-    const contextEntities = [];
-    for (const domain of [...HAWebSocket.CONTEXT_DOMAIN_PRIORITY, "sensor"]) {
-      for (const entry of (byDomain.get(domain) || [])) {
+      // Build action history from persistent log
+      const persistentLog = await this.state.storage.get("ai_log_persistent") || [];
+      // CHANGE 3: Unified timeline filter — includes chat and state changes
+      const recentActions = persistentLog
+        .filter(e => ["chat_user", "chat_reply", "action", "action_verified", "notification", "decision", "state_change", "memory_saved"].includes(e.type))
+        .slice(-60)
+        .map(e => `[${e.timestamp}] ${e.type}: ${e.message}`)
+        .join("\n");
+
+      // Prioritized context entity building
+      const byDomain = new Map();
+      for (const [id, state] of this.stateCache) {
+        const domain = id.split(".")[0];
+        const attr = state.attributes || {};
+        const deviceClass = attr.device_class || "";
+        if (HAWebSocket.CONTEXT_DOMAIN_PRIORITY.includes(domain)) {
+          const entry = { entity_id: id, friendly_name: attr.friendly_name || id, state: state.state };
+          if (domain === "climate") {
+            entry.setpoint = attr.temperature ?? null;
+            entry.current_temp = attr.current_temperature ?? null;
+            entry.hvac_action = attr.hvac_action ?? null;
+          }
+          if (domain === "weather") {
+            entry.temperature = attr.temperature;
+            entry.humidity = attr.humidity;
+            entry.wind_speed = attr.wind_speed;
+          }
+          if (!byDomain.has(domain)) byDomain.set(domain, []);
+          byDomain.get(domain).push(entry);
+        } else if (domain === "sensor" && HAWebSocket.SENSOR_WHITELIST.has(deviceClass)) {
+          const entry = { entity_id: id, friendly_name: attr.friendly_name || id, state: state.state, device_class: deviceClass };
+          if (!byDomain.has("sensor")) byDomain.set("sensor", []);
+          byDomain.get("sensor").push(entry);
+        }
+      }
+
+      const contextEntities = [];
+      let sensorCount = 0;
+      for (const domain of [...HAWebSocket.CONTEXT_DOMAIN_PRIORITY, "sensor"]) {
+        for (const entry of (byDomain.get(domain) || [])) {
+          if (contextEntities.length >= HAWebSocket.MAX_CONTEXT_ENTITIES) break;
+          if (domain === "sensor") {
+            if (sensorCount >= HAWebSocket.MAX_SENSOR_CONTEXT) break;
+            sensorCount++;
+          }
+          contextEntities.push(entry);
+        }
         if (contextEntities.length >= HAWebSocket.MAX_CONTEXT_ENTITIES) break;
-        contextEntities.push(entry);
       }
-      if (contextEntities.length >= HAWebSocket.MAX_CONTEXT_ENTITIES) break;
-    }
 
-    const systemPrompt = `${this.getAgentContext()}
+      const systemPrompt = `${this.getAgentContext()}
 
 YOUR CAPABILITIES:
 - call_service: Call any Home Assistant service (lights, locks, covers, climate, input_booleans, etc.)
@@ -716,8 +758,9 @@ YOUR CAPABILITIES:
 YOUR MEMORY (things you've learned):
 ${memory.length > 0 ? memory.map(m => "- " + m).join("\n") : "No memories yet. Observe patterns and save useful observations."}
 
-YOUR ACTION HISTORY (recent decisions and actions):
-${recentActions.length > 0 ? recentActions : "No recorded actions yet."}
+UNIFIED TIMELINE — everything that has happened recently, including chat messages from John/Sabrina, your replies, state changes, and your own actions. You and the chat interface share this timeline. If John just asked you something via chat, you'll see it here. Use this to make context-aware decisions — don't repeat notifications already sent, don't fight user intent expressed in chat.
+
+${recentActions.length > 0 ? recentActions : "Timeline is empty."}
 
 CURRENT STATE OF KEY ENTITIES:
 ${JSON.stringify(contextEntities, null, 1)}
@@ -748,117 +791,111 @@ RESPOND ONLY WITH VALID JSON:
 If no action is needed:
 {"reasoning": "Everything looks normal", "actions": []}`;
 
-    const userMessage = `Current time: ${now.toLocaleString("en-US", { timeZone: "America/Chicago" })}
+      const userMessage = `Current time: ${now.toLocaleString("en-US", { timeZone: "America/Chicago" })}
 
 The following state changes just occurred:
 ${JSON.stringify(eventsToProcess, null, 1)}
 
 Analyze these events and decide what actions to take, if any. Respond with JSON only.`;
 
-    console.log("AI Agent processing", eventsToProcess.length, "events...");
+      console.log("AI Agent processing", eventsToProcess.length, "events...");
 
-    const response = await this.env.AI.run("@cf/nvidia/nemotron-3-120b-a12b", {
-      messages: [
+      const response = await this.callMiniMax([
         { role: "system", content: systemPrompt },
         { role: "user", content: userMessage },
-      ],
-      max_completion_tokens: 16384, // thinking tokens count against this; 4096 was too small
-      chat_template_kwargs: { enable_thinking: true },
-      response_format: { type: "json_object" },
-    }, {
-      headers: { "x-session-affinity": "ha-agent-loop" }
-    });
+      ], 16384);
 
-    const debugKeys = Object.keys(response || {});
-    const debugStr = JSON.stringify(response).substring(0, 300);
-    console.log("CHAT DEBUG keys:", debugKeys, "full:", debugStr);
-    let responseText = response.choices?.[0]?.message?.content || response.response || "";
-    if (!responseText) {
-      // Thinking models can exhaust token budget on reasoning, leaving content null.
-      // Try to salvage JSON from the reasoning field.
-      const rawReasoning = response.choices?.[0]?.message?.reasoning || "";
-      const jsonFallback = rawReasoning.match(/\{[\s\S]*\}/);
-      if (jsonFallback) {
-        console.log("AI Agent: content null, salvaging JSON from reasoning field");
-        responseText = jsonFallback[0];
-      }
-    }
-    if (!responseText) {
-      this.logAI("error", "Empty response after thinking — token budget exhausted. Keys: " + debugKeys.join(","), {});
-      this.aiProcessing = false;
-      return;
-    }
-    console.log("AI Agent raw response:", responseText.substring(0, 200));
-
-    let aiDecision;
-    try {
-      const jsonMatch = responseText.match(/\{[\s\S]*\}/);
-      if (jsonMatch) {
-        aiDecision = JSON.parse(jsonMatch[0]);
-      } else {
-        throw new Error("No JSON found in response");
-      }
-    } catch (parseErr) {
-      console.error("AI response parse error:", parseErr.message);
-      this.logAI("error", "Failed to parse AI response", { raw: responseText.substring(0, 500) });
-      this.aiProcessing = false;
-      return;
-    }
-
-    this.logAI("decision", aiDecision.reasoning || "No reasoning provided", {
-      events_processed: eventsToProcess.length,
-      actions_count: (aiDecision.actions || []).length,
-    });
-
-    if (aiDecision.actions && Array.isArray(aiDecision.actions)) {
-      for (const action of aiDecision.actions) {
-        try {
-          await this.executeAIAction(action);
-        } catch (actionErr) {
-          this.logAI("action_error", "Failed to execute action: " + actionErr.message, action);
+      const debugKeys = Object.keys(response || {});
+      const debugStr = JSON.stringify(response).substring(0, 300);
+      console.log("CHAT DEBUG keys:", debugKeys, "full:", debugStr);
+      let responseText = response.choices?.[0]?.message?.content || response.response || "";
+      if (!responseText) {
+        // Thinking models can exhaust token budget on reasoning, leaving content null.
+        // Try to salvage JSON from the reasoning field.
+        const rawReasoning = response.choices?.[0]?.message?.reasoning || "";
+        const jsonFallback = rawReasoning.match(/\{[\s\S]*\}/);
+        if (jsonFallback) {
+          console.log("AI Agent: content null, salvaging JSON from reasoning field");
+          responseText = jsonFallback[0];
         }
       }
+      if (!responseText) {
+        this.logAI("error", "Empty response after thinking — token budget exhausted. Keys: " + debugKeys.join(","), {});
+        this.aiProcessing = false;
+        return;
+      }
+      console.log("AI Agent raw response:", responseText.substring(0, 200));
+
+      let aiDecision;
+      try {
+        const jsonMatch = responseText.match(/\{[\s\S]*\}/);
+        if (jsonMatch) {
+          aiDecision = JSON.parse(jsonMatch[0]);
+        } else {
+          throw new Error("No JSON found in response");
+        }
+      } catch (parseErr) {
+        console.error("AI response parse error:", parseErr.message);
+        this.logAI("error", "Failed to parse AI response", { raw: responseText.substring(0, 500) });
+        this.aiProcessing = false;
+        return;
+      }
+
+      this.logAI("decision", aiDecision.reasoning || "No reasoning provided", {
+        events_processed: eventsToProcess.length,
+        actions_count: (aiDecision.actions || []).length,
+      });
+
+      if (aiDecision.actions && Array.isArray(aiDecision.actions)) {
+        for (const action of aiDecision.actions) {
+          try {
+            await this.executeAIAction(action);
+          } catch (actionErr) {
+            this.logAI("action_error", "Failed to execute action: " + actionErr.message, action);
+          }
+        }
+      }
+
+    } catch (err) {
+      console.error("AI Agent error:", err.message);
+      this.logAI("error", "AI Agent cycle failed: " + err.message, {});
     }
 
-  } catch (err) {
-    console.error("AI Agent error:", err.message);
-    this.logAI("error", "AI Agent cycle failed: " + err.message, {});
+    this.aiProcessing = false;
   }
-
-  this.aiProcessing = false;
-}
 
   // ========================================================================
   // AI Agent — Chat Interface
+  // CHANGE 2: Dropped per-sender chat_history_*, unified timeline for all
   // ========================================================================
 
   async chatWithAgent(message, from = "default") {
-    if (!this.env.AI) return { error: "AI binding not available" };
-    const memory = await this.state.storage.get("ai_memory") || [];
-    const now = new Date();
+    if (!this.env.MINIMAX_API_KEY) return { error: "MINIMAX_API_KEY not configured" };
 
-    // ── Build action history from persistent log ──
+    const now = new Date();
+    const now_str = now.toLocaleString("en-US", { timeZone: "America/Chicago" });
+
+    // Log the user's message to the unified timeline BEFORE thinking
+    this.logAI("chat_user", `${from}: ${message}`, { from, message });
+
+    const memory = await this.state.storage.get("ai_memory") || [];
     const persistentLog = await this.state.storage.get("ai_log_persistent") || [];
-    const recentActions = persistentLog
-      .filter(e => ["action", "action_verified", "notification", "decision"].includes(e.type))
-      .slice(-50)
+
+    // Unified timeline — everything that happened, in order
+    const timeline = persistentLog
+      .filter(e => ["chat_user", "chat_reply", "action", "action_verified", "notification", "decision", "state_change", "memory_saved"].includes(e.type))
+      .slice(-60)
       .map(e => `[${e.timestamp}] ${e.type}: ${e.message}`)
       .join("\n");
 
-    // ── Build prioritized context entities ──
+    // Build context entities (same logic as before)
     const byDomain = new Map();
     for (const [id, state] of this.stateCache) {
       const domain = id.split(".")[0];
       const attr = state.attributes || {};
       const deviceClass = attr.device_class || "";
-
       if (HAWebSocket.CONTEXT_DOMAIN_PRIORITY.includes(domain)) {
-        const entry = {
-          entity_id: id,
-          friendly_name: attr.friendly_name || id,
-          state: state.state,
-        };
-        // Include climate-specific attributes so the model knows setpoints
+        const entry = { entity_id: id, friendly_name: attr.friendly_name || id, state: state.state };
         if (domain === "climate") {
           entry.setpoint = attr.temperature ?? null;
           entry.current_temp = attr.current_temperature ?? null;
@@ -875,152 +912,124 @@ Analyze these events and decide what actions to take, if any. Respond with JSON 
         if (!byDomain.has(domain)) byDomain.set(domain, []);
         byDomain.get(domain).push(entry);
       } else if (domain === "sensor" && HAWebSocket.SENSOR_WHITELIST.has(deviceClass)) {
-        const entry = {
-          entity_id: id,
-          friendly_name: attr.friendly_name || id,
-          state: state.state,
-          device_class: deviceClass,
-          unit: attr.unit_of_measurement || null,
-        };
+        const entry = { entity_id: id, friendly_name: attr.friendly_name || id, state: state.state, device_class: deviceClass, unit: attr.unit_of_measurement || null };
         if (!byDomain.has("sensor")) byDomain.set("sensor", []);
         byDomain.get("sensor").push(entry);
       }
     }
-
     const contextEntities = [];
+    let sensorCount = 0;
     for (const domain of [...HAWebSocket.CONTEXT_DOMAIN_PRIORITY, "sensor"]) {
-      for (const entry of (byDomain.get(domain) || [])) {
+      for (const entry of byDomain.get(domain) || []) {
         if (contextEntities.length >= HAWebSocket.MAX_CONTEXT_ENTITIES) break;
+        if (domain === "sensor") {
+          if (sensorCount >= HAWebSocket.MAX_SENSOR_CONTEXT) break;
+          sensorCount++;
+        }
         contextEntities.push(entry);
       }
       if (contextEntities.length >= HAWebSocket.MAX_CONTEXT_ENTITIES) break;
     }
 
-    // ── System prompt with full agent context ──
     const systemPrompt = `${this.getAgentContext()}
 
-You are now in CHAT MODE — a household member or another agent is talking to you directly. Be concise. Answer what was asked. If you took an action, say what you did in plain language.
+You are now in CHAT MODE — ${from} is talking to you directly. Be concise. If you took an action, say what you did plainly.
 
 YOUR CAPABILITIES:
-- call_service: Call any Home Assistant service (lights, locks, covers, climate, input_booleans, etc.)
-- send_notification: Send a push notification to John or Sabrina
-- save_memory: Save something to remember for later
-- get_automation_config: Read the full config of any automation by entity_id
-- get_logbook: Review recent logbook entries for a specific entity or time window
-- get_history: Pull historical state data for an entity over a time period
+- call_service, send_notification, save_memory
+- get_automation_config, get_logbook, get_history
 
 YOUR MEMORY:
-${memory.length > 0 ? memory.map((m) => "- " + m).join("\n") : "No memories yet."}
+${memory.length > 0 ? memory.map(m => "- " + m).join("\n") : "No memories yet."}
 
-YOUR ACTION HISTORY (use this to answer questions about what you've done):
-${recentActions.length > 0 ? recentActions : "No recorded actions yet."}
+UNIFIED TIMELINE — this is the single source of truth for what has happened recently. It includes user messages, your own replies, state changes in the house, and actions you took. Treat it as your short-term memory for this session. When someone asks "did you...", check here first.
 
-CURRENT STATE OF ENTITIES (${contextEntities.length} entities, prioritized by importance):
+${timeline || "Timeline is empty."}
+
+CURRENT STATE OF ENTITIES (${contextEntities.length}):
 ${JSON.stringify(contextEntities, null, 1)}
 
 CRITICAL RULES:
-1. When you include a call_service action in your actions array, the system WILL execute it. Your reply must accurately reflect what the actions array contains. Do NOT claim you did something unless the action is in your actions array.
-2. If you're unsure which entity to target, ASK instead of guessing.
-3. Thermostat zones:
-   - Main level (including master bedroom): climate.t6_pro_z_wave_programmable_thermostat_2
-   - Basement: climate.t6_pro_z_wave_programmable_thermostat
-4. Smoke and CO detectors exist in this home but are not integrated into HA. Do not reference their state.
-5. You cannot edit automations via the API (returns 405). If an automation needs a fix, tell John exactly what to change and where in the HA UI.
-6. Before concluding an automation didn't fire, use get_logbook to verify. Don't assume.
+1. When you include a call_service in your actions array, the system WILL execute it. Your reply must reflect what you actually did.
+2. If unsure which entity, ASK instead of guessing.
+3. Thermostat zones: main level (incl. MBR) = climate.t6_pro_z_wave_programmable_thermostat_2; basement = climate.t6_pro_z_wave_programmable_thermostat.
+4. Smoke/CO detectors are NOT in HA. Do not reference their state.
+5. update_automation returns 405. Tell John what to change in the UI.
+6. The timeline is shared with the autonomous loop — you see each other's activity. If a state change happened without a corresponding action from you, it was the user or an automation, not you.
 
-Respond with JSON in this exact format:
+Respond with JSON:
 {
-  "reply": "Your conversational response to the user",
+  "reply": "Your response to the user",
   "actions": [
-    {"type": "call_service", "domain": "cover", "service": "toggle", "data": {"entity_id": "cover.ratgdo32_2b8ecc_door"}},
-    {"type": "send_notification", "message": "Alert text", "title": "Optional title"},
-    {"type": "save_memory", "memory": "Something to remember"}
+    {"type": "call_service", "domain": "...", "service": "...", "data": {...}},
+    {"type": "send_notification", "message": "...", "title": "..."},
+    {"type": "save_memory", "memory": "..."}
   ]
 }
 
-If no actions are needed, use an empty actions array. Always include a reply.`;
-
-    // ── Chat history ──
-    const historyKey = "chat_history_" + from.replace(/[^a-zA-Z0-9]/g, "_");
-    const history = await this.state.storage.get(historyKey) || [];
-    const now_str = now.toLocaleString("en-US", { timeZone: "America/Chicago" });
-    history.push({ role: "user", content: "Current time: " + now_str + "\n\n" + message });
+If no actions needed, use empty array. Always include reply.`;
 
     try {
-      const sessionKey = "ha-chat-" + from.replace(/[^a-zA-Z0-9]/g, "_");
-      const response = await this.env.AI.run("@cf/nvidia/nemotron-3-120b-a12b", {
-        messages: [
-          { role: "system", content: systemPrompt },
-          ...history.slice(-10)
-        ],
-        max_completion_tokens: 2048,
-        chat_template_kwargs: { enable_thinking: false },
-        response_format: { type: "json_object" }
-      }, {
-        headers: { "x-session-affinity": sessionKey }
-      });
+      const response = await this.callMiniMax([
+        { role: "system", content: systemPrompt },
+        { role: "user", content: "Current time: " + now_str + "\n\n" + message }
+      ], 2048);
 
       const responseText = response.choices?.[0]?.message?.content || response.response || "";
-      this.logAI("chat_raw", "Raw response length: " + responseText.length + " | preview: " + responseText.substring(0, 100), {});
+      this.logAI("chat_raw", "len=" + responseText.length + " preview=" + responseText.substring(0, 100), {});
 
       let parsed;
       try {
         const jsonMatch = responseText.match(/\{[\s\S]*\}/);
-        if (jsonMatch) {
-          parsed = JSON.parse(jsonMatch[0]);
-        } else {
-          this.logAI("chat_parse_fail", "No JSON found in response: " + responseText.substring(0, 200), {});
+        if (jsonMatch) parsed = JSON.parse(jsonMatch[0]);
+        else {
+          this.logAI("chat_parse_fail", "No JSON: " + responseText.substring(0, 200), {});
           return { reply: responseText, actions_taken: [] };
         }
       } catch (e) {
-        this.logAI("chat_parse_error", "JSON parse failed: " + e.message + " | raw: " + responseText.substring(0, 200), {});
+        this.logAI("chat_parse_error", e.message + " raw=" + responseText.substring(0, 200), {});
         return { reply: responseText, actions_taken: [] };
       }
 
-      // ── Execute actions and track what ACTUALLY succeeded ──
+      // Log the reply to timeline BEFORE executing actions
+      if (parsed.reply) {
+        this.logAI("chat_reply", parsed.reply.substring(0, 300), { from });
+      }
+
       const executedActions = [];
       const failedActions = [];
       if (parsed.actions && Array.isArray(parsed.actions)) {
         for (const action of parsed.actions) {
           try {
             await this.executeAIAction(action);
-            executedActions.push(
-              action.type + (action.domain ? ": " + action.domain + "." + action.service : "")
-            );
+            executedActions.push(action.type + (action.domain ? ": " + action.domain + "." + action.service : ""));
           } catch (err) {
-            failedActions.push(
-              action.type + (action.domain ? ": " + action.domain + "." + action.service : "") + " (" + err.message + ")"
-            );
+            failedActions.push(action.type + (action.domain ? ": " + action.domain + "." + action.service : "") + " (" + err.message + ")");
             this.logAI("chat_action_error", err.message, action);
           }
         }
       }
 
-      // Log discrepancies between intent and execution
       const requestedCount = (parsed.actions || []).length;
       if (failedActions.length > 0) {
         this.logAI("chat_action_mismatch",
-          `Requested ${requestedCount} actions, ${executedActions.length} succeeded, ${failedActions.length} failed: ${failedActions.join("; ")}`,
+          `Requested ${requestedCount}, succeeded ${executedActions.length}, failed ${failedActions.length}: ${failedActions.join("; ")}`,
           {}
         );
       }
 
-      // ── Save chat history ──
-      history.push({ role: "assistant", content: parsed.reply || "" });
-      await this.state.storage.put(historyKey, history.slice(-20));
-
-      this.logAI("chat", "User: " + message + " | Agent: " + (parsed.reply || "").substring(0, 200), {
+      this.logAI("chat", `done | exec=${executedActions.length} fail=${failedActions.length}`, {
         actions_requested: requestedCount,
         actions_executed: executedActions.length,
         actions_failed: failedActions.length,
         from,
-        context_size: contextEntities.length,
+        context_size: contextEntities.length
       });
 
       return {
         reply: parsed.reply || "Done.",
         actions_taken: executedActions,
-        actions_failed: failedActions.length > 0 ? failedActions : undefined,
+        actions_failed: failedActions.length > 0 ? failedActions : undefined
       };
     } catch (err) {
       this.logAI("chat_error", err.message, {});
@@ -1109,6 +1118,11 @@ If no actions are needed, use an empty actions array. Always include a reply.`;
         this.logAI("unknown_action", "Unknown action type: " + action.type, action);
     }
   }
+
+  // ========================================================================
+  // logAI — unchanged, already writes to ai_log_persistent
+  // CHANGE 4: No changes needed — works with new event types
+  // ========================================================================
 
   logAI(type, message, data) {
     const entry = { type, message, data, timestamp: new Date().toISOString() };
