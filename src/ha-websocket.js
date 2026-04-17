@@ -1,4 +1,6 @@
 // ha-websocket.js — PATCHED: JSON mode + retry + honest failure + action claim detection + log sharding + observations
+import { NATIVE_AGENT_TOOLS, NATIVE_TOOL_NAMES, NATIVE_ACTION_TOOL_NAMES } from "./agent-tools.js";
+
 export class HAWebSocket {
   // Static config for prioritized entity context building
   static BURST_EXEMPT_DOMAINS = new Set(["climate", "lock", "cover", "alarm_control_panel"]);
@@ -909,14 +911,21 @@ The update_automation tool currently returns 405 on this instance. Until that's 
 
   // ========================================================================
   // logAI — writes to in-memory ring buffer + sharded persistent storage
+  //
+  // Optional 4th arg `source` tags the entry with one of:
+  //   "legacy_json"  — action came from the legacy JSON-action parser
+  //   "native_loop"  — action came from MiniMax's native tool-calling loop
+  //   "tool_call"    — action came from a direct MCP tools/call dispatch
+  // Omit to write an entry with no source field (diagnostics, state_change, chat_*, etc.).
   // ========================================================================
-  logAI(type, message, data) {
+  logAI(type, message, data, source) {
     const entry = { type, message, data, timestamp: new Date().toISOString() };
+    if (source) entry.source = source;
     this.aiLog.push(entry);
     if (this.aiLog.length > HAWebSocket.LOG_IN_MEMORY_CAP) {
       this.aiLog.splice(0, this.aiLog.length - HAWebSocket.LOG_IN_MEMORY_CAP);
     }
-    console.log("AI LOG [" + type + "]:", message);
+    console.log("AI LOG [" + type + (source ? "/" + source : "") + "]:", message);
     this.persistLogEntry(entry).catch((err) => console.error("logAI persist:", err.message));
   }
 
@@ -932,6 +941,18 @@ The update_automation tool currently returns 405 on this instance. Until that's 
     this.aiProcessing = true;
     const eventsToProcess = [...this.recentEvents];
     this.recentEvents = [];
+
+    // Phase 2 feature flag — native tool-calling path. Flag off = no-op, legacy runs.
+    if (this.env.USE_NATIVE_TOOL_LOOP === "true") {
+      try {
+        await this.runAIAgentNative(eventsToProcess);
+      } catch (err) {
+        this.logAI("error", "Native agent cycle failed: " + err.message, {}, "native_loop");
+      }
+      this.aiProcessing = false;
+      return;
+    }
+
     try {
       const now = new Date();
       const memory = await this.state.storage.get("ai_memory") || [];
@@ -1113,6 +1134,11 @@ Analyze these events AND the unified timeline above. Decide what actions to take
   // ========================================================================
   async chatWithAgent(message, from = "default") {
     if (!this.env.MINIMAX_API_KEY) return { error: "MINIMAX_API_KEY not configured" };
+
+    // Phase 2 feature flag — native tool-calling path. Flag off = no-op, legacy runs.
+    if (this.env.USE_NATIVE_TOOL_LOOP === "true") {
+      return await this.chatWithAgentNative(message, from);
+    }
 
     const now = new Date();
     const now_str = now.toLocaleString("en-US", { timeZone: "America/Chicago" });
@@ -1404,8 +1430,12 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
   }
   // ========================================================================
   // AI Agent — Action Execution
+  //
+  // Optional 2nd arg `source` tags resulting log entries so we can tell apart
+  // legacy JSON actions, native-tool-loop actions, and direct MCP dispatches.
+  // Defaults to "legacy_json" — existing legacy callers require no changes.
   // ========================================================================
-  async executeAIAction(action) {
+  async executeAIAction(action, source = "legacy_json") {
     // Auto-heal HA-YAML-style actions into internal schema
     if (!action.type && typeof action.service === "string" && action.service.includes(".")) {
       const [healedDomain, healedService] = action.service.split(".", 2);
@@ -1417,7 +1447,7 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
       } else if (action.entity_id) {
         healedData = { entity_id: action.entity_id };
       }
-      this.logAI("action_healed", "Rewrote HA-yaml action to call_service: " + healedDomain + "." + healedService, { original: action });
+      this.logAI("action_healed", "Rewrote HA-yaml action to call_service: " + healedDomain + "." + healedService, { original: action }, source);
       action = { type: "call_service", domain: healedDomain, service: healedService, data: healedData };
     }
     switch (action.type) {
@@ -1430,7 +1460,7 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
           service_data: action.data || {},
           target: action.target || {}
         });
-        this.logAI("action", "Called " + action.domain + "." + action.service, action.data || {});
+        this.logAI("action", "Called " + action.domain + "." + action.service, action.data || {}, source);
         const entityId = action.data && action.data.entity_id || action.target && action.target.entity_id;
         if (entityId && ["climate", "lock", "cover"].includes(action.domain)) {
           await new Promise((r) => setTimeout(r, 1500));
@@ -1452,13 +1482,15 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
             this.logAI(
               "action_verified",
               `Post-action state of ${entityId}: ${JSON.stringify(verifyData)}`,
-              verifyData
+              verifyData,
+              source
             );
           } else {
             this.logAI(
               "action_verify_fail",
               `Could not verify state of ${entityId} — not in stateCache`,
-              { entity_id: entityId }
+              { entity_id: entityId },
+              source
             );
           }
         }
@@ -1474,7 +1506,7 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
           service: "notify",
           service_data: notifyData
         });
-        this.logAI("notification", action.message, { title: action.title });
+        this.logAI("notification", action.message, { title: action.title }, source);
         break;
       }
       case "save_memory": {
@@ -1483,13 +1515,13 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
         memory.push(action.memory);
         if (memory.length > 100) memory.splice(0, memory.length - 100);
         await this.state.storage.put("ai_memory", memory);
-        this.logAI("memory_saved", action.memory, {});
+        this.logAI("memory_saved", action.memory, {}, source);
         break;
       }
       case "save_observation": {
         const text = typeof action.text === "string" ? action.text.trim() : "";
         if (!text) {
-          this.logAI("observation_skipped", "save_observation called with empty text", action);
+          this.logAI("observation_skipped", "save_observation called with empty text", action, source);
           break;
         }
         let observations = await this.state.storage.get("ai_observations") || [];
@@ -1500,12 +1532,530 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
         observations.push(text);
         if (observations.length > 500) observations.splice(0, observations.length - 500);
         await this.state.storage.put("ai_observations", observations);
-        this.logAI("observation_saved", text.substring(0, 200), { replaces: action.replaces || null });
+        this.logAI("observation_saved", text.substring(0, 200), { replaces: action.replaces || null }, source);
         break;
       }
       default:
-        this.logAI("unknown_action", "Unknown action type: " + action.type, action);
+        this.logAI("unknown_action", "Unknown action type: " + action.type, action, source);
         throw new Error("Unknown action type: '" + (action.type || "undefined") + "' — expected call_service, send_notification, save_memory, or save_observation");
+    }
+  }
+
+  // ========================================================================
+  // Native tool dispatcher — Phase 2
+  //
+  // Maps a MiniMax tool_call (by name + parsed args) onto the underlying
+  // implementation. Write tools reuse executeAIAction with source="native_loop"
+  // so the legacy action path remains the single source of truth for memory,
+  // observation, notification, and call_service semantics (including post-action
+  // state verification for lock/cover/climate). Read tools are implemented
+  // locally and do NOT log as actions — they're side-effect-free discovery.
+  //
+  // Returns the tool's natural result (or {error: "..."}). Errors do not throw;
+  // the native loop treats them as a tool-call outcome MiniMax can recover from.
+  // ========================================================================
+  async executeNativeTool(name, args) {
+    args = args || {};
+    try {
+      switch (name) {
+        // ----- Action tools -----
+        case "call_service":
+          return await this.executeAIAction({
+            type: "call_service",
+            domain: args.domain,
+            service: args.service,
+            data: args.data || {},
+            target: args.target || {}
+          }, "native_loop");
+
+        case "ai_send_notification":
+          await this.executeAIAction({
+            type: "send_notification",
+            message: args.message,
+            title: args.title
+          }, "native_loop");
+          return { sent: true };
+
+        case "save_memory":
+          await this.executeAIAction({
+            type: "save_memory",
+            memory: args.memory
+          }, "native_loop");
+          return { saved: true };
+
+        case "save_observation":
+          await this.executeAIAction({
+            type: "save_observation",
+            text: args.text,
+            replaces: args.replaces
+          }, "native_loop");
+          return { saved: true };
+
+        // ----- Read tools (no action log; not counted in actions_taken) -----
+        case "get_state": {
+          if (!args.entity_id) return { error: "entity_id is required" };
+          if (!args.force_refresh) {
+            const cached = this.stateCache.get(args.entity_id);
+            if (cached) return cached;
+          }
+          try {
+            const result = await this.sendCommand({ type: "get_states" });
+            if (result && Array.isArray(result.result)) {
+              for (const s of result.result) this.stateCache.set(s.entity_id, s);
+            }
+            const fresh = this.stateCache.get(args.entity_id);
+            return fresh || { error: "Entity not found: " + args.entity_id };
+          } catch (err) {
+            return { error: "Failed to refresh states: " + err.message };
+          }
+        }
+
+        case "get_logbook": {
+          if (!args.start_time) return { error: "start_time is required (ISO 8601)" };
+          try {
+            const haUrl = this.env.HA_URL.replace(/\/$/, "");
+            let path = "/api/logbook/" + encodeURIComponent(args.start_time);
+            const params = [];
+            if (args.entity_id) params.push("entity=" + encodeURIComponent(args.entity_id));
+            if (args.end_time) params.push("end_time=" + encodeURIComponent(args.end_time));
+            if (params.length) path += "?" + params.join("&");
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), 15000);
+            const resp = await fetch(haUrl + path, {
+              headers: { Authorization: "Bearer " + this.env.HA_TOKEN },
+              signal: controller.signal
+            });
+            clearTimeout(timeout);
+            if (!resp.ok) return { error: "HA logbook " + resp.status + ": " + (await resp.text()).substring(0, 200) };
+            return await resp.json();
+          } catch (err) {
+            return { error: "Logbook fetch failed: " + err.message };
+          }
+        }
+
+        case "render_template": {
+          if (typeof args.template !== "string" || !args.template.trim()) {
+            return { error: "template is required" };
+          }
+          try {
+            const haUrl = this.env.HA_URL.replace(/\/$/, "");
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), 15000);
+            const resp = await fetch(haUrl + "/api/template", {
+              method: "POST",
+              headers: {
+                Authorization: "Bearer " + this.env.HA_TOKEN,
+                "Content-Type": "application/json"
+              },
+              body: JSON.stringify({ template: args.template }),
+              signal: controller.signal
+            });
+            clearTimeout(timeout);
+            if (!resp.ok) return { error: "HA template " + resp.status + ": " + (await resp.text()).substring(0, 200) };
+            const text = await resp.text();
+            try { return JSON.parse(text); } catch { return text; }
+          } catch (err) {
+            return { error: "Template render failed: " + err.message };
+          }
+        }
+
+        default:
+          return { error: "Unknown native tool: " + name };
+      }
+    } catch (err) {
+      return { error: err.message || String(err) };
+    }
+  }
+
+  // ========================================================================
+  // MiniMax API helper — native tool-calling variant (Phase 2)
+  //
+  // Distinct from callMiniMax because:
+  //   - Tool calling and response_format:json_object are mutually exclusive on
+  //     OpenAI-compatible APIs — tool calling IS the structured output.
+  //   - The existing callMiniMax strips <think>...</think> tags from content
+  //     for display. The native loop MUST preserve them: per MiniMax docs,
+  //     the full assistant message (content + tool_calls, reasoning intact)
+  //     must be echoed back on subsequent turns or the reasoning chain breaks.
+  //   - extra_body.reasoning_split is set per docs; curl-test showed the flag
+  //     is accepted but thinking still lives inline in <think> blocks on
+  //     M2.7-highspeed today. Harmless and forward-compatible.
+  //
+  // Returns the raw API response with the assistant message UNMUTATED.
+  // ========================================================================
+  async callMiniMaxWithTools(messages, tools, maxTokens = 4096) {
+    const body = {
+      model: "MiniMax-M2.7-highspeed",
+      messages,
+      tools,
+      max_tokens: maxTokens,
+      temperature: 0.3,
+      extra_body: { reasoning_split: true }
+    };
+    const response = await fetch("https://api.minimax.io/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${this.env.MINIMAX_API_KEY}`
+      },
+      body: JSON.stringify(body)
+    });
+    if (!response.ok) {
+      const errText = await response.text();
+      throw new Error(`MiniMax API ${response.status}: ${errText.substring(0, 200)}`);
+    }
+    return await response.json();
+  }
+
+  // ========================================================================
+  // Native tool-calling loop — Phase 2
+  // ========================================================================
+  async runNativeToolLoop(initialMessages, options = {}) {
+    const { maxIterations = 8, systemPrompt = null } = options;
+    const messages = [...initialMessages];
+    if (systemPrompt && (messages.length === 0 || messages[0].role !== "system")) {
+      messages.unshift({ role: "system", content: systemPrompt });
+    }
+
+    const actionsTaken = [];
+    const stripThink = (s) => (s || "").replace(/<think>[\s\S]*?<\/think>/g, "").trim();
+
+    for (let iter = 0; iter < maxIterations; iter++) {
+      let response;
+      try {
+        response = await this.callMiniMaxWithTools(messages, NATIVE_AGENT_TOOLS);
+      } catch (err) {
+        this.logAI("error", "Native loop API call failed: " + err.message, { iteration: iter }, "native_loop");
+        return {
+          reply: "I couldn't reach the model — " + err.message,
+          actions_taken: actionsTaken,
+          messages,
+          error: err.message,
+          iterations: iter
+        };
+      }
+
+      const assistantMsg = response.choices?.[0]?.message;
+      const finishReason = response.choices?.[0]?.finish_reason;
+
+      if (!assistantMsg) {
+        this.logAI("error", "Native loop: no assistant message in response", { iteration: iter, debug_keys: Object.keys(response || {}) }, "native_loop");
+        return {
+          reply: "I didn't get a usable response from the model.",
+          actions_taken: actionsTaken,
+          messages,
+          error: "empty_response",
+          iterations: iter
+        };
+      }
+
+      messages.push(assistantMsg);
+
+      const toolCalls = Array.isArray(assistantMsg.tool_calls) ? assistantMsg.tool_calls : [];
+
+      if (toolCalls.length === 0 || finishReason === "stop") {
+        const cleaned = stripThink(assistantMsg.content);
+        return {
+          reply: cleaned,
+          actions_taken: actionsTaken,
+          messages,
+          iterations: iter + 1
+        };
+      }
+
+      for (const tc of toolCalls) {
+        const name = tc.function?.name;
+        const argsRaw = tc.function?.arguments || "{}";
+        let args = {};
+        let parseError = null;
+        try {
+          args = JSON.parse(argsRaw);
+        } catch (parseErr) {
+          parseError = parseErr.message;
+          this.logAI("action_error", `Native loop: failed to parse args for ${name}: ${parseErr.message}`, { tool: name, raw: argsRaw.substring(0, 300) }, "native_loop");
+        }
+
+        let result;
+        if (parseError) {
+          result = { error: "Invalid JSON arguments: " + parseError };
+        } else if (!NATIVE_TOOL_NAMES.has(name)) {
+          result = { error: "Unknown tool: " + name };
+          this.logAI("action_error", `Native loop: unknown tool ${name}`, { tool: name }, "native_loop");
+        } else {
+          result = await this.executeNativeTool(name, args);
+        }
+
+        if (NATIVE_ACTION_TOOL_NAMES.has(name) && !(result && result.error)) {
+          const label = name === "call_service" && args.domain && args.service
+            ? `call_service: ${args.domain}.${args.service}`
+            : name;
+          actionsTaken.push(label);
+        }
+
+        messages.push({
+          role: "tool",
+          tool_call_id: tc.id,
+          content: typeof result === "string" ? result : JSON.stringify(result)
+        });
+      }
+    }
+
+    this.logAI(
+      "error",
+      `Native loop: max_iterations_exceeded (${maxIterations} iterations)`,
+      { actions_taken: actionsTaken },
+      "native_loop"
+    );
+    return {
+      reply: "I hit my iteration ceiling without finishing — actions so far: " +
+        (actionsTaken.length > 0 ? actionsTaken.join(", ") : "none") +
+        ". Re-ask if you need me to continue.",
+      actions_taken: actionsTaken,
+      messages,
+      error: "max_iterations_exceeded",
+      iterations: maxIterations
+    };
+  }
+
+  // ========================================================================
+  // Native-loop context helpers — shared between runAIAgentNative and
+  // chatWithAgentNative.
+  // ========================================================================
+  _buildNativeContextEntities() {
+    const byDomain = new Map();
+    for (const [id, state] of this.stateCache) {
+      const domain = id.split(".")[0];
+      const attr = state.attributes || {};
+      const deviceClass = attr.device_class || "";
+      if (domain === "switch" && HAWebSocket.isNoisySwitch(id)) continue;
+      if (state.state === "unavailable" || state.state === "unknown") continue;
+
+      if (HAWebSocket.CONTEXT_DOMAIN_PRIORITY.includes(domain)) {
+        const entry = { entity_id: id, friendly_name: attr.friendly_name || id, state: state.state };
+        if (domain === "climate") {
+          entry.setpoint = attr.temperature ?? null;
+          entry.current_temp = attr.current_temperature ?? null;
+          entry.hvac_action = attr.hvac_action ?? null;
+          entry.hvac_mode = attr.hvac_mode ?? null;
+        }
+        if (domain === "cover") {
+          entry.current_position = attr.current_position ?? null;
+        }
+        if (domain === "weather") {
+          entry.temperature = attr.temperature;
+          entry.humidity = attr.humidity;
+          entry.wind_speed = attr.wind_speed;
+          entry.wind_bearing = attr.wind_bearing;
+          entry.pressure = attr.pressure;
+        }
+        if (!byDomain.has(domain)) byDomain.set(domain, []);
+        byDomain.get(domain).push(entry);
+      } else if (domain === "sensor") {
+        let include = false;
+        if (HAWebSocket.SENSOR_WHITELIST.has(deviceClass)) {
+          include = true;
+        } else if (deviceClass === "battery") {
+          const pct = parseFloat(state.state);
+          include = !isNaN(pct) && pct <= HAWebSocket.BATTERY_LOW_THRESHOLD;
+        }
+        if (include) {
+          const entry = { entity_id: id, friendly_name: attr.friendly_name || id, state: state.state, device_class: deviceClass, unit: attr.unit_of_measurement || null };
+          if (!byDomain.has("sensor")) byDomain.set("sensor", []);
+          byDomain.get("sensor").push(entry);
+        }
+      }
+    }
+
+    const contextEntities = [];
+    let sensorCount = 0;
+    for (const domain of [...HAWebSocket.CONTEXT_DOMAIN_PRIORITY, "sensor"]) {
+      for (const entry of (byDomain.get(domain) || [])) {
+        if (contextEntities.length >= HAWebSocket.MAX_CONTEXT_ENTITIES) break;
+        if (domain === "sensor") {
+          if (sensorCount >= HAWebSocket.MAX_SENSOR_CONTEXT) break;
+          sensorCount++;
+        }
+        contextEntities.push(entry);
+      }
+      if (contextEntities.length >= HAWebSocket.MAX_CONTEXT_ENTITIES) break;
+    }
+    return contextEntities;
+  }
+
+  _buildNativeTimeline() {
+    const relevantTypes = ["chat_user", "chat_reply", "action", "action_verified", "notification", "decision", "state_change", "memory_saved", "observation_saved"];
+    return this.aiLog
+      .filter((e) => relevantTypes.includes(e.type))
+      .slice(-150)
+      .map((e) => `[${e.timestamp}] ${e.type}${e.source ? "/" + e.source : ""}: ${e.message}`)
+      .join("\n");
+  }
+
+  // ========================================================================
+  // NATIVE_AGENT_SYSTEM_PROMPT — Phase 2 system prompt for the native tool-
+  // calling loop. Shared between autonomous and chat modes; a role-specific
+  // MODE block and the `from` context are interpolated in.
+  // ========================================================================
+  getNativeAgentSystemPrompt(role, ctx) {
+    const { memory = [], observations = [], timeline = "", contextEntities = [], from = "default" } = ctx;
+
+    const modeBlock = role === "autonomous"
+      ? `MODE: AUTONOMOUS HEARTBEAT.
+You're reviewing a batch of home state-change events. Two jobs in parallel:
+  (a) Execute-mode: act, notify, save a memory, or do nothing on the immediate events. Doing nothing is usually right.
+  (b) Observer-mode: look at the UNIFIED TIMELINE for PATTERNS over longer horizons — repeating sequences, occupancy transitions, sensor gaps. Build evidence via save_observation.
+
+CRITICAL: Returning ZERO tool calls is the correct answer when nothing needs action. You are not penalized for silence. Do not pad with filler tool use to look productive — MiniMax that cries wolf gets ignored, MiniMax that only speaks up when something is worth it actually gets read.`
+      : `MODE: CHAT. ${from} is talking to you directly. Keep replies concise and skip the filler. If you took an action, say what you did plainly. This is also your best non-intrusive moment to surface an observer-mode pattern you've been building — if something's worth mentioning, mention it. If not, don't force it.`;
+
+    return `${this.getAgentContext()}
+
+${modeBlock}
+
+TOOLS — they're attached to this request. Invoke them directly. No JSON-with-actions-array output format, no markdown fences, no special shape — your reply on the turn you emit NO tool calls is the final reply to the user. The tools available:
+
+- call_service — execute any HA service (lights, locks, covers, climate, input_booleans, scripts, scenes, etc.). Use for destructive/irreversible actions (lock, close garage, restart) too — these intentionally aren't separate tools.
+- ai_send_notification — send a phone push AND log it to your activity timeline. Prefer this over call_service on notify.mobile_app_* when the notification should appear in your future timeline context. Only use for things that warrant a phone buzz: security events during transitions, aux heat >5000W sustained, water leaks, unexpected entry.
+- save_memory — persist a CONFIRMED fact (100 slots, FIFO). Stable knowledge only. Don't use for hypotheses.
+- save_observation — persist a pattern or hypothesis prefixed with [topic-tag] (500 slots). Set replaces="[topic-tag]" to supersede a prior observation on the same topic.
+- get_state — look up a single entity's full state when the pre-injected context block doesn't have the detail you need.
+- get_logbook — pull logbook entries for an entity or time window. Useful for debugging ("did the automation fire?", "who closed the garage?").
+- render_template — run a Jinja2 template in HA's context. Use for cross-entity queries or HA helpers (area_name, device_attr, expand, state_attr) that the context block can't answer.
+
+COMMITMENT RULE: If your final reply says you did something ("opening the garage", "turning off the lights"), you MUST have invoked the corresponding tool. Saying you did something you didn't do is a lie and unacceptable. Your timeline is the record.
+
+YOUR MEMORY (confirmed facts, ${memory.length}/100):
+${memory.length > 0 ? memory.map((m) => "- " + m).join("\n") : "No memories yet. Observe patterns and save useful confirmed facts as you learn them."}
+
+YOUR OBSERVATIONS (patterns & hypotheses in progress, ${observations.length}/500):
+${observations.length > 0 ? observations.map((o) => "- " + o).join("\n") : "No observations yet. Watch for repeating sequences — that's how automations get proposed."}
+
+UNIFIED TIMELINE — everything recent: chat messages, your replies, state changes, your past tool calls. Each entry is tagged with its source (legacy_json / native_loop / tool_call) so you can see whether a past action came from you (native_loop), from the old JSON path (legacy_json), or from a direct MCP call (tool_call).
+
+${timeline || "Timeline is empty."}
+
+CURRENT STATE OF ENTITIES (${contextEntities.length}) — your live, authoritative snapshot from a maintained WebSocket to HA. If an entity is here, its state is current. Do not say "I don't have visibility" or reason about refresh lag — that's a layer beneath you that you can't see. If an entity is NOT here, say so honestly or use get_state to probe. Never invent entity IDs or fabricate timestamps for events you didn't witness.
+
+${JSON.stringify(contextEntities, null, 1)}
+
+OPERATIONAL REMINDERS:
+1. Security is priority one. Unexpected unlocks, garage or exterior doors open during bedtime/departure transitions — act and notify. Security events override suggestion etiquette.
+2. Thermostat zones: climate.t6_pro_z_wave_programmable_thermostat_2 = main level INCLUDING MBR; climate.t6_pro_z_wave_programmable_thermostat = basement. Don't mix them up.
+3. Smoke/CO detectors are NOT in HA — don't reference their state or act on them.
+4. Automation editing via call_service on automation.update returns 405 on this instance. If John asks you to modify an automation, tell him the change and where to make it in the HA UI (Settings → Automations).
+5. Routine events (lights cycling, thermostats maintaining temp, normal motion, Zigbee LQI fluctuations) don't need action or notification.
+6. Aux heat running (whole-home power >5000W sustained) is worth a notification. A brief spike isn't.
+7. Save memories sparingly and only for confirmed facts. Hypotheses go to save_observation.
+8. Don't notify for the same thing twice in one session unless the state materially changed.
+9. Observer-mode suggestions are NOT alerts — deliver them in a chat reply or via save_observation. Never wake anyone at 2 AM to propose an automation.`;
+  }
+
+  // ========================================================================
+  // Native autonomous heartbeat (Phase 2) — flag-gated sibling of runAIAgent.
+  // ========================================================================
+  async runAIAgentNative(eventsToProcess) {
+    const now = new Date();
+    const memory = await this.state.storage.get("ai_memory") || [];
+    const observations = await this.state.storage.get("ai_observations") || [];
+    const contextEntities = this._buildNativeContextEntities();
+    const timeline = this._buildNativeTimeline();
+
+    const systemPrompt = this.getNativeAgentSystemPrompt("autonomous", {
+      memory,
+      observations,
+      timeline,
+      contextEntities
+    });
+
+    const userMessage = `Current time: ${now.toLocaleString("en-US", { timeZone: "America/Chicago" })}
+
+The following state changes just occurred:
+${JSON.stringify(eventsToProcess, null, 1)}
+
+Evaluate these events against the timeline above. Take action only if warranted.`;
+
+    console.log("Native AI Agent processing", eventsToProcess.length, "events...");
+    const result = await this.runNativeToolLoop(
+      [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userMessage }
+      ],
+      { maxIterations: 8 }
+    );
+
+    this.logAI(
+      "decision",
+      `Native loop: ${result.actions_taken.length} actions over ${result.iterations} iterations${result.error ? " — " + result.error : ""}`,
+      {
+        events_processed: eventsToProcess.length,
+        actions_count: result.actions_taken.length,
+        iterations: result.iterations,
+        ...(result.error ? { error: result.error } : {})
+      },
+      "native_loop"
+    );
+  }
+
+  // ========================================================================
+  // Native chat (Phase 2) — flag-gated sibling of chatWithAgent.
+  // Returns { reply, actions_taken, error? } — mirrors legacy chat contract.
+  // ========================================================================
+  async chatWithAgentNative(message, from = "default") {
+    const now = new Date();
+    const now_str = now.toLocaleString("en-US", { timeZone: "America/Chicago" });
+    const memory = await this.state.storage.get("ai_memory") || [];
+    const observations = await this.state.storage.get("ai_observations") || [];
+    const conversationHistory = await this.state.storage.get("chat_history") || [];
+    this.logAI("chat_user", `${from}: ${message}`, { from, message });
+
+    const timeline = this._buildNativeTimeline();
+    const contextEntities = this._buildNativeContextEntities();
+
+    const systemPrompt = this.getNativeAgentSystemPrompt("chat", {
+      memory,
+      observations,
+      timeline,
+      contextEntities,
+      from
+    });
+
+    const initialMessages = [
+      { role: "system", content: systemPrompt },
+      ...conversationHistory,
+      { role: "user", content: `Current time: ${now_str}\n\n${message}` }
+    ];
+
+    try {
+      const result = await this.runNativeToolLoop(initialMessages, { maxIterations: 8 });
+      const reply = (result.reply && result.reply.trim()) || "Done.";
+
+      this.logAI("chat_reply", reply.substring(0, 300), { from, full_reply: reply }, "native_loop");
+      conversationHistory.push({ role: "user", content: `[${from}]: ${message}` });
+      conversationHistory.push({ role: "assistant", content: reply });
+      if (conversationHistory.length > 40) conversationHistory.splice(0, conversationHistory.length - 40);
+      await this.state.storage.put("chat_history", conversationHistory);
+
+      this.logAI(
+        "chat",
+        `done | exec=${result.actions_taken.length} iter=${result.iterations}${result.error ? " err=" + result.error : ""}`,
+        {
+          actions_executed: result.actions_taken.length,
+          from,
+          iterations: result.iterations,
+          context_size: contextEntities.length,
+          ...(result.error ? { error: result.error } : {})
+        },
+        "native_loop"
+      );
+
+      return {
+        reply,
+        actions_taken: result.actions_taken,
+        ...(result.error ? { error: result.error } : {})
+      };
+    } catch (err) {
+      this.logAI("chat_error", err.message, {}, "native_loop");
+      return { error: "AI failed: " + err.message };
     }
   }
 
