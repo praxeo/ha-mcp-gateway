@@ -9,7 +9,7 @@ export class HAWebSocket {
   ];
   // battery and occupancy removed — every Zigbee device reports these, too noisy for context
   static SENSOR_WHITELIST = new Set(["temperature", "humidity", "power", "moisture"]);
-  static MAX_CONTEXT_ENTITIES = 80;
+  static MAX_CONTEXT_ENTITIES = 120;
   static MAX_SENSOR_CONTEXT = 15; // cap sensor entities regardless of MAX_CONTEXT_ENTITIES
 
   constructor(state, env) {
@@ -973,8 +973,12 @@ CRITICAL RULES:
 4. Smoke/CO detectors are NOT in HA. Do not reference their state.
 5. update_automation returns 405. Tell John what to change in the UI.
 6. The timeline is shared with the autonomous loop — you see each other's activity. If a state change happened without a corresponding action from you, it was the user or an automation, not you.
+7. Never call get_state on individual sensor entities — use the entity context provided above instead.
 
-Respond with JSON:
+CRITICAL: You MUST ALWAYS respond with valid JSON in this exact format, even for simple conversational replies:
+{"reply": "your response here", "actions": []}
+Never respond with plain text. Every response must be wrapped in the JSON envelope. If you have no actions to take, use an empty actions array.
+
 {
   "reply": "Your response to the user",
   "actions": [
@@ -982,9 +986,7 @@ Respond with JSON:
     {"type": "send_notification", "message": "...", "title": "..."},
     {"type": "save_memory", "memory": "..."}
   ]
-}
-
-If no actions needed, use empty array. Always include reply.`;
+}`;
 
     try {
       const response = await this.callMiniMax([
@@ -1016,6 +1018,11 @@ If no actions needed, use empty array. Always include reply.`;
       } catch (e) {
         this.logAI("chat_parse_error", e.message + " raw=" + responseText.substring(0, 200), {});
         return { reply: responseText, actions_taken: [] };
+      }
+
+      // If JSON parse succeeded but reply is missing, wrap raw text so history always gets written
+      if (!parsed || !parsed.reply) {
+        parsed = { reply: responseText, actions: [] };
       }
 
       // Log the reply to timeline and persist dedicated conversation history
