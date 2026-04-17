@@ -182,7 +182,7 @@ When automation editing is enabled, you'll be able to make the change directly. 
 
     // Restore persisted aiLog from DO storage on first request after eviction
     if (!this._logInitialized) {
-      this.aiLog = (await this.state.storage.get("ai_log")) || [];
+      this.aiLog = (await this.state.storage.get("ai_log_persistent")) || [];
       this._logInitialized = true;
     }
 
@@ -708,8 +708,8 @@ When automation editing is enabled, you'll be able to make the change directly. 
       const now = new Date();
       const memory = await this.state.storage.get("ai_memory") || [];
 
-      // Build action history from persistent log
-      const persistentLog = await this.state.storage.get("ai_log_persistent") || [];
+      // Build action history from in-memory log (avoids storage read race)
+      const persistentLog = this.aiLog;
       // CHANGE 3: Unified timeline filter — includes chat and state changes
       const recentActions = persistentLog
         .filter(e => ["chat_user", "chat_reply", "action", "action_verified", "notification", "decision", "state_change", "memory_saved"].includes(e.type))
@@ -890,7 +890,8 @@ Analyze these events and decide what actions to take, if any. Respond with JSON 
 
     // Read storage BEFORE logging current message so it doesn't appear in conversation history
     const memory = await this.state.storage.get("ai_memory") || [];
-    const persistentLog = await this.state.storage.get("ai_log_persistent") || [];
+    // Snapshot in-memory log before pushing current message — avoids storage read race
+    const persistentLog = [...this.aiLog];
 
     this.logAI("chat_user", `${from}: ${message}`, { from, message });
 
@@ -1165,17 +1166,12 @@ If no actions needed, use empty array. Always include reply.`;
   logAI(type, message, data) {
     const entry = { type, message, data, timestamp: new Date().toISOString() };
     this.aiLog.push(entry);
-    if (this.aiLog.length > 200) this.aiLog.splice(0, this.aiLog.length - 200);
+    if (this.aiLog.length > 500) this.aiLog.splice(0, this.aiLog.length - 500);
     console.log("AI LOG [" + type + "]:", message);
 
-    // Persist to long-term storage (500-entry cap, survives DO hibernation).
-    // Fire-and-forget — logAI is called from sync-like paths.
-    this.state.storage.get("ai_log_persistent").then(stored => {
-      const log = stored || [];
-      log.push(entry);
-      if (log.length > 500) log.splice(0, log.length - 500);
-      return this.state.storage.put("ai_log_persistent", log);
-    }).catch(() => {});
+    // Write the full in-memory log atomically — avoids the GET/append/PUT race condition
+    // that caused concurrent logAI calls within the same request to drop entries.
+    this.state.storage.put("ai_log_persistent", this.aiLog).catch(() => {});
   }
 
   // ========================================================================
