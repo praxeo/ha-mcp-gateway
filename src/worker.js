@@ -538,6 +538,40 @@ var TOOLS = [
       properties: { event_type: { type: "string" }, event_data: { type: "object" } },
       required: ["event_type"]
     }
+  },
+  // --- Agent State ---
+  {
+    name: "save_memory",
+    description: "Append a memory entry to the AI agent's persistent memory store (capped at 100).",
+    inputSchema: {
+      type: "object",
+      properties: { memory: { type: "string", description: "The memory text to save" } },
+      required: ["memory"]
+    }
+  },
+  {
+    name: "save_observation",
+    description: "Append an observation to the AI agent's observation log (capped at 500). If 'replaces' is set, prior entries whose text starts with that prefix are removed first.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        text: { type: "string", description: "Observation text to save" },
+        replaces: { type: "string", description: "Optional prefix — removes prior entries starting with this string before appending" }
+      },
+      required: ["text"]
+    }
+  },
+  {
+    name: "ai_send_notification",
+    description: "Send a push notification AND log it to the unified AI timeline. Unlike send_notification, this records the event in ai_log so it appears in the agent's activity history.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        message: { type: "string", description: "Notification body text" },
+        title: { type: "string", description: "Optional notification title" }
+      },
+      required: ["message"]
+    }
   }
 ];
 
