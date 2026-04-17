@@ -448,6 +448,39 @@ The update_automation tool currently returns 405 on this instance. Until that's 
           return new Response(JSON.stringify({ message: "AI evaluation triggered", log: this.aiLog.slice(-5) }), { headers });
         }
 
+        case "/ai_memory_append": {
+          const body = await request.json();
+          const memory = await this.state.storage.get("ai_memory") || [];
+          memory.push(body.memory);
+          if (memory.length > 100) memory.splice(0, memory.length - 100);
+          await this.state.storage.put("ai_memory", memory);
+          return new Response(JSON.stringify({ saved: true, count: memory.length }), { headers });
+        }
+
+        case "/ai_observation_append": {
+          const body = await request.json();
+          if (!body.text) return new Response(JSON.stringify({ error: "text is required" }), { status: 400, headers });
+          let observations = await this.state.storage.get("ai_observations") || [];
+          if (body.replaces) {
+            observations = observations.filter(o => !o.startsWith(body.replaces));
+          }
+          observations.push(body.text);
+          if (observations.length > 500) observations.splice(0, observations.length - 500);
+          await this.state.storage.put("ai_observations", observations);
+          return new Response(JSON.stringify({ saved: true, count: observations.length }), { headers });
+        }
+
+        case "/ai_observations": {
+          const observations = await this.state.storage.get("ai_observations") || [];
+          return new Response(JSON.stringify(observations), { headers });
+        }
+
+        case "/ai_log_append": {
+          const body = await request.json();
+          this.logAI(body.type, body.message, body.data || {});
+          return new Response(JSON.stringify({ logged: true }), { headers });
+        }
+
         case "/ai_chat": {
           const body = await request.json();
           const response = await this.chatWithAgent(body.message, body.from || "default");

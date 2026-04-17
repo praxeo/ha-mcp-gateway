@@ -541,8 +541,78 @@ var TOOLS = [
       properties: { event_type: { type: "string" }, event_data: { type: "object" } },
       required: ["event_type"]
     }
+  },
+  // --- Agent State ---
+  {
+    name: "save_memory",
+    description: "Append a memory entry to the AI agent's persistent memory store (capped at 100).",
+    inputSchema: {
+      type: "object",
+      properties: { memory: { type: "string", description: "The memory text to save" } },
+      required: ["memory"]
+    }
+  },
+  {
+    name: "save_observation",
+    description: "Append an observation to the AI agent's observation log (capped at 500). If 'replaces' is set, prior entries whose text starts with that prefix are removed first.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        text: { type: "string", description: "Observation text to save" },
+        replaces: { type: "string", description: "Optional prefix — removes prior entries starting with this string before appending" }
+      },
+      required: ["text"]
+    }
+  },
+  {
+    name: "ai_observations",
+    description: "View the AI agent's saved observations.",
+    inputSchema: { type: "object", properties: {} }
+  },
+  {
+    name: "ai_send_notification",
+    description: "Send a push notification AND log it to the unified AI timeline. Unlike send_notification, this records the event in ai_log so it appears in the agent's activity history.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        message: { type: "string", description: "Notification body text" },
+        title: { type: "string", description: "Optional notification title" }
+      },
+      required: ["message"]
+    }
   }
 ];
+
+const DANGEROUS_TOOLS = new Set([
+  "restart_ha",
+  "delete_automation",
+  "update_automation",
+  "create_automation",
+  "bulk_disable_entities",
+  "bulk_enable_entities",
+  "disable_entity",
+  "enable_entity",
+  "update_entity_registry",
+  "update_dashboard_config",
+  "clear_cache",
+  "fire_event",
+]);
+
+function getAgentToolset(role) {
+  if (role === "mcp_external") return TOOLS;
+  return TOOLS.filter(t => !DANGEROUS_TOOLS.has(t.name));
+}
+
+function mcpToOpenAITool(tool) {
+  return {
+    type: "function",
+    function: {
+      name: tool.name,
+      description: tool.description,
+      parameters: tool.inputSchema || { type: "object", properties: {} }
+    }
+  };
+}
 
 // ============================================================================
 // CHAT_HTML - Chat UI served at /chat
@@ -1716,6 +1786,31 @@ async function handleTool(env, name, args) {
     // ---- Events ----
     case "fire_event":
       return await haRequest(env, "POST", "/api/events/" + args.event_type, args.event_data || {});
+    // ---- Agent State ----
+    case "save_memory": {
+      const r = await doFetch(env, "/ai_memory_append", { memory: args.memory });
+      return r || { error: "DO not responding" };
+    }
+    case "save_observation": {
+      const r = await doFetch(env, "/ai_observation_append", {
+        text: args.text,
+        replaces: args.replaces
+      });
+      return r || { error: "DO not responding" };
+    }
+    case "ai_observations":
+      return await doFetch(env, "/ai_observations") || { error: "DO not responding" };
+    case "ai_send_notification": {
+      const notifyData = { message: args.message };
+      if (args.title) notifyData.title = args.title;
+      const result = await callServiceWS(env, "notify", "notify", notifyData);
+      await doFetch(env, "/ai_log_append", {
+        type: "notification",
+        message: args.message,
+        data: { title: args.title || null, source: "tool_call" }
+      });
+      return result;
+    }
     // ---- Cache Management ----
     case "cache_status": {
       if (!env.HA_CACHE) return { error: "HA_CACHE not bound" };
@@ -1747,7 +1842,7 @@ async function handleMCP(request, env) {
       case "notifications/initialized":
         return { jsonrpc: "2.0", id, result: {} };
       case "tools/list":
-        return { jsonrpc: "2.0", id, result: { tools: TOOLS } };
+        return { jsonrpc: "2.0", id, result: { tools: getAgentToolset("mcp_external") } };
       case "tools/call": {
         const result = await handleTool(env, params.name, params.arguments || {});
         return { jsonrpc: "2.0", id, result: { content: [{ type: "text", text: typeof result === "string" ? result : JSON.stringify(result, null, 2) }] } };
