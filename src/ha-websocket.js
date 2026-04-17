@@ -676,11 +676,17 @@ When automation editing is enabled, you'll be able to make the change directly. 
       throw new Error(`MiniMax API ${response.status}: ${errText.substring(0, 200)}`);
     }
     const data = await response.json();
-    // Strip <think> reasoning tags — only return the actual response text
-    if (data.choices?.[0]?.message?.content) {
-      data.choices[0].message.content = data.choices[0].message.content
-        .replace(/<think>[\s\S]*?<\/think>/g, "")
-        .trim();
+    // Normalize content — strip <think> tags; fall back to reasoning fields if content is null
+    const msg = data.choices?.[0]?.message;
+    if (msg) {
+      let text = (msg.content || "").replace(/<think>[\s\S]*?<\/think>/g, "").trim();
+      if (!text) {
+        // Thinking model exhausted token budget on reasoning, leaving content null.
+        // Try reasoning_content (MiniMax) or reasoning (generic) field.
+        const raw = msg.reasoning_content || msg.reasoning || "";
+        text = raw.replace(/<think>[\s\S]*?<\/think>/g, "").trim();
+      }
+      msg.content = text;
     }
     return data;
   }
@@ -895,10 +901,10 @@ Analyze these events and decide what actions to take, if any. Respond with JSON 
       .map(e => `[${e.timestamp}] ${e.type}: ${e.message}`)
       .join("\n");
 
-    // Reconstruct conversation history for multi-turn context (last 6 turns = up to 12 entries)
+    // Reconstruct conversation history for multi-turn context (last 10 pairs = up to 20 entries)
     const chatEntries = persistentLog
       .filter(e => ["chat_user", "chat_reply"].includes(e.type))
-      .slice(-12);
+      .slice(-20);
     const conversationHistory = [];
     for (const e of chatEntries) {
       if (e.type === "chat_user") {
