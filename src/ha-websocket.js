@@ -658,24 +658,31 @@ When automation editing is enabled, you'll be able to make the change directly. 
   // ========================================================================
 
   async callMiniMax(messages, maxTokens = 2048) {
-    const response = await fetch("https://api.minimaxi.chat/v1/chat/completions", {
+    const response = await fetch("https://api.minimax.io/v1/chat/completions", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         "Authorization": `Bearer ${this.env.MINIMAX_API_KEY}`,
       },
       body: JSON.stringify({
-        model: "MiniMax-M1-80k",
+        model: "MiniMax-M2.7-highspeed",
         messages,
         max_tokens: maxTokens,
-        response_format: { type: "json_object" },
+        temperature: 0.7,
       }),
     });
     if (!response.ok) {
       const errText = await response.text();
       throw new Error(`MiniMax API ${response.status}: ${errText.substring(0, 200)}`);
     }
-    return response.json();
+    const data = await response.json();
+    // Strip <think> reasoning tags — only return the actual response text
+    if (data.choices?.[0]?.message?.content) {
+      data.choices[0].message.content = data.choices[0].message.content
+        .replace(/<think>[\s\S]*?<\/think>/g, "")
+        .trim();
+    }
+    return data;
   }
 
   // ========================================================================
