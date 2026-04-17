@@ -1051,10 +1051,71 @@ The update_automation tool currently returns 405 on this instance. Until that's 
   }
 
   // ========================================================================
-  // Native autonomous heartbeat (Phase 2) — flag-gated sibling of runAIAgent.
+  // NATIVE_AGENT_SYSTEM_PROMPT — Phase 2 system prompt for the native tool-
+  // calling loop. Drops the legacy "emit JSON with actions array" rubric and
+  // instead tells MiniMax to use the attached tools directly.
   //
-  // Commit 1 uses a placeholder system prompt (getAgentContext + minimal
-  // context block). Commit 2 replaces it with NATIVE_AGENT_SYSTEM_PROMPT.
+  // Shared between autonomous and chat modes; a role-specific MODE block and
+  // the `from` context are interpolated in. Keeps getAgentContext() intact as
+  // the source of persona and household knowledge (do NOT duplicate any of it
+  // here — change getAgentContext for persona edits).
+  // ========================================================================
+  getNativeAgentSystemPrompt(role, ctx) {
+    const { memory = [], observations = [], timeline = "", contextEntities = [], from = "default" } = ctx;
+
+    const modeBlock = role === "autonomous"
+      ? `MODE: AUTONOMOUS HEARTBEAT.
+You're reviewing a batch of home state-change events. Two jobs in parallel:
+  (a) Execute-mode: act, notify, save a memory, or do nothing on the immediate events. Doing nothing is usually right.
+  (b) Observer-mode: look at the UNIFIED TIMELINE for PATTERNS over longer horizons — repeating sequences, occupancy transitions, sensor gaps. Build evidence via save_observation.
+
+CRITICAL: Returning ZERO tool calls is the correct answer when nothing needs action. You are not penalized for silence. Do not pad with filler tool use to look productive — MiniMax that cries wolf gets ignored, MiniMax that only speaks up when something is worth it actually gets read.`
+      : `MODE: CHAT. ${from} is talking to you directly. Keep replies concise and skip the filler. If you took an action, say what you did plainly. This is also your best non-intrusive moment to surface an observer-mode pattern you've been building — if something's worth mentioning, mention it. If not, don't force it.`;
+
+    return `${this.getAgentContext()}
+
+${modeBlock}
+
+TOOLS — they're attached to this request. Invoke them directly. No JSON-with-actions-array output format, no markdown fences, no special shape — your reply on the turn you emit NO tool calls is the final reply to the user. The tools available:
+
+- call_service — execute any HA service (lights, locks, covers, climate, input_booleans, scripts, scenes, etc.). Use for destructive/irreversible actions (lock, close garage, restart) too — these intentionally aren't separate tools.
+- ai_send_notification — send a phone push AND log it to your activity timeline. Prefer this over call_service on notify.mobile_app_* when the notification should appear in your future timeline context. Only use for things that warrant a phone buzz: security events during transitions, aux heat >5000W sustained, water leaks, unexpected entry.
+- save_memory — persist a CONFIRMED fact (100 slots, FIFO). Stable knowledge only. Don't use for hypotheses.
+- save_observation — persist a pattern or hypothesis prefixed with [topic-tag] (500 slots). Set replaces="[topic-tag]" to supersede a prior observation on the same topic.
+- get_state — look up a single entity's full state when the pre-injected context block doesn't have the detail you need.
+- get_logbook — pull logbook entries for an entity or time window. Useful for debugging ("did the automation fire?", "who closed the garage?").
+- render_template — run a Jinja2 template in HA's context. Use for cross-entity queries or HA helpers (area_name, device_attr, expand, state_attr) that the context block can't answer.
+
+COMMITMENT RULE: If your final reply says you did something ("opening the garage", "turning off the lights"), you MUST have invoked the corresponding tool. Saying you did something you didn't do is a lie and unacceptable. Your timeline is the record.
+
+YOUR MEMORY (confirmed facts, ${memory.length}/100):
+${memory.length > 0 ? memory.map((m) => "- " + m).join("\n") : "No memories yet. Observe patterns and save useful confirmed facts as you learn them."}
+
+YOUR OBSERVATIONS (patterns & hypotheses in progress, ${observations.length}/500):
+${observations.length > 0 ? observations.map((o) => "- " + o).join("\n") : "No observations yet. Watch for repeating sequences — that's how automations get proposed."}
+
+UNIFIED TIMELINE — everything recent: chat messages, your replies, state changes, your past tool calls. Each entry is tagged with its source (legacy_json / native_loop / tool_call) so you can see whether a past action came from you (native_loop), from the old JSON path (legacy_json), or from a direct MCP call (tool_call).
+
+${timeline || "Timeline is empty."}
+
+CURRENT STATE OF ENTITIES (${contextEntities.length}) — your live, authoritative snapshot from a maintained WebSocket to HA. If an entity is here, its state is current. Do not say "I don't have visibility" or reason about refresh lag — that's a layer beneath you that you can't see. If an entity is NOT here, say so honestly or use get_state to probe. Never invent entity IDs or fabricate timestamps for events you didn't witness.
+
+${JSON.stringify(contextEntities, null, 1)}
+
+OPERATIONAL REMINDERS:
+1. Security is priority one. Unexpected unlocks, garage or exterior doors open during bedtime/departure transitions — act and notify. Security events override suggestion etiquette.
+2. Thermostat zones: climate.t6_pro_z_wave_programmable_thermostat_2 = main level INCLUDING MBR; climate.t6_pro_z_wave_programmable_thermostat = basement. Don't mix them up.
+3. Smoke/CO detectors are NOT in HA — don't reference their state or act on them.
+4. Automation editing via call_service on automation.update returns 405 on this instance. If John asks you to modify an automation, tell him the change and where to make it in the HA UI (Settings → Automations).
+5. Routine events (lights cycling, thermostats maintaining temp, normal motion, Zigbee LQI fluctuations) don't need action or notification.
+6. Aux heat running (whole-home power >5000W sustained) is worth a notification. A brief spike isn't.
+7. Save memories sparingly and only for confirmed facts. Hypotheses go to save_observation.
+8. Don't notify for the same thing twice in one session unless the state materially changed.
+9. Observer-mode suggestions are NOT alerts — deliver them in a chat reply or via save_observation. Never wake anyone at 2 AM to propose an automation.`;
+  }
+
+  // ========================================================================
+  // Native autonomous heartbeat (Phase 2) — flag-gated sibling of runAIAgent.
   // ========================================================================
   async runAIAgentNative(eventsToProcess) {
     const now = new Date();
@@ -1063,21 +1124,12 @@ The update_automation tool currently returns 405 on this instance. Until that's 
     const contextEntities = this._buildNativeContextEntities();
     const timeline = this._buildNativeTimeline();
 
-    const systemPrompt = `${this.getAgentContext()}
-
-MODE: AUTONOMOUS HEARTBEAT. You are evaluating a batch of home state change events. Tools are available — use them when action is warranted. Returning zero tool calls is correct when nothing needs action; do not pad with filler tool use.
-
-YOUR MEMORY (${memory.length}/100):
-${memory.length > 0 ? memory.map((m) => "- " + m).join("\n") : "No memories yet."}
-
-YOUR OBSERVATIONS (${observations.length}/500):
-${observations.length > 0 ? observations.map((o) => "- " + o).join("\n") : "No observations yet."}
-
-UNIFIED TIMELINE:
-${timeline || "Timeline is empty."}
-
-CURRENT STATE OF KEY ENTITIES:
-${JSON.stringify(contextEntities, null, 1)}`;
+    const systemPrompt = this.getNativeAgentSystemPrompt("autonomous", {
+      memory,
+      observations,
+      timeline,
+      contextEntities
+    });
 
     const userMessage = `Current time: ${now.toLocaleString("en-US", { timeZone: "America/Chicago" })}
 
@@ -1110,10 +1162,7 @@ Evaluate these events against the timeline above. Take action only if warranted.
 
   // ========================================================================
   // Native chat (Phase 2) — flag-gated sibling of chatWithAgent.
-  //
-  // Commit 1 uses a placeholder system prompt. Commit 2 replaces it with
-  // NATIVE_AGENT_SYSTEM_PROMPT. Mirrors the legacy chat contract:
-  //   returns { reply, actions_taken, error? }
+  // Returns { reply, actions_taken, error? } — mirrors legacy chat contract.
   // ========================================================================
   async chatWithAgentNative(message, from = "default") {
     const now = new Date();
@@ -1126,21 +1175,13 @@ Evaluate these events against the timeline above. Take action only if warranted.
     const timeline = this._buildNativeTimeline();
     const contextEntities = this._buildNativeContextEntities();
 
-    const systemPrompt = `${this.getAgentContext()}
-
-You are in CHAT MODE — ${from} is talking to you directly. Tools are available; use them when the user asks for something that requires action or a lookup beyond the context below. Be concise in the final reply.
-
-YOUR MEMORY (${memory.length}/100):
-${memory.length > 0 ? memory.map((m) => "- " + m).join("\n") : "No memories yet."}
-
-YOUR OBSERVATIONS (${observations.length}/500):
-${observations.length > 0 ? observations.map((o) => "- " + o).join("\n") : "No observations yet."}
-
-UNIFIED TIMELINE:
-${timeline || "Timeline is empty."}
-
-CURRENT STATE OF ENTITIES (${contextEntities.length}):
-${JSON.stringify(contextEntities, null, 1)}`;
+    const systemPrompt = this.getNativeAgentSystemPrompt("chat", {
+      memory,
+      observations,
+      timeline,
+      contextEntities,
+      from
+    });
 
     const initialMessages = [
       { role: "system", content: systemPrompt },
