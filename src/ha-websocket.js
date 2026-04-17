@@ -882,11 +882,11 @@ Analyze these events and decide what actions to take, if any. Respond with JSON 
     const now = new Date();
     const now_str = now.toLocaleString("en-US", { timeZone: "America/Chicago" });
 
-    // Log the user's message to the unified timeline BEFORE thinking
-    this.logAI("chat_user", `${from}: ${message}`, { from, message });
-
+    // Read storage BEFORE logging current message so it doesn't appear in conversation history
     const memory = await this.state.storage.get("ai_memory") || [];
     const persistentLog = await this.state.storage.get("ai_log_persistent") || [];
+
+    this.logAI("chat_user", `${from}: ${message}`, { from, message });
 
     // Unified timeline — everything that happened, in order
     const timeline = persistentLog
@@ -894,6 +894,21 @@ Analyze these events and decide what actions to take, if any. Respond with JSON 
       .slice(-60)
       .map(e => `[${e.timestamp}] ${e.type}: ${e.message}`)
       .join("\n");
+
+    // Reconstruct conversation history for multi-turn context (last 6 turns = up to 12 entries)
+    const chatEntries = persistentLog
+      .filter(e => ["chat_user", "chat_reply"].includes(e.type))
+      .slice(-12);
+    const conversationHistory = [];
+    for (const e of chatEntries) {
+      if (e.type === "chat_user") {
+        const sender = e.data?.from || "user";
+        const msg = e.data?.message || e.message;
+        conversationHistory.push({ role: "user", content: `[${sender}]: ${msg}` });
+      } else if (e.type === "chat_reply") {
+        conversationHistory.push({ role: "assistant", content: e.data?.full_reply || e.message });
+      }
+    }
 
     // Build context entities (same logic as before)
     const byDomain = new Map();
@@ -979,10 +994,20 @@ If no actions needed, use empty array. Always include reply.`;
     try {
       const response = await this.callMiniMax([
         { role: "system", content: systemPrompt },
+        ...conversationHistory,
         { role: "user", content: "Current time: " + now_str + "\n\n" + message }
       ], 2048);
 
-      const responseText = response.choices?.[0]?.message?.content || response.response || "";
+      let responseText = response.choices?.[0]?.message?.content || response.response || "";
+      if (!responseText) {
+        // Fallback: some thinking models return content null and put output in reasoning field
+        const rawReasoning = response.choices?.[0]?.message?.reasoning || "";
+        const jsonFallback = rawReasoning.match(/\{[\s\S]*\}/);
+        if (jsonFallback) {
+          console.log("AI Chat: content null, salvaging JSON from reasoning field");
+          responseText = jsonFallback[0];
+        }
+      }
       this.logAI("chat_raw", "len=" + responseText.length + " preview=" + responseText.substring(0, 100), {});
 
       let parsed;
@@ -998,9 +1023,9 @@ If no actions needed, use empty array. Always include reply.`;
         return { reply: responseText, actions_taken: [] };
       }
 
-      // Log the reply to timeline BEFORE executing actions
+      // Log the reply to timeline BEFORE executing actions; store full_reply for history reconstruction
       if (parsed.reply) {
-        this.logAI("chat_reply", parsed.reply.substring(0, 300), { from });
+        this.logAI("chat_reply", parsed.reply.substring(0, 300), { from, full_reply: parsed.reply });
       }
 
       const executedActions = [];
