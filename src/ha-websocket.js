@@ -890,6 +890,9 @@ Analyze these events and decide what actions to take, if any. Respond with JSON 
 
     // Read storage BEFORE logging current message so it doesn't appear in conversation history
     const memory = await this.state.storage.get("ai_memory") || [];
+    // Load dedicated chat history — separate key avoids the 128 KB DO storage limit that
+    // causes silent write failures when ai_log_persistent grows large.
+    const conversationHistory = await this.state.storage.get("chat_history") || [];
     // Snapshot in-memory log before pushing current message — avoids storage read race
     const persistentLog = [...this.aiLog];
 
@@ -901,21 +904,6 @@ Analyze these events and decide what actions to take, if any. Respond with JSON 
       .slice(-60)
       .map(e => `[${e.timestamp}] ${e.type}: ${e.message}`)
       .join("\n");
-
-    // Reconstruct conversation history for multi-turn context (last 10 pairs = up to 20 entries)
-    const chatEntries = persistentLog
-      .filter(e => ["chat_user", "chat_reply"].includes(e.type))
-      .slice(-20);
-    const conversationHistory = [];
-    for (const e of chatEntries) {
-      if (e.type === "chat_user") {
-        const sender = e.data?.from || "user";
-        const msg = e.data?.message || e.message;
-        conversationHistory.push({ role: "user", content: `[${sender}]: ${msg}` });
-      } else if (e.type === "chat_reply") {
-        conversationHistory.push({ role: "assistant", content: e.data?.full_reply || e.message });
-      }
-    }
 
     // Build context entities (same logic as before)
     const byDomain = new Map();
@@ -1030,9 +1018,15 @@ If no actions needed, use empty array. Always include reply.`;
         return { reply: responseText, actions_taken: [] };
       }
 
-      // Log the reply to timeline BEFORE executing actions; store full_reply for history reconstruction
+      // Log the reply to timeline and persist dedicated conversation history
       if (parsed.reply) {
         this.logAI("chat_reply", parsed.reply.substring(0, 300), { from, full_reply: parsed.reply });
+        // Append this turn to the dedicated chat_history key and await the write so it's
+        // durable across DO evictions (unlike the fire-and-forget ai_log_persistent write).
+        conversationHistory.push({ role: "user", content: `[${from}]: ${message}` });
+        conversationHistory.push({ role: "assistant", content: parsed.reply });
+        if (conversationHistory.length > 40) conversationHistory.splice(0, conversationHistory.length - 40);
+        await this.state.storage.put("chat_history", conversationHistory);
       }
 
       const executedActions = [];
