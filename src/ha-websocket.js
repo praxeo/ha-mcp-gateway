@@ -393,6 +393,7 @@ When automation editing is enabled, you'll be able to make the change directly. 
 
         case "/ai_observation_append": {
           const body = await request.json();
+          if (!body.text) return new Response(JSON.stringify({ error: "text is required" }), { status: 400, headers });
           let observations = await this.state.storage.get("ai_observations") || [];
           if (body.replaces) {
             observations = observations.filter(o => !o.startsWith(body.replaces));
@@ -401,6 +402,11 @@ When automation editing is enabled, you'll be able to make the change directly. 
           if (observations.length > 500) observations.splice(0, observations.length - 500);
           await this.state.storage.put("ai_observations", observations);
           return new Response(JSON.stringify({ saved: true, count: observations.length }), { headers });
+        }
+
+        case "/ai_observations": {
+          const observations = await this.state.storage.get("ai_observations") || [];
+          return new Response(JSON.stringify(observations), { headers });
         }
 
         case "/ai_log_append": {

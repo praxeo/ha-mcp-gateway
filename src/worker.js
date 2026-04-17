@@ -562,6 +562,11 @@ var TOOLS = [
     }
   },
   {
+    name: "ai_observations",
+    description: "View the AI agent's saved observations.",
+    inputSchema: { type: "object", properties: {} }
+  },
+  {
     name: "ai_send_notification",
     description: "Send a push notification AND log it to the unified AI timeline. Unlike send_notification, this records the event in ai_log so it appears in the agent's activity history.",
     inputSchema: {
@@ -1784,6 +1789,8 @@ async function handleTool(env, name, args) {
       });
       return r || { error: "DO not responding" };
     }
+    case "ai_observations":
+      return await doFetch(env, "/ai_observations") || { error: "DO not responding" };
     case "ai_send_notification": {
       const notifyData = { message: args.message };
       if (args.title) notifyData.title = args.title;
