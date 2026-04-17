@@ -1219,13 +1219,23 @@ async function getStates(env, force) {
   return data;
 }
 async function getEntityState(env, entity_id, force) {
+  if (force) {
+    // Bypass stateCache and KV: issue a fresh WebSocket get_states via the DO.
+    const fresh = await doFetch(env, "/state_force_refresh?entity_id=" + encodeURIComponent(entity_id));
+    if (fresh && !fresh.error) {
+      await cacheSet(env, CK.state(entity_id), fresh, CACHE_TTL.ENTITY_STATE);
+      return fresh;
+    }
+    // DO unavailable or WebSocket error — fall through to REST API.
+    const data = await haRequest(env, "GET", "/api/states/" + entity_id);
+    if (data && !data.error) await cacheSet(env, CK.state(entity_id), data, CACHE_TTL.ENTITY_STATE);
+    return data;
+  }
   const doState = await doFetch(env, "/state?entity_id=" + encodeURIComponent(entity_id));
   if (doState && !doState.error) return doState;
   const key = CK.state(entity_id);
-  if (!force) {
-    const hit = await cacheGet(env, key);
-    if (hit) return hit;
-  }
+  const hit = await cacheGet(env, key);
+  if (hit) return hit;
   const data = await haRequest(env, "GET", "/api/states/" + entity_id);
   if (data && !data.error) await cacheSet(env, key, data, CACHE_TTL.ENTITY_STATE);
   return data;

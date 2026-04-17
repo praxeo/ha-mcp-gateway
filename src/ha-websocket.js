@@ -332,6 +332,27 @@ The update_automation tool currently returns 405 on this instance. Until that's 
           return new Response(JSON.stringify({ error: "Entity not found in real-time cache" }), { status: 404, headers });
         }
 
+        case "/state_force_refresh": {
+          const entityId = url.searchParams.get("entity_id");
+          if (!entityId) {
+            return new Response(JSON.stringify({ error: "entity_id is required" }), { status: 400, headers });
+          }
+          try {
+            const result = await this.sendCommand({ type: "get_states" });
+            if (result && Array.isArray(result.result)) {
+              this.stateCache.clear();
+              for (const s of result.result) this.stateCache.set(s.entity_id, s);
+            }
+            const fresh = this.stateCache.get(entityId);
+            if (!fresh) {
+              return new Response(JSON.stringify({ error: "Entity not found after refresh: " + entityId }), { status: 404, headers });
+            }
+            return new Response(JSON.stringify(fresh), { headers });
+          } catch (err) {
+            return new Response(JSON.stringify({ error: "Force refresh failed: " + err.message }), { status: 500, headers });
+          }
+        }
+
         case "/call_service": {
           const body = await request.json();
           const result = await this.sendCommand({
