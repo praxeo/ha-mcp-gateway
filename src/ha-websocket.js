@@ -10,7 +10,7 @@ export class HAWebSocket {
   // battery and occupancy removed — every Zigbee device reports these, too noisy for context
   static SENSOR_WHITELIST = /* @__PURE__ */ new Set(["temperature", "humidity", "power", "moisture"]);
   static MAX_CONTEXT_ENTITIES = 120;
-  static MAX_SENSOR_CONTEXT = 15;
+  static MAX_SENSOR_CONTEXT = 25;
 
   // Noisy switch patterns — entities that inflate the switch domain without being useful
   // for the agent to control. Primarily Tapo camera config, Zigbee motion sensor LED configs,
@@ -1041,13 +1041,30 @@ CRITICAL RULES:
 
 RESPONSE FORMAT — non-negotiable:
 Your entire response must be a SINGLE JSON object in exactly this shape:
-{"reply": "your response here", "actions": []}
 
-Rules:
+{
+  "reply": "your response text",
+  "actions": [
+    {"type": "call_service", "domain": "switch", "service": "turn_on", "data": {"entity_id": "switch.magnolia_lamp"}},
+    {"type": "send_notification", "message": "alert text", "title": "optional"},
+    {"type": "save_memory", "memory": "observation to remember"}
+  ]
+}
+
+ACTION SCHEMA — EXACT shape, no exceptions:
+- "type" MUST be present and be one of: "call_service", "send_notification", "save_memory".
+- For call_service:
+  * "domain" and "service" are SEPARATE strings. Never combined like "switch.turn_on".
+  * Entity ID goes inside "data": { "entity_id": "..." }.
+  * Do NOT use a "target" key. Do NOT put entity_id at the top level of the action.
+- WRONG (HA YAML automation style): {"service": "switch.turn_on", "target": {"entity_id": "switch.x"}}
+- WRONG (flat style): {"service": "switch.turn_on", "entity_id": "switch.x"}
+- RIGHT: {"type": "call_service", "domain": "switch", "service": "turn_on", "data": {"entity_id": "switch.x"}}
+
+Other rules:
 - Emit ONE JSON object. Never two. Never a JSON array followed by another JSON object.
-- Plain prose replies will be rejected by the system. Wrap every response in the envelope, including apologies, clarifications, status reports, and one-word answers.
-- If there is nothing to do, use "actions": [].
-- Do not include markdown fences, commentary before the JSON, or explanations after it.`;
+- If nothing to do, use "actions": [].
+- No markdown fences, no text outside the JSON.`;
 
     try {
       const response = await this.callMiniMax([
@@ -1143,6 +1160,22 @@ Rules:
   // ========================================================================
 
   async executeAIAction(action) {
+    // Auto-heal HA YAML-automation style action shapes into internal format.
+    // MiniMax occasionally emits {"service": "switch.turn_on", "target": {...}} or
+    // {"service": "switch.turn_on", "entity_id": "..."} — rewrite to our schema.
+    if (!action.type && typeof action.service === "string" && action.service.includes(".")) {
+      const [healedDomain, healedService] = action.service.split(".", 2);
+      let healedData = {};
+      if (action.data && typeof action.data === "object") {
+        healedData = action.data;
+      } else if (action.target && action.target.entity_id) {
+        healedData = { entity_id: action.target.entity_id };
+      } else if (action.entity_id) {
+        healedData = { entity_id: action.entity_id };
+      }
+      this.logAI("action_healed", "Rewrote HA-yaml action to call_service: " + healedDomain + "." + healedService, { original: action });
+      action = { type: "call_service", domain: healedDomain, service: healedService, data: healedData };
+    }
     switch (action.type) {
       case "call_service": {
         console.log("AI executing:", action.domain + "." + action.service);
@@ -1217,6 +1250,7 @@ Rules:
 
       default:
         this.logAI("unknown_action", "Unknown action type: " + action.type, action);
+        throw new Error("Unknown action type: '" + (action.type || "undefined") + "' — expected call_service, send_notification, or save_memory");
     }
   }
 
