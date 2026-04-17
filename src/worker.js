@@ -1741,6 +1741,29 @@ async function handleTool(env, name, args) {
     // ---- Events ----
     case "fire_event":
       return await haRequest(env, "POST", "/api/events/" + args.event_type, args.event_data || {});
+    // ---- Agent State ----
+    case "save_memory": {
+      const r = await doFetch(env, "/ai_memory_append", { memory: args.memory });
+      return r || { error: "DO not responding" };
+    }
+    case "save_observation": {
+      const r = await doFetch(env, "/ai_observation_append", {
+        text: args.text,
+        replaces: args.replaces
+      });
+      return r || { error: "DO not responding" };
+    }
+    case "ai_send_notification": {
+      const notifyData = { message: args.message };
+      if (args.title) notifyData.title = args.title;
+      const result = await callServiceWS(env, "notify", "notify", notifyData);
+      await doFetch(env, "/ai_log_append", {
+        type: "notification",
+        message: args.message,
+        data: { title: args.title || null, source: "tool_call" }
+      });
+      return result;
+    }
     // ---- Cache Management ----
     case "cache_status": {
       if (!env.HA_CACHE) return { error: "HA_CACHE not bound" };
