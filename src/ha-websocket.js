@@ -1754,7 +1754,6 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
       }
 
       const assistantMsg = response.choices?.[0]?.message;
-      const finishReason = response.choices?.[0]?.finish_reason;
 
       if (!assistantMsg) {
         this.logAI("error", "Native loop: no assistant message in response", { iteration: iter, debug_keys: Object.keys(response || {}) }, "native_loop");
@@ -1771,8 +1770,26 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
 
       const toolCalls = Array.isArray(assistantMsg.tool_calls) ? assistantMsg.tool_calls : [];
 
-      if (toolCalls.length === 0 || finishReason === "stop") {
+      if (toolCalls.length === 0) {
         const cleaned = stripThink(assistantMsg.content);
+        // Hallucinated-completion tripwire: model says "opening/closing/turning on..."
+        // but emitted no tool_call. Force one corrective iteration instead of returning
+        // the lie to the user. Mirrors the legacy claim-mismatch check at
+        // chatWithAgent but acts on it rather than just logging.
+        const actionClaimVerbs = /\b(opening|closing|turning on|turning off|locking|unlocking|setting|activating|dimming|starting|stopping)\b/i;
+        if (actionsTaken.length === 0 && actionClaimVerbs.test(cleaned)) {
+          this.logAI(
+            "action_hallucination",
+            `Claim without tool call — forcing retry: "${cleaned.substring(0, 150)}"`,
+            { iteration: iter },
+            "native_loop"
+          );
+          messages.push({
+            role: "user",
+            content: "You just said you performed an action (e.g. \"opening\", \"closing\", \"turning on\") but did not emit a tool_call. That is a hallucination. Call the appropriate tool NOW to actually do what you said. If you truly cannot or should not act, reply plainly saying so — do not claim completion."
+          });
+          continue;
+        }
         return {
           reply: cleaned,
           actions_taken: actionsTaken,
@@ -2045,14 +2062,60 @@ Evaluate these events against the timeline above. Take action only if warranted.
     ];
 
     try {
+      const oldHistoryLen = conversationHistory.length;
       const result = await this.runNativeToolLoop(initialMessages, { maxIterations: 8 });
       const reply = (result.reply && result.reply.trim()) || "Done.";
 
       this.logAI("chat_reply", reply.substring(0, 300), { from, full_reply: reply }, "native_loop");
-      conversationHistory.push({ role: "user", content: `[${from}]: ${message}` });
-      conversationHistory.push({ role: "assistant", content: reply });
-      if (conversationHistory.length > 40) conversationHistory.splice(0, conversationHistory.length - 40);
-      await this.state.storage.put("chat_history", conversationHistory);
+
+      // Preserve the full tool-calling trace in history. Prior storage kept only
+      // {user, assistant-text-only} pairs — across turns the model saw zero evidence
+      // of past tool use and drifted toward chat-mode replies ("Done —  opening")
+      // without emitting tool_calls. Storing assistant.tool_calls + tool-role
+      // responses gives it its own track record.
+      //
+      // Extract loop additions (everything added after [system, ...oldHistory, currentUser]).
+      const TOOL_CONTENT_CAP = 4000;
+      const loopAdditions = result.messages.slice(1 + oldHistoryLen + 1).map((m) => {
+        if (m.role === "tool" && typeof m.content === "string" && m.content.length > TOOL_CONTENT_CAP) {
+          return { ...m, content: m.content.substring(0, TOOL_CONTENT_CAP) + "…[truncated]" };
+        }
+        return m;
+      });
+      // Drop any trailing imbalanced messages (e.g. assistant with pending tool_calls,
+      // or a trailing tool message) — the next turn's API call requires a clean state.
+      while (loopAdditions.length > 0) {
+        const last = loopAdditions[loopAdditions.length - 1];
+        const pendingTools = last.role === "assistant" && Array.isArray(last.tool_calls) && last.tool_calls.length > 0;
+        if (last.role === "assistant" && !pendingTools) break;
+        loopAdditions.pop();
+      }
+      // If the trace ended without a final assistant reply (max_iterations, API error),
+      // synthesize one from the reply text we're returning so history reflects what the user saw.
+      const endsCleanly = loopAdditions.length > 0 &&
+        loopAdditions[loopAdditions.length - 1].role === "assistant" &&
+        !loopAdditions[loopAdditions.length - 1].tool_calls?.length;
+      if (!endsCleanly) {
+        loopAdditions.push({ role: "assistant", content: reply });
+      }
+
+      const nextHistory = [
+        ...conversationHistory,
+        { role: "user", content: `[${from}]: ${message}` },
+        ...loopAdditions
+      ];
+
+      // Cap at the last N user-initiated turns. Capping by raw message count could
+      // split a user→assistant(tool_calls)→tool→assistant chain, which the API rejects.
+      const MAX_TURNS = 10;
+      const userIdxs = [];
+      for (let i = 0; i < nextHistory.length; i++) {
+        if (nextHistory[i].role === "user") userIdxs.push(i);
+      }
+      if (userIdxs.length > MAX_TURNS) {
+        nextHistory.splice(0, userIdxs[userIdxs.length - MAX_TURNS]);
+      }
+      await this.state.storage.put("chat_history", nextHistory);
 
       this.logAI(
         "chat",
