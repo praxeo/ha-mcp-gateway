@@ -595,6 +595,17 @@ function getAgentToolset(role) {
   return TOOLS.filter(t => !DANGEROUS_TOOLS.has(t.name));
 }
 
+function mcpToOpenAITool(tool) {
+  return {
+    type: "function",
+    function: {
+      name: tool.name,
+      description: tool.description,
+      parameters: tool.inputSchema || { type: "object", properties: {} }
+    }
+  };
+}
+
 // ============================================================================
 // CHAT_HTML - Chat UI served at /chat
 // ============================================================================
