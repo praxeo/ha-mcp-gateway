@@ -1982,7 +1982,7 @@ async function doFetch(env, path, body) {
       options.body = JSON.stringify(body);
     }
     const resp = await stub.fetch("http://do" + path, options);
-    if (resp.ok) return await resp.json();
+    try { return await resp.json(); } catch { return null; }
   } catch {
   }
   return null;
