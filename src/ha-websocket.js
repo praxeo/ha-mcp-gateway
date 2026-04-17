@@ -1803,7 +1803,7 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
           result = await this.executeNativeTool(name, args);
         }
 
-        if (NATIVE_ACTION_TOOL_NAMES.has(name) && !(result && result.error)) {
+        if (name) {
           const label = name === "call_service" && args.domain && args.service
             ? `call_service: ${args.domain}.${args.service}`
             : name;
