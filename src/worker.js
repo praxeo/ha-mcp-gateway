@@ -575,6 +575,26 @@ var TOOLS = [
   }
 ];
 
+const DANGEROUS_TOOLS = new Set([
+  "restart_ha",
+  "delete_automation",
+  "update_automation",
+  "create_automation",
+  "bulk_disable_entities",
+  "bulk_enable_entities",
+  "disable_entity",
+  "enable_entity",
+  "update_entity_registry",
+  "update_dashboard_config",
+  "clear_cache",
+  "fire_event",
+]);
+
+function getAgentToolset(role) {
+  if (role === "mcp_external") return TOOLS;
+  return TOOLS.filter(t => !DANGEROUS_TOOLS.has(t.name));
+}
+
 // ============================================================================
 // CHAT_HTML - Chat UI served at /chat
 // ============================================================================
@@ -1795,7 +1815,7 @@ async function handleMCP(request, env) {
       case "notifications/initialized":
         return { jsonrpc: "2.0", id, result: {} };
       case "tools/list":
-        return { jsonrpc: "2.0", id, result: { tools: TOOLS } };
+        return { jsonrpc: "2.0", id, result: { tools: getAgentToolset("mcp_external") } };
       case "tools/call": {
         const result = await handleTool(env, params.name, params.arguments || {});
         return { jsonrpc: "2.0", id, result: { content: [{ type: "text", text: typeof result === "string" ? result : JSON.stringify(result, null, 2) }] } };
