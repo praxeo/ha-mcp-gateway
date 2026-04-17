@@ -493,11 +493,6 @@ The update_automation tool currently returns 405 on this instance. Until that's 
           return new Response(JSON.stringify({ saved: true, count: observations.length }), { headers });
         }
 
-        case "/ai_observations": {
-          const observations = await this.state.storage.get("ai_observations") || [];
-          return new Response(JSON.stringify(observations), { headers });
-        }
-
         case "/ai_log_append": {
           const body = await request.json();
           this.logAI(body.type, body.message, body.data || {});
@@ -1707,7 +1702,7 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
       messages,
       tools,
       max_tokens: maxTokens,
-      temperature: 0.3,
+      temperature: 0,
       extra_body: { reasoning_split: true }
     };
     const response = await fetch("https://api.minimax.io/v1/chat/completions", {

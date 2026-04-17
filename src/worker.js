@@ -1808,8 +1808,6 @@ async function handleTool(env, name, args) {
       });
       return r || { error: "DO not responding" };
     }
-    case "ai_observations":
-      return await doFetch(env, "/ai_observations") || { error: "DO not responding" };
     case "ai_send_notification": {
       const notifyData = { message: args.message };
       if (args.title) notifyData.title = args.title;
