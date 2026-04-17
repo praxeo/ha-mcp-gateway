@@ -8,9 +8,65 @@ export class HAWebSocket {
     "person", "input_boolean", "weather", "fan", "media_player", "light", "switch",
   ];
   // battery and occupancy removed — every Zigbee device reports these, too noisy for context
-  static SENSOR_WHITELIST = new Set(["temperature", "humidity", "power", "moisture"]);
+  static SENSOR_WHITELIST = /* @__PURE__ */ new Set(["temperature", "humidity", "power", "moisture"]);
   static MAX_CONTEXT_ENTITIES = 120;
-  static MAX_SENSOR_CONTEXT = 15; // cap sensor entities regardless of MAX_CONTEXT_ENTITIES
+  static MAX_SENSOR_CONTEXT = 15;
+
+  // Noisy switch patterns — entities that inflate the switch domain without being useful
+  // for the agent to control. Primarily Tapo camera config, Zigbee motion sensor LED configs,
+  // and similar per-device toggles that belong in HA's UI, not the agent's context.
+  static NOISY_SWITCH_PATTERNS = [
+    /_trigger_alarm_on_/,
+    /_smart_track_/,
+    /_smart_dual_track_/,
+    /_privacy$/,
+    /_privacy_zones$/,
+    /_record_audio$/,
+    /_record_to_sd_card$/,
+    /_microphone_mute$/,
+    /_microphone_noise_cancellation$/,
+    /_lens_distortion/,
+    /_flip(_fixed_lens)?$/,
+    /_auto_track$/,
+    /_notifications$/,
+    /_rich_notifications$/,
+    /_automatically_upgrade_firmware$/,
+    /_media_sync$/,
+    /_diagnose_mode$/,
+    /_indicator_led$/,
+    /_child_lock$/,
+    /_led_trigger_indicator$/,
+    /_scene_control_multi_tap/,
+    /_disable_double_click$/
+  ];
+
+  static isNoisySwitch(entityId) {
+    return HAWebSocket.NOISY_SWITCH_PATTERNS.some(p => p.test(entityId));
+  }
+
+  // Extract the first complete top-level JSON object from text.
+  // Handles nested braces, quoted strings, and escape sequences correctly.
+  // Returns the JSON substring, or null if none found.
+  // Replaces /\{[\s\S]*\}/ which is greedy and fails on concatenated JSON blobs.
+  static extractFirstJSON(text) {
+    if (!text) return null;
+    const start = text.indexOf('{');
+    if (start === -1) return null;
+    let depth = 0, inStr = false, esc = false;
+    for (let i = start; i < text.length; i++) {
+      const c = text[i];
+      if (esc) { esc = false; continue; }
+      if (c === '\\') { esc = true; continue; }
+      if (c === '"') { inStr = !inStr; continue; }
+      if (inStr) continue;
+      if (c === '{') depth++;
+      else if (c === '}') {
+        depth--;
+        if (depth === 0) return text.slice(start, i + 1);
+      }
+    }
+    return null;
+  }
 
   constructor(state, env) {
     this.state = state;
@@ -723,6 +779,8 @@ When automation editing is enabled, you'll be able to make the change directly. 
         const domain = id.split(".")[0];
         const attr = state.attributes || {};
         const deviceClass = attr.device_class || "";
+        if (domain === "switch" && HAWebSocket.isNoisySwitch(id)) continue;
+        if (state.state === "unavailable" || state.state === "unknown") continue;
         if (HAWebSocket.CONTEXT_DOMAIN_PRIORITY.includes(domain)) {
           const entry = { entity_id: id, friendly_name: attr.friendly_name || id, state: state.state };
           if (domain === "climate") {
@@ -826,10 +884,10 @@ Analyze these events and decide what actions to take, if any. Respond with JSON 
         // Thinking models can exhaust token budget on reasoning, leaving content null.
         // Try to salvage JSON from the reasoning field.
         const rawReasoning = response.choices?.[0]?.message?.reasoning || "";
-        const jsonFallback = rawReasoning.match(/\{[\s\S]*\}/);
+        const jsonFallback = HAWebSocket.extractFirstJSON(rawReasoning);
         if (jsonFallback) {
           console.log("AI Agent: content null, salvaging JSON from reasoning field");
-          responseText = jsonFallback[0];
+          responseText = jsonFallback;
         }
       }
       if (!responseText) {
@@ -841,9 +899,9 @@ Analyze these events and decide what actions to take, if any. Respond with JSON 
 
       let aiDecision;
       try {
-        const jsonMatch = responseText.match(/\{[\s\S]*\}/);
+        const jsonMatch = HAWebSocket.extractFirstJSON(responseText);
         if (jsonMatch) {
-          aiDecision = JSON.parse(jsonMatch[0]);
+          aiDecision = JSON.parse(jsonMatch);
         } else {
           throw new Error("No JSON found in response");
         }
@@ -911,6 +969,11 @@ Analyze these events and decide what actions to take, if any. Respond with JSON 
       const domain = id.split(".")[0];
       const attr = state.attributes || {};
       const deviceClass = attr.device_class || "";
+      // Skip Tapo camera config switches, motion sensor LED toggles, and similar
+      // per-device config that inflates the switch domain without being useful.
+      if (domain === "switch" && HAWebSocket.isNoisySwitch(id)) continue;
+      // Skip unavailable entities — no point occupying a context slot for something offline.
+      if (state.state === "unavailable" || state.state === "unknown") continue;
       if (HAWebSocket.CONTEXT_DOMAIN_PRIORITY.includes(domain)) {
         const entry = { entity_id: id, friendly_name: attr.friendly_name || id, state: state.state };
         if (domain === "climate") {
@@ -973,20 +1036,18 @@ CRITICAL RULES:
 4. Smoke/CO detectors are NOT in HA. Do not reference their state.
 5. update_automation returns 405. Tell John what to change in the UI.
 6. The timeline is shared with the autonomous loop — you see each other's activity. If a state change happened without a corresponding action from you, it was the user or an automation, not you.
-7. Never call get_state on individual sensor entities — use the entity context provided above instead.
+7. Sensor values are already provided in CURRENT STATE OF ENTITIES above. To report a reading, quote the value directly from that block. If a sensor isn't listed there, say so plainly — don't guess and don't try to invoke it.
+8. The ONLY valid action types are: call_service, send_notification, save_memory. There is no get_state, no read_sensor, no fetch, no query. If you want to know a value, it's either in CURRENT STATE OF ENTITIES or it isn't available.
 
-CRITICAL: You MUST ALWAYS respond with valid JSON in this exact format, even for simple conversational replies:
+RESPONSE FORMAT — non-negotiable:
+Your entire response must be a SINGLE JSON object in exactly this shape:
 {"reply": "your response here", "actions": []}
-Never respond with plain text. Every response must be wrapped in the JSON envelope. If you have no actions to take, use an empty actions array.
 
-{
-  "reply": "Your response to the user",
-  "actions": [
-    {"type": "call_service", "domain": "...", "service": "...", "data": {...}},
-    {"type": "send_notification", "message": "...", "title": "..."},
-    {"type": "save_memory", "memory": "..."}
-  ]
-}`;
+Rules:
+- Emit ONE JSON object. Never two. Never a JSON array followed by another JSON object.
+- Plain prose replies will be rejected by the system. Wrap every response in the envelope, including apologies, clarifications, status reports, and one-word answers.
+- If there is nothing to do, use "actions": [].
+- Do not include markdown fences, commentary before the JSON, or explanations after it.`;
 
     try {
       const response = await this.callMiniMax([
@@ -999,30 +1060,30 @@ Never respond with plain text. Every response must be wrapped in the JSON envelo
       if (!responseText) {
         // Fallback: some thinking models return content null and put output in reasoning field
         const rawReasoning = response.choices?.[0]?.message?.reasoning || "";
-        const jsonFallback = rawReasoning.match(/\{[\s\S]*\}/);
+        const jsonFallback = HAWebSocket.extractFirstJSON(rawReasoning);
         if (jsonFallback) {
           console.log("AI Chat: content null, salvaging JSON from reasoning field");
-          responseText = jsonFallback[0];
+          responseText = jsonFallback;
         }
       }
       this.logAI("chat_raw", "len=" + responseText.length + " preview=" + responseText.substring(0, 100), {});
 
-      let parsed;
+      let parsed = null;
       try {
-        const jsonMatch = responseText.match(/\{[\s\S]*\}/);
-        if (jsonMatch) parsed = JSON.parse(jsonMatch[0]);
-        else {
+        const jsonMatch = HAWebSocket.extractFirstJSON(responseText);
+        if (jsonMatch) {
+          parsed = JSON.parse(jsonMatch);
+        } else {
           this.logAI("chat_parse_fail", "No JSON: " + responseText.substring(0, 200), {});
-          return { reply: responseText, actions_taken: [] };
         }
       } catch (e) {
         this.logAI("chat_parse_error", e.message + " raw=" + responseText.substring(0, 200), {});
-        return { reply: responseText, actions_taken: [] };
       }
-
-      // If JSON parse succeeded but reply is missing, wrap raw text so history always gets written
-      if (!parsed || !parsed.reply) {
-        parsed = { reply: responseText, actions: [] };
+      // Fallback: if parse failed OR the parsed object doesn't have a usable reply,
+      // synthesize the envelope from raw text. This guarantees chat_history writes fire
+      // on every turn, regardless of whether the model honored the JSON format.
+      if (!parsed || typeof parsed.reply !== "string" || !parsed.reply.trim()) {
+        parsed = { reply: responseText.trim() || "Done.", actions: [] };
       }
 
       // Log the reply to timeline and persist dedicated conversation history
