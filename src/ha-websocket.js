@@ -848,60 +848,56 @@ The update_automation tool currently returns 405 on this instance. Until that's 
   //   ai_log_chunk_gen_<N>     = <generation number> owning slot N
   // ==========================================================================
   async loadLogFromStorage() {
-    const head = await this.state.storage.get("ai_log_head") || { current: 0 };
-    const chunks = [];
-    const start = Math.max(0, head.current - (HAWebSocket.LOG_CHUNKS_MAX - 1));
-    for (let gen = start; gen <= head.current; gen++) {
-      const slot = gen % HAWebSocket.LOG_CHUNKS_MAX;
-      // Skip chunks whose slot has been overwritten by a later generation.
-      const storedGen = await this.state.storage.get("ai_log_chunk_gen_" + slot);
-      if (storedGen !== gen) continue;
-      const chunk = await this.state.storage.get("ai_log_chunk_" + slot);
-      if (Array.isArray(chunk)) chunks.push(...chunk);
-    }
-    return chunks;
-  }
-
-  async persistLogEntry(entry) {
+    // Try single-key format first (current format).
+    const simple = await this.state.storage.get("ai_log");
+    if (Array.isArray(simple)) return simple;
+    // Migration: load from old sharded format if present.
     try {
       const head = await this.state.storage.get("ai_log_head") || { current: 0 };
-      const slot = head.current % HAWebSocket.LOG_CHUNKS_MAX;
-      const genKey = "ai_log_chunk_gen_" + slot;
-      const chunkKey = "ai_log_chunk_" + slot;
-
-      // If this slot is still owned by a prior generation (wrap happened or
-      // first use after deploy onto a slot previously owned by generation N),
-      // claim it fresh. Otherwise append to the existing in-progress chunk.
-      const storedGen = await this.state.storage.get(genKey);
-      let chunk;
-      if (storedGen !== head.current) {
-        chunk = [];
-        await this.state.storage.put(genKey, head.current);
-      } else {
-        chunk = await this.state.storage.get(chunkKey) || [];
+      const chunks = [];
+      const start = Math.max(0, head.current - (HAWebSocket.LOG_CHUNKS_MAX - 1));
+      for (let gen = start; gen <= head.current; gen++) {
+        const slot = gen % HAWebSocket.LOG_CHUNKS_MAX;
+        const storedGen = await this.state.storage.get("ai_log_chunk_gen_" + slot);
+        if (storedGen !== gen) continue;
+        const chunk = await this.state.storage.get("ai_log_chunk_" + slot);
+        if (Array.isArray(chunk)) chunks.push(...chunk);
       }
+      return chunks;
+    } catch {
+      return [];
+    }
+  }
 
-      chunk.push(entry);
-      await this.state.storage.put(chunkKey, chunk);
-
-      // Chunk full? Rotate head forward; next write lands in next slot.
-      if (chunk.length >= HAWebSocket.LOG_CHUNK_SIZE) {
-        head.current += 1;
-        await this.state.storage.put("ai_log_head", head);
-      }
-    } catch (err) {
-      // Don't recurse via logAI — append directly to in-memory ring.
-      console.error("persistLogEntry failed:", err.message);
-      this.aiLog.push({
-        type: "log_persist_error",
-        message: err.message,
-        data: {},
-        timestamp: new Date().toISOString()
+  // Write the last 150 compacted entries to a single DO storage key.
+  // Replaces the old per-entry sharding approach which hit the 128KB limit
+  // when entries contained large inline blobs (full chat replies, reasoning text).
+  async persistLog() {
+    const PERSIST_CAP = 150;
+    try {
+      const compacted = this.aiLog.slice(-PERSIST_CAP).map(e => {
+        // state_change: message already has entity/old/new/timestamp — drop redundant data blob.
+        if (e.type === 'state_change') {
+          const c = { type: e.type, message: e.message, timestamp: e.timestamp };
+          if (e.source) c.source = e.source;
+          return c;
+        }
+        // chat entries: drop full_reply and duplicate message field from data.
+        if (e.type === 'chat_reply' || e.type === 'chat_user') {
+          const { full_reply, message: _msg, ...rest } = e.data || {};
+          return { ...e, data: rest };
+        }
+        return e;
       });
+      await this.state.storage.put("ai_log", compacted);
+    } catch (err) {
+      console.error("persistLog failed:", err.message);
+      this.aiLog.push({ type: "log_persist_error", message: err.message, data: {}, timestamp: new Date().toISOString() });
     }
   }
 
   async clearPersistedLog() {
+    await this.state.storage.delete("ai_log").catch(() => {});
     for (let i = 0; i < HAWebSocket.LOG_CHUNKS_MAX; i++) {
       await this.state.storage.delete("ai_log_chunk_" + i).catch(() => {});
       await this.state.storage.delete("ai_log_chunk_gen_" + i).catch(() => {});
@@ -926,7 +922,7 @@ The update_automation tool currently returns 405 on this instance. Until that's 
       this.aiLog.splice(0, this.aiLog.length - HAWebSocket.LOG_IN_MEMORY_CAP);
     }
     console.log("AI LOG [" + type + (source ? "/" + source : "") + "]:", message);
-    this.persistLogEntry(entry).catch((err) => console.error("logAI persist:", err.message));
+    this.persistLog().catch((err) => console.error("logAI persist:", err.message));
   }
 
   // ========================================================================
@@ -1125,6 +1121,7 @@ Analyze these events AND the unified timeline above. Decide what actions to take
       console.error("AI Agent error:", err.message);
       this.logAI("error", "AI Agent cycle failed: " + err.message, {});
     }
+    await this.persistLog();
     this.aiProcessing = false;
   }
 
@@ -1994,6 +1991,7 @@ Evaluate these events against the timeline above. Take action only if warranted.
       },
       "native_loop"
     );
+    await this.persistLog();
   }
 
   // ========================================================================
@@ -2048,6 +2046,7 @@ Evaluate these events against the timeline above. Take action only if warranted.
         "native_loop"
       );
 
+      await this.persistLog();
       return {
         reply,
         actions_taken: result.actions_taken,
