@@ -498,6 +498,9 @@ var TOOLS = [
   { name: "ai_clear_log", description: "Clear the AI agent's action log.", inputSchema: { type: "object" } },
   { name: "ai_memory", description: "View the AI agent's learned memories.", inputSchema: { type: "object" } },
   { name: "ai_clear_memory", description: "Clear the AI agent's memory.", inputSchema: { type: "object" } },
+  { name: "ai_observations", description: "View the AI agent's observations-in-progress — patterns and hypotheses being tracked before promotion to memory.", inputSchema: { type: "object" } },
+  { name: "ai_clear_observations", description: "Clear the AI agent's observations list.", inputSchema: { type: "object" } },
+  { name: "ai_clear_chat", description: "Clear the AI agent's chat conversation history.", inputSchema: { type: "object" } },
   { name: "ai_trigger", description: "Force the AI agent to evaluate pending events now.", inputSchema: { type: "object" } },
   {
     name: "ai_chat",
@@ -1692,6 +1695,12 @@ async function handleTool(env, name, args) {
       return await doFetch(env, "/ai_memory") || { error: "DO not responding" };
     case "ai_clear_memory":
       return await doFetch(env, "/ai_clear_memory") || { error: "DO not responding" };
+    case "ai_observations":
+      return await doFetch(env, "/ai_observations") || { error: "DO not responding" };
+    case "ai_clear_observations":
+      return await doFetch(env, "/ai_clear_observations") || { error: "DO not responding" };
+    case "ai_clear_chat":
+      return await doFetch(env, "/ai_clear_chat") || { error: "DO not responding" };
     case "ai_trigger":
       return await doFetch(env, "/ai_trigger") || { error: "DO not responding" };
     case "ai_chat": {
@@ -1734,7 +1743,7 @@ async function handleMCP(request, env) {
   try {
     switch (method) {
       case "initialize":
-        return { jsonrpc: "2.0", id, result: { protocolVersion: "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: "ha-mcp-gateway", version: "4.1.0" } } };
+        return { jsonrpc: "2.0", id, result: { protocolVersion: "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: "ha-mcp-gateway", version: "5.0.0" } } };
       case "notifications/initialized":
         return { jsonrpc: "2.0", id, result: {} };
       case "tools/list":
@@ -1766,7 +1775,7 @@ var worker_default = {
       const doStatus = await doFetch(env, "/status");
       return new Response(JSON.stringify({
         status: "ok",
-        version: "4.1.0",
+        version: "5.0.0",
         tools: TOOLS.length,
         cache: env.HA_CACHE ? "enabled" : "disabled",
         websocket: doStatus || { connected: false }
@@ -1798,6 +1807,12 @@ var worker_default = {
       if (request.method === "POST") {
         try {
           const body = await request.json();
+          if (!body.message || typeof body.message !== "string") {
+            return new Response(JSON.stringify({ error: "Missing or invalid 'message' field" }), {
+              status: 400,
+              headers: { ...corsHeaders, "Content-Type": "application/json" }
+            });
+          }
           const result = await doFetch(env, "/ai_chat", { message: body.message, from: "web" });
           return new Response(JSON.stringify(result || { error: "Agent not responding" }, null, 2), {
             headers: { ...corsHeaders, "Content-Type": "application/json" }
