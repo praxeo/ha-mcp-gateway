@@ -1092,23 +1092,74 @@ const CHAT_HTML = `<!DOCTYPE html>
     typing.classList.add('active');
     msgEl.scrollTop = msgEl.scrollHeight;
 
+    let statusEl = null;
+
+    function showStatus(msg) {
+      if (!statusEl) {
+        statusEl = document.createElement('div');
+        statusEl.className = 'msg system';
+        msgEl.appendChild(statusEl);
+      }
+      statusEl.textContent = msg;
+      msgEl.scrollTop = msgEl.scrollHeight;
+    }
+
+    function clearStatus() {
+      if (statusEl) { msgEl.removeChild(statusEl); statusEl = null; }
+    }
+
     try {
       const resp = await fetch('/chat', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'Accept': 'text/event-stream' },
         body: JSON.stringify({ message: text })
       });
 
-      const data = await resp.json();
-      typing.classList.remove('active');
-
-      if (data.error) {
-        addMsg('error', data.error);
-      } else {
-        addMsg('agent', data.reply || 'No response.', data.actions_taken || []);
+      if (!resp.ok || !resp.body) {
+        typing.classList.remove('active');
+        addMsg('error', 'Agent error: ' + resp.status);
+        sendBtn.disabled = false;
+        input.focus();
+        return;
       }
+
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+
+        const lines = buf.split('\\n');
+        buf = lines.pop();
+
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue;
+          let evt;
+          try { evt = JSON.parse(line.slice(6)); } catch { continue; }
+
+          if (evt.type === 'tool_call') {
+            showStatus('\\u26a1 Calling ' + evt.name + '...');
+          } else if (evt.type === 'reply') {
+            typing.classList.remove('active');
+            clearStatus();
+            addMsg('agent', evt.text || 'No response.');
+          } else if (evt.type === 'error') {
+            typing.classList.remove('active');
+            clearStatus();
+            addMsg('error', evt.message || 'Agent error');
+          }
+        }
+      }
+
+      typing.classList.remove('active');
+      clearStatus();
+
     } catch (err) {
       typing.classList.remove('active');
+      clearStatus();
       addMsg('error', 'Failed to reach agent: ' + err.message);
     }
 
@@ -1914,6 +1965,29 @@ var worker_default = {
             return new Response(JSON.stringify({ error: "Missing or invalid 'message' field" }), {
               status: 400,
               headers: { ...corsHeaders, "Content-Type": "application/json" }
+            });
+          }
+          const accept = request.headers.get("Accept") || "";
+          if (accept.includes("text/event-stream")) {
+            const stub = getDO(env);
+            if (!stub) {
+              return new Response(JSON.stringify({ error: "Agent not available" }), {
+                status: 503,
+                headers: { ...corsHeaders, "Content-Type": "application/json" }
+              });
+            }
+            const streamResp = await stub.fetch("http://do/ai_chat_stream", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ message: body.message, from: "web" })
+            });
+            return new Response(streamResp.body, {
+              headers: {
+                ...corsHeaders,
+                "Content-Type": "text/event-stream",
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive"
+              }
             });
           }
           const result = await doFetch(env, "/ai_chat", { message: body.message, from: "web" });

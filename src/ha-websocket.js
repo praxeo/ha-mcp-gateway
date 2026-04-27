@@ -505,6 +505,34 @@ The update_automation tool currently returns 405 on this instance. Until that's 
           return new Response(JSON.stringify(response), { headers });
         }
 
+        case "/ai_chat_stream": {
+          const body = await request.json();
+          const { readable, writable } = new TransformStream();
+          const writer = writable.getWriter();
+          const encoder = new TextEncoder();
+          const write = (chunk) => writer.write(encoder.encode(chunk)).catch(() => {});
+
+          const keepalive = setInterval(() => write(":\n\n"), 8000);
+          this.chatWithAgent(body.message, body.from || "default", (event) => {
+            write(`data: ${JSON.stringify(event)}\n\n`);
+          }).then(() => {
+            clearInterval(keepalive);
+            writer.close();
+          }).catch((err) => {
+            write(`data: ${JSON.stringify({ type: "error", message: err.message })}\n\n`);
+            clearInterval(keepalive);
+            writer.close();
+          });
+
+          return new Response(readable, {
+            headers: {
+              "Content-Type": "text/event-stream",
+              "Cache-Control": "no-cache",
+              "Connection": "keep-alive"
+            }
+          });
+        }
+
         default:
           return new Response(JSON.stringify({ error: "Unknown DO endpoint: " + url.pathname }), { status: 404, headers });
       }
@@ -1145,12 +1173,12 @@ Analyze these events AND the unified timeline above. Decide what actions to take
   // AI Agent — Chat Interface
   // JSON mode + prose pass-through + targeted retry + honest failure
   // ========================================================================
-  async chatWithAgent(message, from = "default") {
+  async chatWithAgent(message, from = "default", onEvent = null) {
     if (!this.env.MINIMAX_API_KEY) return { error: "MINIMAX_API_KEY not configured" };
 
     // Phase 2 feature flag — native tool-calling path. Flag off = no-op, legacy runs.
     if (this.env.USE_NATIVE_TOOL_LOOP === "true") {
-      return await this.chatWithAgentNative(message, from);
+      return await this.chatWithAgentNative(message, from, onEvent);
     }
 
     const now = new Date();
@@ -1724,7 +1752,7 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
   // Native tool-calling loop — Phase 2
   // ========================================================================
   async runNativeToolLoop(initialMessages, options = {}) {
-    const { maxIterations = 8, systemPrompt = null } = options;
+    const { maxIterations = 8, systemPrompt = null, onEvent = null } = options;
     const messages = [...initialMessages];
     if (systemPrompt && (messages.length === 0 || messages[0].role !== "system")) {
       messages.unshift({ role: "system", content: systemPrompt });
@@ -1735,10 +1763,12 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
 
     for (let iter = 0; iter < maxIterations; iter++) {
       let response;
+      if (onEvent) onEvent({ type: "thinking" });
       try {
         response = await this.callMiniMaxWithTools(messages, NATIVE_AGENT_TOOLS);
       } catch (err) {
         this.logAI("error", "Native loop API call failed: " + err.message, { iteration: iter }, "native_loop");
+        if (onEvent) onEvent({ type: "error", message: err.message });
         return {
           reply: "I couldn't reach the model — " + err.message,
           actions_taken: actionsTaken,
@@ -1752,6 +1782,7 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
 
       if (!assistantMsg) {
         this.logAI("error", "Native loop: no assistant message in response", { iteration: iter, debug_keys: Object.keys(response || {}) }, "native_loop");
+        if (onEvent) onEvent({ type: "error", message: "empty_response" });
         return {
           reply: "I didn't get a usable response from the model.",
           actions_taken: actionsTaken,
@@ -1785,6 +1816,7 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
           });
           continue;
         }
+        if (onEvent) onEvent({ type: "reply", text: cleaned });
         return {
           reply: cleaned,
           actions_taken: actionsTaken,
@@ -1805,6 +1837,7 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
           this.logAI("action_error", `Native loop: failed to parse args for ${name}: ${parseErr.message}`, { tool: name, raw: argsRaw.substring(0, 300) }, "native_loop");
         }
 
+        if (onEvent) onEvent({ type: "tool_call", name, args });
         let result;
         if (parseError) {
           result = { error: "Invalid JSON arguments: " + parseError };
@@ -1814,6 +1847,7 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
         } else {
           result = await this.executeNativeTool(name, args);
         }
+        if (onEvent) onEvent({ type: "tool_result", name, result });
 
         if (name) {
           const label = name === "call_service" && args.domain && args.service
@@ -1836,6 +1870,7 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
       { actions_taken: actionsTaken },
       "native_loop"
     );
+    if (onEvent) onEvent({ type: "error", message: "max_iterations_exceeded" });
     return {
       reply: "I hit my iteration ceiling without finishing — actions so far: " +
         (actionsTaken.length > 0 ? actionsTaken.join(", ") : "none") +
@@ -2031,7 +2066,7 @@ Evaluate these events against the timeline above. Take action only if warranted.
   // Native chat (Phase 2) — flag-gated sibling of chatWithAgent.
   // Returns { reply, actions_taken, error? } — mirrors legacy chat contract.
   // ========================================================================
-  async chatWithAgentNative(message, from = "default") {
+  async chatWithAgentNative(message, from = "default", onEvent = null) {
     const now = new Date();
     const now_str = now.toLocaleString("en-US", { timeZone: "America/Chicago" });
     const memory = await this.state.storage.get("ai_memory") || [];
@@ -2058,7 +2093,7 @@ Evaluate these events against the timeline above. Take action only if warranted.
 
     try {
       const oldHistoryLen = conversationHistory.length;
-      const result = await this.runNativeToolLoop(initialMessages, { maxIterations: 8 });
+      const result = await this.runNativeToolLoop(initialMessages, { maxIterations: 8, onEvent });
       const reply = (result.reply && result.reply.trim()) || "Done.";
 
       this.logAI("chat_reply", reply.substring(0, 300), { from, full_reply: reply }, "native_loop");
