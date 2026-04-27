@@ -845,7 +845,7 @@ The update_automation tool currently returns 405 on this instance. Until that's 
   // MiniMax API helper — OpenAI-compatible endpoint
   // JSON mode + temp drop for structured output reliability
   // ========================================================================
-  async callMiniMax(messages, maxTokens = 2048, jsonMode = false) {
+  async callMiniMax(messages, maxTokens = 8192, jsonMode = false) {
     const body = {
       model: "MiniMax-M2.7-highspeed",
       messages,
@@ -1116,7 +1116,7 @@ Analyze these events AND the unified timeline above. Decide what actions to take
       const response = await this.callMiniMax([
         { role: "system", content: systemPrompt },
         { role: "user", content: userMessage }
-      ], 16384, true);
+      ], 32768, true);
 
       const debugKeys = Object.keys(response || {});
       let responseText = response.choices?.[0]?.message?.content || response.response || "";
@@ -1330,7 +1330,7 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
       if (correction) {
         messages.push({ role: "user", content: "[SYSTEM CORRECTION] " + correction });
       }
-      const response = await this.callMiniMax(messages, 8192, true);
+      const response = await this.callMiniMax(messages, 16384, true);
       let responseText = response.choices?.[0]?.message?.content || response.response || "";
       if (!responseText) {
         const rawReasoning = response.choices?.[0]?.message?.reasoning || "";
@@ -1724,7 +1724,7 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
   //
   // Returns the raw API response with the assistant message UNMUTATED.
   // ========================================================================
-  async callMiniMaxWithTools(messages, tools, maxTokens = 4096) {
+  async callMiniMaxWithTools(messages, tools, maxTokens = 16384) {
     const body = {
       model: "MiniMax-M2.7-highspeed",
       messages,
