@@ -526,9 +526,9 @@ The update_automation tool currently returns 405 on this instance. Until that's 
 
           return new Response(readable, {
             headers: {
-              "Content-Type": "text/event-stream",
-              "Cache-Control": "no-cache",
-              "Connection": "keep-alive"
+              "Content-Type": "text/event-stream; charset=utf-8",
+              "Cache-Control": "no-cache, no-transform",
+              "X-Accel-Buffering": "no"
             }
           });
         }
@@ -881,15 +881,12 @@ The update_automation tool currently returns 405 on this instance. Until that's 
   }
 
   // ==========================================================================
-  // LOG PERSISTENCE — sharded across multiple DO storage keys to stay under
-  // the 128KB per-value limit. Each generation writes to slot = gen % CHUNKS_MAX.
-  // A sibling metadata key (ai_log_chunk_gen_N) records which generation owns
-  // each slot, so wrapped rotation doesn't read stale chunks.
+  // LOG PERSISTENCE — single DO storage key "ai_log" holding the last 150
+  // compacted entries. The old sharded key approach (ai_log_head / ai_log_chunk_N)
+  // is retained for migration reads only; new writes always use the flat key.
   //
-  // Storage keys used:
-  //   ai_log_head              = { current: <generation number> }
-  //   ai_log_chunk_<N>         = [entry, entry, ...] where N = gen % CHUNKS_MAX
-  //   ai_log_chunk_gen_<N>     = <generation number> owning slot N
+  // Storage keys:
+  //   ai_log    = [entry, entry, ...] (last 150 entries, compacted)
   // ==========================================================================
   async loadLogFromStorage() {
     // Try single-key format first (current format).
@@ -1731,7 +1728,7 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
       tools,
       max_tokens: maxTokens,
       temperature: 0,
-      extra_body: { reasoning_split: true }
+      reasoning_split: true
     };
     const response = await fetch("https://api.minimax.io/v1/chat/completions", {
       method: "POST",
@@ -1760,15 +1757,16 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
 
     const actionsTaken = [];
     const stripThink = (s) => (s || "").replace(/<think>[\s\S]*?<\/think>/g, "").trim();
+    const safeEmit = (evt) => { try { if (onEvent) onEvent(evt); } catch {} };
 
     for (let iter = 0; iter < maxIterations; iter++) {
       let response;
-      if (onEvent) onEvent({ type: "thinking" });
+      safeEmit({ type: "thinking" });
       try {
         response = await this.callMiniMaxWithTools(messages, NATIVE_AGENT_TOOLS);
       } catch (err) {
         this.logAI("error", "Native loop API call failed: " + err.message, { iteration: iter }, "native_loop");
-        if (onEvent) onEvent({ type: "error", message: err.message });
+        safeEmit({ type: "error", message: err.message });
         return {
           reply: "I couldn't reach the model — " + err.message,
           actions_taken: actionsTaken,
@@ -1782,7 +1780,7 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
 
       if (!assistantMsg) {
         this.logAI("error", "Native loop: no assistant message in response", { iteration: iter, debug_keys: Object.keys(response || {}) }, "native_loop");
-        if (onEvent) onEvent({ type: "error", message: "empty_response" });
+        safeEmit({ type: "error", message: "empty_response" });
         return {
           reply: "I didn't get a usable response from the model.",
           actions_taken: actionsTaken,
@@ -1814,9 +1812,10 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
             role: "user",
             content: "You just said you performed an action (e.g. \"opening\", \"closing\", \"turning on\") but did not emit a tool_call. That is a hallucination. Call the appropriate tool NOW to actually do what you said. If you truly cannot or should not act, reply plainly saying so — do not claim completion."
           });
+          safeEmit({ type: "thinking" });
           continue;
         }
-        if (onEvent) onEvent({ type: "reply", text: cleaned });
+        safeEmit({ type: "reply", text: cleaned });
         return {
           reply: cleaned,
           actions_taken: actionsTaken,
@@ -1837,7 +1836,10 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
           this.logAI("action_error", `Native loop: failed to parse args for ${name}: ${parseErr.message}`, { tool: name, raw: argsRaw.substring(0, 300) }, "native_loop");
         }
 
-        if (onEvent) onEvent({ type: "tool_call", name, args });
+        const evtLabel = name === "call_service" && args.domain && args.service
+          ? `${args.domain}.${args.service}`
+          : name;
+        safeEmit({ type: "tool_call", name, label: evtLabel, args });
         let result;
         if (parseError) {
           result = { error: "Invalid JSON arguments: " + parseError };
@@ -1847,7 +1849,7 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
         } else {
           result = await this.executeNativeTool(name, args);
         }
-        if (onEvent) onEvent({ type: "tool_result", name, result });
+        safeEmit({ type: "tool_result", name, ok: !result?.error, summary: result?.error ? String(result.error).slice(0, 120) : "done" });
 
         if (name) {
           const label = name === "call_service" && args.domain && args.service
@@ -2144,6 +2146,10 @@ Evaluate these events against the timeline above. Take action only if warranted.
       }
       if (userIdxs.length > MAX_TURNS) {
         nextHistory.splice(0, userIdxs[userIdxs.length - MAX_TURNS]);
+      }
+      const HISTORY_BYTE_CAP = 110000;
+      while (nextHistory.length > 2 && JSON.stringify(nextHistory).length > HISTORY_BYTE_CAP) {
+        nextHistory.shift();
       }
       await this.state.storage.put("chat_history", nextHistory);
 

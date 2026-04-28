@@ -1140,8 +1140,12 @@ const CHAT_HTML = `<!DOCTYPE html>
           let evt;
           try { evt = JSON.parse(line.slice(6)); } catch { continue; }
 
-          if (evt.type === 'tool_call') {
-            showStatus('\\u26a1 Calling ' + evt.name + '...');
+          if (evt.type === 'thinking') {
+            showStatus('Thinking\u2026');
+          } else if (evt.type === 'tool_call') {
+            showStatus('\u26a1 ' + (evt.label || evt.name) + '\u2026');
+          } else if (evt.type === 'tool_result') {
+            showStatus((evt.ok ? '\u2713 ' : '\u2717 ') + evt.name);
           } else if (evt.type === 'reply') {
             typing.classList.remove('active');
             clearStatus();
@@ -1984,9 +1988,9 @@ var worker_default = {
             return new Response(streamResp.body, {
               headers: {
                 ...corsHeaders,
-                "Content-Type": "text/event-stream",
-                "Cache-Control": "no-cache",
-                "Connection": "keep-alive"
+                "Content-Type": "text/event-stream; charset=utf-8",
+                "Cache-Control": "no-cache, no-transform",
+                "X-Accel-Buffering": "no"
               }
             });
           }
