@@ -371,6 +371,164 @@ KNOWN LIMITATION — AUTOMATION EDITING:
 The update_automation tool currently returns 405 on this instance. Until that's resolved, you cannot edit automations via the API. If John asks you to modify an automation, tell him what the change should be and where to make it in the HA UI (Settings → Automations).`;
   }
 
+  // ==========================================================================
+  // CLIMATE PREAMBLE — deterministic block injected into user messages when
+  // the inbound text references HVAC/temperature topics. Lets MiniMax reason
+  // about thermostat behavior without re-deriving zone semantics every turn.
+  // ==========================================================================
+  static CLIMATE_TRIGGER_RE = /\b(ac|a\/c|air\s?cond|cool|cold|chilly|heat(?!er\s+lock)|warm|hot|thermostat|temp(?!late)|temperature|°|degrees?|climate|hvac|freezing|sweating)\b/i;
+
+  static climateTriggerMatches(text) {
+    if (!text || typeof text !== "string") return false;
+    return HAWebSocket.CLIMATE_TRIGGER_RE.test(text);
+  }
+
+  static _seasonDominant(monthIdx) {
+    if (monthIdx >= 10 || monthIdx <= 2) return "heating-dominant";
+    if (monthIdx >= 5 && monthIdx <= 8) return "cooling-dominant";
+    return "swing";
+  }
+
+  static _forecastTrend(forecast) {
+    if (!Array.isArray(forecast) || forecast.length < 2) return null;
+    const temps = forecast
+      .map((f) => (f && typeof f.temperature === "number" ? f.temperature : null))
+      .filter((t) => t !== null);
+    if (temps.length < 2) return null;
+    const delta = temps[temps.length - 1] - temps[0];
+    if (delta > 2) return "warming";
+    if (delta < -2) return "cooling";
+    return "stable";
+  }
+
+  static _forecastHighLow(forecast) {
+    if (!Array.isArray(forecast) || forecast.length === 0) return null;
+    const temps = forecast
+      .slice(0, 4)
+      .map((f) => (f && typeof f.temperature === "number" ? f.temperature : null))
+      .filter((t) => t !== null);
+    if (temps.length === 0) return null;
+    return { high: Math.max(...temps), low: Math.min(...temps) };
+  }
+
+  _explainHvacAction(modeStr, current, setpoint, hvacAction) {
+    const mode = (modeStr || "").toLowerCase();
+    const c = typeof current === "number" ? current : parseFloat(current);
+    const sp = typeof setpoint === "number" ? setpoint : parseFloat(setpoint);
+    if (mode === "off") return "off, no action regardless of temps";
+    if (mode === "auto") return `${hvacAction || "idle"} (mode=auto, deferring to thermostat hvac_action)`;
+    if (isNaN(c) || isNaN(sp)) return hvacAction || "unknown (current/setpoint missing)";
+    const fmt = (n) => {
+      const r = Math.round(n * 10) / 10;
+      return Number.isInteger(r) ? String(r) : r.toFixed(1);
+    };
+    if (mode === "cool") {
+      if (c <= sp) return `idle is correct (current ${fmt(sp - c)}°F below setpoint, cool mode only runs when above)`;
+      return `should be cooling (current ${fmt(c - sp)}°F above setpoint)`;
+    }
+    if (mode === "heat") {
+      if (c >= sp) return `idle is correct (current ${fmt(c - sp)}°F above setpoint, heat mode only runs when below)`;
+      return `should be heating (current ${fmt(sp - c)}°F below setpoint)`;
+    }
+    return hvacAction || `mode=${mode}`;
+  }
+
+  // Single batched render_template fetch for outdoor + both thermostats. Cached
+  // separately: weather 5min (slow-moving), climate 30s (live setpoint changes).
+  async _fetchClimateData() {
+    const now = Date.now();
+    const weatherStale = !this._weatherCache || (now - this._weatherCache.ts) > 300000;
+    const climateStale = !this._climateCache || (now - this._climateCache.ts) > 30000;
+    if (!weatherStale && !climateStale) return true;
+
+    const template = `{"weather_state":"{{ states('weather.forecast_home') }}","weather_temp":{{ state_attr('weather.forecast_home', 'temperature') | default('null', true) }},"forecast":{{ (state_attr('weather.forecast_home', 'forecast') or [])[:4] | tojson }},"b_state":"{{ states('climate.t6_pro_z_wave_programmable_thermostat') }}","b_current":{{ state_attr('climate.t6_pro_z_wave_programmable_thermostat', 'current_temperature') | default('null', true) }},"b_setpoint":{{ state_attr('climate.t6_pro_z_wave_programmable_thermostat', 'temperature') | default('null', true) }},"b_action":"{{ state_attr('climate.t6_pro_z_wave_programmable_thermostat', 'hvac_action') | default('') }}","m_state":"{{ states('climate.t6_pro_z_wave_programmable_thermostat_2') }}","m_current":{{ state_attr('climate.t6_pro_z_wave_programmable_thermostat_2', 'current_temperature') | default('null', true) }},"m_setpoint":{{ state_attr('climate.t6_pro_z_wave_programmable_thermostat_2', 'temperature') | default('null', true) }},"m_action":"{{ state_attr('climate.t6_pro_z_wave_programmable_thermostat_2', 'hvac_action') | default('') }}"}`;
+
+    let parsed;
+    try {
+      const resp = await this.sendCommand({ type: "render_template", template, timeout: 5 });
+      const raw = resp && resp.result;
+      if (!raw) return false;
+      parsed = JSON.parse(raw);
+    } catch (err) {
+      this.logAI("error", "climate preamble render_template failed: " + err.message, {});
+      return false;
+    }
+
+    if (weatherStale) {
+      this._weatherCache = {
+        ts: now,
+        data: {
+          state: parsed.weather_state,
+          temperature: parsed.weather_temp,
+          forecast: Array.isArray(parsed.forecast) ? parsed.forecast : []
+        }
+      };
+    }
+    if (climateStale) {
+      this._climateCache = {
+        ts: now,
+        data: {
+          basement: { mode: parsed.b_state, current: parsed.b_current, setpoint: parsed.b_setpoint, action: parsed.b_action },
+          main: { mode: parsed.m_state, current: parsed.m_current, setpoint: parsed.m_setpoint, action: parsed.m_action }
+        }
+      };
+    }
+    return true;
+  }
+
+  async _buildClimatePreambleIfNeeded(triggerText, source = "chat") {
+    if (this.env.CLIMATE_PREAMBLE_ENABLED === "false") return null;
+    if (!HAWebSocket.climateTriggerMatches(triggerText)) return null;
+    if (!this.connected || !this.authenticated) return null;
+
+    const ok = await this._fetchClimateData();
+    if (!ok || !this._weatherCache || !this._climateCache) return null;
+
+    const w = this._weatherCache.data;
+    const c = this._climateCache.data;
+    const nowDate = new Date();
+    const nowStr = nowDate.toLocaleString("en-US", { timeZone: "America/Chicago", timeZoneName: "short" });
+    const monthFmt = new Intl.DateTimeFormat("en-US", { timeZone: "America/Chicago", month: "numeric" });
+    const monthIdx = parseInt(monthFmt.format(nowDate), 10) - 1;
+    const seasonStr = HAWebSocket._seasonDominant(monthIdx);
+
+    const tempStr = (w.temperature !== null && w.temperature !== undefined) ? `${w.temperature}°F` : "n/a";
+    const condStr = w.state || "unknown";
+
+    const hl = HAWebSocket._forecastHighLow(w.forecast);
+    const trend = HAWebSocket._forecastTrend(w.forecast);
+    const forecastLine = hl
+      ? `Forecast next 12h: high ${hl.high}°F, low ${hl.low}°F, trend ${trend || "stable"}`
+      : `Forecast next 12h: unavailable (no forecast attribute)`;
+
+    const fmtZone = (label, entityId, z) => {
+      const explanation = this._explainHvacAction(z.mode, z.current, z.setpoint, z.action);
+      const cur = (z.current !== null && z.current !== undefined) ? `${z.current}°F` : "n/a";
+      const sp = (z.setpoint !== null && z.setpoint !== undefined) ? `${z.setpoint}°F` : "n/a";
+      return `${label} (${entityId}):\n  mode=${z.mode || "unknown"}, current=${cur}, setpoint=${sp}, action=${z.action || "n/a"}\n  → ${explanation}`;
+    };
+
+    const block = `[CLIMATE STATE — auto-injected, reason from this]
+Now: ${nowStr}
+Outdoor: ${tempStr}, ${condStr}
+${forecastLine}
+Season: ${seasonStr} (Birmingham)
+
+${fmtZone("Basement", "climate.t6_pro_z_wave_programmable_thermostat", c.basement)}
+
+${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
+
+    this.logAI("climate_preamble_injected", `source=${source}`, {
+      source,
+      basement_mode: c.basement.mode,
+      basement_action: c.basement.action,
+      main_mode: c.main.mode,
+      main_action: c.main.action,
+      outdoor_temp: w.temperature
+    });
+    return block;
+  }
+
   async fetch(request) {
     const url = new URL(request.url);
     const headers = { "Content-Type": "application/json" };
@@ -1561,7 +1719,11 @@ RESPOND ONLY WITH VALID JSON:
 If no action is needed:
 {"reasoning": "Everything looks normal", "actions": []}`;
 
-      const userMessage = `Current time: ${now.toLocaleString("en-US", { timeZone: "America/Chicago" })}
+      const lastObservation = observations.length > 0 ? observations[observations.length - 1] : "";
+      const eventsTriggerText = eventsToProcess.map((e) => `${e.friendly_name || ""} ${e.entity_id || ""} ${e.new_state || ""}`).join(" ");
+      const climatePreamble = await this._buildClimatePreambleIfNeeded(`${lastObservation} ${eventsTriggerText}`, "autonomous_legacy");
+
+      const userMessage = `Current time: ${now.toLocaleString("en-US", { timeZone: "America/Chicago" })}${climatePreamble ? "\n\n" + climatePreamble : ""}
 
 The following state changes just occurred:
 ${JSON.stringify(eventsToProcess, null, 1)}
@@ -1766,7 +1928,8 @@ ACTION SCHEMA — EXACT shape, no exceptions:
 
 Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing to do, use "actions": [].`;
 
-    const userTurn = { role: "user", content: "Current time: " + now_str + "\n\n" + message };
+    const climatePreamble = await this._buildClimatePreambleIfNeeded(message, "chat_legacy");
+    const userTurn = { role: "user", content: "Current time: " + now_str + (climatePreamble ? "\n\n" + climatePreamble : "") + "\n\n" + message };
 
     // ---- Model call helper ----
     // If previousAssistantResponse is provided, it's inserted as a prior assistant
@@ -2580,7 +2743,11 @@ OPERATIONAL REMINDERS:
       vectorRetrieved
     });
 
-    const userMessage = `Current time: ${now.toLocaleString("en-US", { timeZone: "America/Chicago" })}
+    const lastObservation = observations.length > 0 ? observations[observations.length - 1] : "";
+    const eventsTriggerText = eventsToProcess.map((e) => `${e.friendly_name || ""} ${e.entity_id || ""} ${e.new_state || ""}`).join(" ");
+    const climatePreamble = await this._buildClimatePreambleIfNeeded(`${lastObservation} ${eventsTriggerText}`, "autonomous_native");
+
+    const userMessage = `Current time: ${now.toLocaleString("en-US", { timeZone: "America/Chicago" })}${climatePreamble ? "\n\n" + climatePreamble : ""}
 
 The following state changes just occurred:
 ${JSON.stringify(eventsToProcess, null, 1)}
@@ -2634,10 +2801,12 @@ Evaluate these events against the timeline above. Take action only if warranted.
       from
     });
 
+    const climatePreamble = await this._buildClimatePreambleIfNeeded(message, "chat_native");
+
     const initialMessages = [
       { role: "system", content: systemPrompt },
       ...conversationHistory,
-      { role: "user", content: `Current time: ${now_str}\n\n${message}` }
+      { role: "user", content: `Current time: ${now_str}${climatePreamble ? "\n\n" + climatePreamble : ""}\n\n${message}` }
     ];
 
     try {
