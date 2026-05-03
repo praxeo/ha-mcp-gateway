@@ -2343,6 +2343,12 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
               score: typeof m.score === "number" ? Number(m.score.toFixed(3)) : null,
               state: cached ? cached.state : null
             };
+            const lastChangedMs = cached?.last_changed ?
+              new Date(cached.last_changed).getTime() : null;
+            const ageSeconds = lastChangedMs ?
+              Math.round((Date.now() - lastChangedMs) / 1000) : null;
+            out.age_seconds = ageSeconds;
+            if (cached?._fromSnapshot) out.from_snapshot = true;
             const attr = cached?.attributes || {};
             if (out.domain === "climate") {
               out.setpoint = attr.temperature ?? null;
@@ -2449,6 +2455,15 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
   getNativeAgentSystemPrompt(role, ctx) {
     const { memory = [], observations = [], timeline = "", contextEntities = [], from = "default", vectorRetrieved = false } = ctx;
 
+    const stateHealth = {
+      ws_connected: this.connected,
+      ws_authenticated: this.authenticated,
+      states_ready: this.statesReady,
+      last_pong_age_seconds: this.lastPongAt ?
+        Math.round((Date.now() - this.lastPongAt) / 1000) : null,
+      cached_entity_count: this.stateCache.size
+    };
+
     const modeBlock = role === "autonomous"
       ? `MODE: AUTONOMOUS HEARTBEAT.
 You're reviewing a batch of home state-change events. Two jobs in parallel:
@@ -2459,6 +2474,12 @@ CRITICAL: Returning ZERO tool calls is the correct answer when nothing needs act
       : `MODE: CHAT. ${from} is talking to you directly. Keep replies concise and skip the filler. If you took an action, say what you did plainly. This is also your best non-intrusive moment to surface an observer-mode pattern you've been building — if something's worth mentioning, mention it. If not, don't force it.`;
 
     return `${this.getAgentContext()}
+
+STATE FRESHNESS:
+Each entity includes age_seconds — seconds since Home Assistant reported a state change. Values older than ~120 seconds for active entities (lights, locks, motion sensors) may indicate stale state. If from_snapshot: true, it was restored from a hibernation snapshot and may be significantly stale. When freshness matters, mention it.
+
+GATEWAY HEALTH:
+${JSON.stringify(stateHealth, null, 1)}
 
 ${modeBlock}
 
