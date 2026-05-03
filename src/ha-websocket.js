@@ -1093,6 +1093,90 @@ The update_automation tool currently returns 405 on this instance. Until that's 
   }
 
   // ========================================================================
+  // Vectorize semantic search — embed a query with the same model+pooling as
+  // the backfill, then return the top-k matching entities by cosine similarity.
+  // CLS pooling is required: the index was built with pooling:"cls"; using mean
+  // pooling here would compare vectors from a different geometry and rank them
+  // nearly randomly. Returns [] on any failure so callers can fall back safely.
+  // ========================================================================
+  async retrieveRelevantEntities(query, k = 15) {
+    const start = Date.now();
+    if (!this.env.AI || !this.env.VECTORIZE) {
+      this.logAI("vector_query", "AI or VECTORIZE binding missing — returning []", {
+        query_length: typeof query === "string" ? query.length : 0,
+        count: 0,
+        duration_ms: Date.now() - start
+      });
+      return [];
+    }
+    if (typeof query !== "string" || query.length === 0) {
+      this.logAI("vector_query", "empty query — returning []", {
+        query_length: 0, count: 0, duration_ms: Date.now() - start
+      });
+      return [];
+    }
+
+    const text = query.length > 2000 ? query.slice(0, 2000) : query;
+
+    let aiResult;
+    try {
+      aiResult = await this.env.AI.run("@cf/baai/bge-large-en-v1.5", {
+        text: [text],
+        pooling: "cls"
+      });
+    } catch (err) {
+      this.logAI("vector_query", "embed failed: " + err.message, {
+        query_length: text.length, count: 0, duration_ms: Date.now() - start
+      });
+      return [];
+    }
+
+    const queryVector = aiResult && Array.isArray(aiResult.data) && aiResult.data[0];
+    if (!Array.isArray(queryVector) || queryVector.length !== 1024) {
+      this.logAI("vector_query", "embed returned malformed vector", {
+        query_length: text.length, count: 0, duration_ms: Date.now() - start
+      });
+      return [];
+    }
+
+    let queryRes;
+    try {
+      queryRes = await this.env.VECTORIZE.query(queryVector, {
+        topK: k,
+        returnMetadata: true
+      });
+    } catch (err) {
+      this.logAI("vector_query", "vectorize query failed: " + err.message, {
+        query_length: text.length, count: 0, duration_ms: Date.now() - start
+      });
+      return [];
+    }
+
+    const matches = (queryRes && Array.isArray(queryRes.matches)) ? queryRes.matches : [];
+    const out = [];
+    for (const m of matches) {
+      const md = m && m.metadata;
+      if (!md || !md.entity_id) continue;
+      out.push({
+        entity_id: md.entity_id,
+        friendly_name: md.friendly_name || "",
+        domain: md.domain || "",
+        area: md.area || "",
+        device_class: md.device_class || "",
+        score: typeof m.score === "number" ? m.score : null
+      });
+    }
+
+    this.logAI("vector_query", `returned ${out.length} matches for "${text.slice(0, 80)}"`, {
+      query_length: text.length,
+      count: out.length,
+      top_k: k,
+      duration_ms: Date.now() - start
+    });
+    return out;
+  }
+
+  // ========================================================================
   // MiniMax API helper — OpenAI-compatible endpoint
   // JSON mode + temp drop for structured output reliability
   // ========================================================================
