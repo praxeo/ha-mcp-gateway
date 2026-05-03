@@ -84,6 +84,45 @@ export class HAWebSocket {
     return null;
   }
 
+  // ==========================================================================
+  // Vectorize helpers — duplicated from worker.js so the DO can re-embed
+  // entities incrementally on registry change events. Keep these in sync with
+  // their counterparts in worker.js (fnv1aHex, buildEntityEmbedText, and the
+  // 64-byte vectorId truncation scheme used by the backfill).
+  // ==========================================================================
+  static fnv1aHex(str) {
+    let h = 0x811c9dc5;
+    for (let i = 0; i < str.length; i++) {
+      h ^= str.charCodeAt(i);
+      h = Math.imul(h, 0x01000193);
+    }
+    return (h >>> 0).toString(16).padStart(8, "0");
+  }
+
+  static buildEntityEmbedText(d) {
+    const trunc = (v, n) => {
+      if (v === null || v === undefined) return "";
+      const s = String(v);
+      return s.length > n ? s.slice(0, n) : s;
+    };
+    const aliases = Array.isArray(d.aliases) ? d.aliases.join(", ") : "";
+    const text =
+      trunc(d.friendly_name, 200) +
+      " | " + trunc(d.entity_id, 100) +
+      " | area: " + trunc(d.area, 100) +
+      " | device: " + trunc(d.device_name, 200) +
+      " | domain: " + trunc(d.domain, 50) +
+      " | device_class: " + trunc(d.device_class, 50) +
+      " | aliases: " + trunc(aliases, 300);
+    return text.length > 2000 ? text.slice(0, 2000) : text;
+  }
+
+  static vectorIdForEntity(entityId) {
+    return entityId.length > 64
+      ? entityId.slice(0, 55) + "_" + HAWebSocket.fnv1aHex(entityId)
+      : entityId;
+  }
+
   constructor(state, env) {
     this.state = state;
     this.env = env;
@@ -96,6 +135,7 @@ export class HAWebSocket {
     this.connectAttempts = 0;
     this.lastConnectAttempt = 0;
     this.subscribedEvents = false;
+    this.subscribedRegistryEvents = false;
 
     this.recentEvents = [];
     this.aiProcessing = false;
@@ -577,6 +617,7 @@ The update_automation tool currently returns 405 on this instance. Until that's 
     this.connected = false;
     this.authenticated = false;
     this.subscribedEvents = false;
+    this.subscribedRegistryEvents = false;
     for (const [id, p] of this.pending) { clearTimeout(p.timeout); p.reject(new Error("Disconnected")); }
     this.pending.clear();
   }
@@ -599,6 +640,7 @@ The update_automation tool currently returns 405 on this instance. Until that's 
         this.connectAttempts = 0;
         this.fetchAllStates();
         this.subscribeToStateChanges();
+        this.subscribeToRegistryEvents();
         break;
       case "auth_invalid":
         console.error("HA WebSocket auth FAILED:", msg.message);
@@ -752,6 +794,18 @@ The update_automation tool currently returns 405 on this instance. Until that's 
   }
 
   onEvent(event) {
+    if (event.event_type === "entity_registry_updated" && event.data) {
+      this.handleEntityRegistryUpdated(event.data).catch((err) => {
+        console.error("entity_registry_updated handler:", err.message);
+      });
+      return;
+    }
+    if (event.event_type === "device_registry_updated" && event.data) {
+      this.handleDeviceRegistryUpdated(event.data).catch((err) => {
+        console.error("device_registry_updated handler:", err.message);
+      });
+      return;
+    }
     if (event.event_type === "state_changed" && event.data) {
       const newState = event.data.new_state;
       const oldState = event.data.old_state;
@@ -794,6 +848,7 @@ The update_automation tool currently returns 405 on this instance. Until that's 
     this.connected = false;
     this.authenticated = false;
     this.subscribedEvents = false;
+    this.subscribedRegistryEvents = false;
     this.ws = null;
     this.scheduleReconnect(5000);
   }
@@ -839,6 +894,202 @@ The update_automation tool currently returns 405 on this instance. Until that's 
       this.subscribedEvents = true;
       console.log("Subscribed to state_changed events");
     } catch (err) { console.error("Failed to subscribe:", err.message); }
+  }
+
+  // ========================================================================
+  // Registry event subscriptions — keep the Vectorize index in sync with HA
+  // entity/device registry changes incrementally. Skips silently if the AI or
+  // VECTORIZE bindings are absent.
+  // ========================================================================
+  async subscribeToRegistryEvents() {
+    if (this.subscribedRegistryEvents) return;
+    if (!this.env.AI || !this.env.VECTORIZE) return;
+    try {
+      await this.sendCommand({ type: "subscribe_events", event_type: "entity_registry_updated" });
+      await this.sendCommand({ type: "subscribe_events", event_type: "device_registry_updated" });
+      this.subscribedRegistryEvents = true;
+      console.log("Subscribed to entity_registry_updated and device_registry_updated events");
+    } catch (err) {
+      console.error("Failed to subscribe to registry events:", err.message);
+    }
+  }
+
+  async handleEntityRegistryUpdated(data) {
+    const action = data.action;
+    const entityId = data.entity_id;
+    if (!entityId) return;
+    if (!this.env.AI || !this.env.VECTORIZE) return;
+
+    try {
+      if (action === "remove") {
+        const vectorId = HAWebSocket.vectorIdForEntity(entityId);
+        await this.env.VECTORIZE.deleteByIds([vectorId]);
+        this.logAI("vector_delete", `${entityId} removed from index`, { entity_id: entityId, action });
+        return;
+      }
+      const result = await this.reembedEntities([entityId]);
+      this.logAI(
+        "vector_reembed",
+        `${entityId} (${action}) — embedded=${result.embedded} skipped=${result.skipped} errors=${result.errors}`,
+        { entity_id: entityId, action, ...result }
+      );
+    } catch (err) {
+      this.logAI("vector_error", `entity_registry_updated ${entityId}: ${err.message}`, { entity_id: entityId, action });
+    }
+  }
+
+  async handleDeviceRegistryUpdated(data) {
+    const action = data.action;
+    const deviceId = data.device_id;
+    if (!deviceId) return;
+    if (!this.env.AI || !this.env.VECTORIZE) return;
+    // "remove" propagates to per-entity entity_registry_updated removes; nothing to do here.
+    if (action !== "update" && action !== "create") return;
+
+    try {
+      const entityRegRes = await this.sendCommand({ type: "config/entity_registry/list" });
+      const entities = (entityRegRes && entityRegRes.result) || [];
+      const affected = entities.filter((e) => e && e.device_id === deviceId).map((e) => e.entity_id);
+      if (affected.length === 0) {
+        this.logAI("vector_skip", `device ${deviceId} has no entities`, { device_id: deviceId, action });
+        return;
+      }
+      const result = await this.reembedEntities(affected);
+      this.logAI(
+        "vector_reembed",
+        `device ${deviceId} (${action}) → ${affected.length} entities — embedded=${result.embedded} skipped=${result.skipped} errors=${result.errors}`,
+        { device_id: deviceId, action, entity_count: affected.length, ...result }
+      );
+    } catch (err) {
+      this.logAI("vector_error", `device_registry_updated ${deviceId}: ${err.message}`, { device_id: deviceId, action });
+    }
+  }
+
+  // Re-embed a list of entity IDs into Vectorize. Mirrors the backfill path in
+  // worker.js: looks up area/device/state context, builds the embed text,
+  // skips unchanged docs by hash, embeds in batches of 50, upserts in one call.
+  async reembedEntities(entityIds) {
+    if (!Array.isArray(entityIds) || entityIds.length === 0) {
+      return { embedded: 0, errors: 0, skipped: 0 };
+    }
+
+    const [entityRegRes, deviceRegRes, areaRegRes] = await Promise.all([
+      this.sendCommand({ type: "config/entity_registry/list" }),
+      this.sendCommand({ type: "config/device_registry/list" }),
+      this.sendCommand({ type: "config/area_registry/list" })
+    ]);
+    const entityReg = (entityRegRes && entityRegRes.result) || [];
+    const deviceReg = (deviceRegRes && deviceRegRes.result) || [];
+    const areaReg = (areaRegRes && areaRegRes.result) || [];
+
+    const areaById = new Map();
+    for (const a of areaReg) if (a && a.area_id) areaById.set(a.area_id, a.name || "");
+    const deviceById = new Map();
+    for (const d of deviceReg) {
+      if (d && d.id) {
+        deviceById.set(d.id, { name: d.name_by_user || d.name || "", area_id: d.area_id || null });
+      }
+    }
+    const entityById = new Map();
+    for (const e of entityReg) if (e && e.entity_id) entityById.set(e.entity_id, e);
+
+    const docs = [];
+    for (const entityId of entityIds) {
+      const e = entityById.get(entityId);
+      if (!e) continue;
+      const domain = entityId.split(".")[0] || "";
+      const state = this.stateCache.get(entityId);
+      const dev = e.device_id ? deviceById.get(e.device_id) : null;
+      const areaId = e.area_id || (dev && dev.area_id) || null;
+      const area = areaId ? (areaById.get(areaId) || "") : "";
+      const friendly_name =
+        (state && state.attributes && state.attributes.friendly_name) ||
+        e.name || e.original_name || entityId;
+      const device_class = (state && state.attributes && state.attributes.device_class) || "";
+      const device_name = (dev && dev.name) || "";
+      const aliases = Array.isArray(e.aliases) ? e.aliases : [];
+
+      const text = HAWebSocket.buildEntityEmbedText({
+        friendly_name, entity_id: entityId, area, device_name, domain, device_class, aliases
+      });
+      const hash = HAWebSocket.fnv1aHex(text);
+      const vectorId = HAWebSocket.vectorIdForEntity(entityId);
+      docs.push({
+        entity_id: entityId,
+        vector_id: vectorId,
+        text,
+        hash,
+        metadata: { entity_id: entityId, friendly_name, domain, area, device_class, hash }
+      });
+    }
+
+    if (docs.length === 0) return { embedded: 0, errors: 0, skipped: 0 };
+
+    const existingHash = new Map();
+    if (typeof this.env.VECTORIZE.getByIds === "function") {
+      const LOOKUP_BATCH = 20;
+      for (let i = 0; i < docs.length; i += LOOKUP_BATCH) {
+        const slice = docs.slice(i, i + LOOKUP_BATCH).map((d) => d.vector_id);
+        try {
+          const existing = await this.env.VECTORIZE.getByIds(slice);
+          if (Array.isArray(existing)) {
+            for (const v of existing) {
+              if (v && v.id && v.metadata && v.metadata.hash) existingHash.set(v.id, v.metadata.hash);
+            }
+          }
+        } catch {
+          existingHash.clear();
+          break;
+        }
+      }
+    }
+
+    const toEmbed = docs.filter((d) => existingHash.get(d.vector_id) !== d.hash);
+    const skipped = docs.length - toEmbed.length;
+    if (toEmbed.length === 0) return { embedded: 0, errors: 0, skipped };
+
+    const EMBED_BATCH = 50;
+    let embedded = 0;
+    let errors = 0;
+    const pending = [];
+
+    for (let i = 0; i < toEmbed.length; i += EMBED_BATCH) {
+      const slice = toEmbed.slice(i, i + EMBED_BATCH);
+      let aiResult;
+      try {
+        aiResult = await this.env.AI.run("@cf/baai/bge-large-en-v1.5", {
+          text: slice.map((d) => d.text),
+          pooling: "cls"
+        });
+      } catch {
+        errors += slice.length;
+        continue;
+      }
+      const vectors = aiResult && aiResult.data;
+      if (!Array.isArray(vectors) || vectors.length !== slice.length) {
+        errors += slice.length;
+        continue;
+      }
+      for (let j = 0; j < slice.length; j++) {
+        const v = vectors[j];
+        if (!Array.isArray(v) || v.length !== 1024) {
+          errors++;
+          continue;
+        }
+        pending.push({ id: slice[j].vector_id, values: v, metadata: slice[j].metadata });
+      }
+    }
+
+    if (pending.length > 0) {
+      try {
+        await this.env.VECTORIZE.upsert(pending);
+        embedded = pending.length;
+      } catch {
+        errors += pending.length;
+      }
+    }
+
+    return { embedded, errors, skipped };
   }
 
   // ========================================================================
