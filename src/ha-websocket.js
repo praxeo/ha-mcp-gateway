@@ -29,6 +29,12 @@ export class HAWebSocket {
   static LOG_CHUNKS_MAX = 15;
   static LOG_IN_MEMORY_CAP = 1000;
 
+  static SNAPSHOT_ATTR_ALLOWLIST = [
+    "friendly_name", "device_class", "unit_of_measurement",
+    "temperature", "current_temperature", "current_position",
+    "humidity", "battery_level", "hvac_action", "hvac_mode"
+  ];
+
   // Noisy switch patterns — entities that inflate the switch domain without being useful
   // for the agent to control. Primarily Tapo camera config, Zigbee motion sensor LED configs,
   // and similar per-device toggles that belong in HA's UI, not the agent's context.
@@ -142,6 +148,8 @@ export class HAWebSocket {
     this.pingInFlight = false;
     this.lastPingSentAt = 0;
     this.pingId = null;
+
+    this.lastSnapshotPersist = 0;
 
     this.recentEvents = [];
     this.aiProcessing = false;
@@ -341,6 +349,10 @@ The update_automation tool currently returns 405 on this instance. Until that's 
         this.aiLog = this.aiLog.slice(-HAWebSocket.LOG_IN_MEMORY_CAP);
       }
       this._logInitialized = true;
+    }
+
+    if (this.stateCache.size === 0) {
+      await this._restoreStateSnapshot();
     }
 
     if (!this.connected || !this.authenticated) {
@@ -826,6 +838,12 @@ The update_automation tool currently returns 405 on this instance. Until that's 
         this.stateCache.delete(event.data.entity_id);
       }
 
+      const persistNow = Date.now();
+      if (persistNow - this.lastSnapshotPersist > 60000) {
+        this.lastSnapshotPersist = persistNow;
+        this._persistStateSnapshot();
+      }
+
       if (this.aiEnabled && newState && oldState && newState.state !== oldState.state) {
         if (!this.shouldQueueEvent(newState.entity_id, oldState, newState)) {
           return;
@@ -896,8 +914,69 @@ The update_automation tool currently returns 405 on this instance. Until that's 
         for (const state of result.result) { this.stateCache.set(state.entity_id, state); }
         this.statesReady = true;
         console.log("Real-time cache loaded:", this.stateCache.size, "entities");
+        await this._persistStateSnapshot();
       }
     } catch (err) { console.error("Failed to fetch states:", err.message); }
+  }
+
+  _serializeStateCacheForSnapshot() {
+    const out = [];
+    for (const [id, s] of this.stateCache) {
+      const attrs = {};
+      for (const k of HAWebSocket.SNAPSHOT_ATTR_ALLOWLIST) {
+        if (s.attributes && s.attributes[k] !== undefined) {
+          attrs[k] = s.attributes[k];
+        }
+      }
+      out.push({
+        entity_id: id,
+        state: s.state,
+        last_changed: s.last_changed,
+        attributes: attrs
+      });
+    }
+    return { cached_at: Date.now(), entities: out };
+  }
+
+  async _persistStateSnapshot() {
+    try {
+      const snapshot = this._serializeStateCacheForSnapshot();
+      const json = JSON.stringify(snapshot);
+      if (json.length > 120000) {
+        this.logAI("snapshot_too_large",
+          `Snapshot ${json.length} bytes — skipping persist`,
+          { size: json.length });
+        return;
+      }
+      await this.state.storage.put("state_cache_snapshot", snapshot);
+    } catch (err) {
+      this.logAI("snapshot_persist_error", err.message, { error: err.message });
+    }
+  }
+
+  async _restoreStateSnapshot() {
+    try {
+      const snapshot = await this.state.storage.get("state_cache_snapshot");
+      if (!snapshot || !Array.isArray(snapshot.entities)) return 0;
+      for (const e of snapshot.entities) {
+        this.stateCache.set(e.entity_id, {
+          entity_id: e.entity_id,
+          state: e.state,
+          last_changed: e.last_changed,
+          attributes: e.attributes || {},
+          _fromSnapshot: true,
+          _snapshotAge: Date.now() - snapshot.cached_at
+        });
+      }
+      this.logAI("snapshot_restored",
+        `${snapshot.entities.length} entities, age ${Date.now() - snapshot.cached_at}ms`,
+        { entity_count: snapshot.entities.length,
+          age_ms: Date.now() - snapshot.cached_at });
+      return snapshot.entities.length;
+    } catch (err) {
+      this.logAI("snapshot_restore_error", err.message, { error: err.message });
+      return 0;
+    }
   }
 
   async subscribeToStateChanges() {
