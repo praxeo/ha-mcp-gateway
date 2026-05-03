@@ -136,6 +136,12 @@ export class HAWebSocket {
     this.lastConnectAttempt = 0;
     this.subscribedEvents = false;
     this.subscribedRegistryEvents = false;
+    this.statesReady = false;
+
+    this.lastPongAt = 0;
+    this.pingInFlight = false;
+    this.lastPingSentAt = 0;
+    this.pingId = null;
 
     this.recentEvents = [];
     this.aiProcessing = false;
@@ -618,6 +624,8 @@ The update_automation tool currently returns 405 on this instance. Until that's 
     this.authenticated = false;
     this.subscribedEvents = false;
     this.subscribedRegistryEvents = false;
+    this.statesReady = false;
+    this.pingInFlight = false;
     for (const [id, p] of this.pending) { clearTimeout(p.timeout); p.reject(new Error("Disconnected")); }
     this.pending.clear();
   }
@@ -654,6 +662,8 @@ The update_automation tool currently returns 405 on this instance. Until that's 
         this.resolveCommand(msg);
         break;
       case "pong":
+        this.pingInFlight = false;
+        this.lastPongAt = Date.now();
         break;
     }
   }
@@ -849,6 +859,8 @@ The update_automation tool currently returns 405 on this instance. Until that's 
     this.authenticated = false;
     this.subscribedEvents = false;
     this.subscribedRegistryEvents = false;
+    this.statesReady = false;
+    this.pingInFlight = false;
     this.ws = null;
     this.scheduleReconnect(5000);
   }
@@ -882,6 +894,7 @@ The update_automation tool currently returns 405 on this instance. Until that's 
       if (result && Array.isArray(result.result)) {
         this.stateCache.clear();
         for (const state of result.result) { this.stateCache.set(state.entity_id, state); }
+        this.statesReady = true;
         console.log("Real-time cache loaded:", this.stateCache.size, "entities");
       }
     } catch (err) { console.error("Failed to fetch states:", err.message); }
@@ -2587,14 +2600,29 @@ Evaluate these events against the timeline above. Take action only if warranted.
     if (!this.connected || !this.authenticated) {
       await this.connect();
     } else {
-      try { this.ws.send(JSON.stringify({ type: "ping", id: this.msgId++ })); }
-      catch { this.disconnect(); await this.connect(); }
+      const now = Date.now();
+      if (this.pingInFlight && (now - this.lastPingSentAt) > 15000) {
+        this.logAI("ws_dead_no_pong",
+          `No pong in ${now - this.lastPingSentAt}ms — reconnecting`,
+          { last_pong_age_ms: now - this.lastPongAt });
+        this.disconnect();
+        await this.connect();
+      } else if (!this.pingInFlight) {
+        try {
+          this.pingId = this.msgId++;
+          this.ws.send(JSON.stringify({ type: "ping", id: this.pingId }));
+          this.pingInFlight = true;
+          this.lastPingSentAt = now;
+        } catch {
+          this.disconnect();
+          await this.connect();
+        }
+      }
 
       if (this.aiEnabled && this.recentEvents.length > 0 && !this.aiProcessing) {
         await this.runAIAgent();
       }
 
-      const now = Date.now();
       if (this.aiEnabled && !this.aiProcessing && (now - this.lastHeartbeat) >= 900000) {
         this.lastHeartbeat = now;
         this.recentEvents.push({
