@@ -1989,7 +1989,8 @@ async function backfillEntityVectors(env, { force = false } = {}) {
 
   const existingHash = new Map();
   if (!force && env.VECTORIZE && typeof env.VECTORIZE.getByIds === "function") {
-    const LOOKUP_BATCH = 100;
+    // Vectorize getByIds caps at 20 ids/call.
+    const LOOKUP_BATCH = 20;
     for (let i = 0; i < docs.length; i += LOOKUP_BATCH) {
       const slice = docs.slice(i, i + LOOKUP_BATCH).map((d) => d.vector_id);
       try {
