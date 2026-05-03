@@ -2222,8 +2222,64 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
   // ========================================================================
   // Native-loop context helpers — shared between runAIAgentNative and
   // chatWithAgentNative.
+  //
+  // When env.USE_VECTOR_ENTITY_RETRIEVAL === "true" and a non-empty `query` is
+  // supplied (and AI+VECTORIZE bindings exist), the context is built from a
+  // semantic search over the Vectorize index instead of the flat MAX_CONTEXT_
+  // ENTITIES snapshot. Vector results are enriched with live state from
+  // stateCache so the model still sees current state for matched entities.
+  // Returns { entities, vectorRetrieved } so the prompt builder can frame the
+  // section appropriately. Falls back to the flat snapshot on any failure.
   // ========================================================================
-  _buildNativeContextEntities() {
+  async _buildNativeContextEntities(query = null) {
+    const useVector =
+      this.env.USE_VECTOR_ENTITY_RETRIEVAL === "true" ||
+      this.env.USE_VECTOR_ENTITY_RETRIEVAL === "1";
+
+    if (useVector && typeof query === "string" && query.trim().length > 0) {
+      try {
+        const matches = await this.retrieveRelevantEntities(query, 15);
+        if (Array.isArray(matches) && matches.length > 0) {
+          const enriched = matches.map((m) => {
+            const cached = this.stateCache.get(m.entity_id);
+            const out = {
+              entity_id: m.entity_id,
+              friendly_name: m.friendly_name || (cached?.attributes?.friendly_name) || m.entity_id,
+              domain: m.domain || (m.entity_id.split(".")[0] || ""),
+              area: m.area || "",
+              device_class: m.device_class || (cached?.attributes?.device_class) || "",
+              score: typeof m.score === "number" ? Number(m.score.toFixed(3)) : null,
+              state: cached ? cached.state : null
+            };
+            const attr = cached?.attributes || {};
+            if (out.domain === "climate") {
+              out.setpoint = attr.temperature ?? null;
+              out.current_temp = attr.current_temperature ?? null;
+              out.hvac_action = attr.hvac_action ?? null;
+              out.hvac_mode = attr.hvac_mode ?? null;
+            } else if (out.domain === "cover") {
+              out.current_position = attr.current_position ?? null;
+            } else if (out.domain === "weather") {
+              out.temperature = attr.temperature;
+              out.humidity = attr.humidity;
+            } else if (out.domain === "sensor" && attr.unit_of_measurement) {
+              out.unit = attr.unit_of_measurement;
+            }
+            return out;
+          });
+          return { entities: enriched, vectorRetrieved: true };
+        }
+      } catch (err) {
+        this.logAI("vector_query", "context build fell back to flat list: " + err.message, {
+          query_length: query.length
+        });
+      }
+    }
+
+    return { entities: this._buildFlatContextEntities(), vectorRetrieved: false };
+  }
+
+  _buildFlatContextEntities() {
     const byDomain = new Map();
     for (const [id, state] of this.stateCache) {
       const domain = id.split(".")[0];
@@ -2299,7 +2355,7 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
   // MODE block and the `from` context are interpolated in.
   // ========================================================================
   getNativeAgentSystemPrompt(role, ctx) {
-    const { memory = [], observations = [], timeline = "", contextEntities = [], from = "default" } = ctx;
+    const { memory = [], observations = [], timeline = "", contextEntities = [], from = "default", vectorRetrieved = false } = ctx;
 
     const modeBlock = role === "autonomous"
       ? `MODE: AUTONOMOUS HEARTBEAT.
@@ -2336,7 +2392,9 @@ UNIFIED TIMELINE — everything recent: chat messages, your replies, state chang
 
 ${timeline || "Timeline is empty."}
 
-CURRENT STATE OF ENTITIES (${contextEntities.length}) — your live, authoritative snapshot from a maintained WebSocket to HA. If an entity is here, its state is current. Do not say "I don't have visibility" or reason about refresh lag — that's a layer beneath you that you can't see. If an entity is NOT here, say so honestly or use get_state to probe. Never invent entity IDs or fabricate timestamps for events you didn't witness.
+${vectorRetrieved
+  ? `RELEVANT ENTITIES (${contextEntities.length}, semantic-search top-k for this turn) — these were selected by similarity to the current query/events from the FULL set of HA entities, so an entity not in this block may still exist; use get_state to probe specific entity_ids you suspect. Each entry includes the live state from the WebSocket-maintained cache (state=null means HA hasn't reported a value). Higher score = more relevant. Don't invent entity_ids or timestamps for events you didn't witness.`
+  : `CURRENT STATE OF ENTITIES (${contextEntities.length}) — your live, authoritative snapshot from a maintained WebSocket to HA. If an entity is here, its state is current. Do not say "I don't have visibility" or reason about refresh lag — that's a layer beneath you that you can't see. If an entity is NOT here, say so honestly or use get_state to probe. Never invent entity IDs or fabricate timestamps for events you didn't witness.`}
 
 ${JSON.stringify(contextEntities, null, 1)}
 
@@ -2359,14 +2417,22 @@ OPERATIONAL REMINDERS:
     const now = new Date();
     const memory = await this.state.storage.get("ai_memory") || [];
     const observations = await this.state.storage.get("ai_observations") || [];
-    const contextEntities = this._buildNativeContextEntities();
+    // Synthesize a query for vector retrieval from the events being processed:
+    // entity_id + friendly_name gives the embedder enough surface area to find
+    // semantically related entities (the same room, related devices, etc.).
+    const eventQuery = eventsToProcess
+      .map((e) => `${e.entity_id || ""} ${e.friendly_name || ""}`.trim())
+      .filter(Boolean)
+      .join(" | ");
+    const { entities: contextEntities, vectorRetrieved } = await this._buildNativeContextEntities(eventQuery);
     const timeline = this._buildNativeTimeline();
 
     const systemPrompt = this.getNativeAgentSystemPrompt("autonomous", {
       memory,
       observations,
       timeline,
-      contextEntities
+      contextEntities,
+      vectorRetrieved
     });
 
     const userMessage = `Current time: ${now.toLocaleString("en-US", { timeZone: "America/Chicago" })}
@@ -2412,13 +2478,14 @@ Evaluate these events against the timeline above. Take action only if warranted.
     this.logAI("chat_user", `${from}: ${message}`, { from, message });
 
     const timeline = this._buildNativeTimeline();
-    const contextEntities = this._buildNativeContextEntities();
+    const { entities: contextEntities, vectorRetrieved } = await this._buildNativeContextEntities(message);
 
     const systemPrompt = this.getNativeAgentSystemPrompt("chat", {
       memory,
       observations,
       timeline,
       contextEntities,
+      vectorRetrieved,
       from
     });
 
