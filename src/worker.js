@@ -1896,6 +1896,185 @@ async function handleTool(env, name, args) {
       throw new Error("Unknown tool: " + name);
   }
 }
+
+// --- Vectorize backfill helpers ---
+// 32-bit FNV-1a — fast, deterministic, sufficient for change-detection.
+function fnv1aHex(str) {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return (h >>> 0).toString(16).padStart(8, "0");
+}
+
+function buildEntityEmbedText(d) {
+  const trunc = (v, n) => {
+    if (v === null || v === undefined) return "";
+    const s = String(v);
+    return s.length > n ? s.slice(0, n) : s;
+  };
+  const aliases = Array.isArray(d.aliases) ? d.aliases.join(", ") : "";
+  const text =
+    trunc(d.friendly_name, 200) +
+    " | " + trunc(d.entity_id, 100) +
+    " | area: " + trunc(d.area, 100) +
+    " | device: " + trunc(d.device_name, 200) +
+    " | domain: " + trunc(d.domain, 50) +
+    " | device_class: " + trunc(d.device_class, 50) +
+    " | aliases: " + trunc(aliases, 300);
+  return text.length > 2000 ? text.slice(0, 2000) : text;
+}
+
+async function backfillEntityVectors(env, { force = false } = {}) {
+  const [entityRegistry, areaRegistry, deviceRegistry, states] = await Promise.all([
+    getEntityRegistry(env, false),
+    getAreaRegistry(env, false),
+    getDeviceRegistry(env, false),
+    getStates(env, false)
+  ]);
+
+  if (!Array.isArray(entityRegistry) || entityRegistry.length === 0) {
+    throw new Error("Entity registry empty or unavailable");
+  }
+
+  const areaById = new Map();
+  if (Array.isArray(areaRegistry)) {
+    for (const a of areaRegistry) if (a && a.area_id) areaById.set(a.area_id, a.name || "");
+  }
+  const deviceById = new Map();
+  if (Array.isArray(deviceRegistry)) {
+    for (const d of deviceRegistry) if (d && d.id) deviceById.set(d.id, { name: d.name || "", area_id: d.area_id || null });
+  }
+  const stateById = new Map();
+  if (Array.isArray(states)) {
+    for (const s of states) if (s && s.entity_id) stateById.set(s.entity_id, s);
+  }
+
+  const docs = [];
+  for (const e of entityRegistry) {
+    const entity_id = e && e.entity_id;
+    if (!entity_id) continue;
+    const domain = entity_id.split(".")[0] || "";
+    const state = stateById.get(entity_id);
+    const dev = e.device_id ? deviceById.get(e.device_id) : null;
+    const areaId = e.area_id || (dev && dev.area_id) || null;
+    const area = areaId ? (areaById.get(areaId) || "") : "";
+    const friendly_name =
+      (state && state.attributes && state.attributes.friendly_name) ||
+      e.name || e.original_name || entity_id;
+    const device_class =
+      (state && state.attributes && state.attributes.device_class) || "";
+    const device_name = (dev && dev.name) || "";
+    const aliases = Array.isArray(e.aliases) ? e.aliases : [];
+
+    const text = buildEntityEmbedText({
+      friendly_name, entity_id, area, device_name, domain, device_class, aliases
+    });
+    const hash = fnv1aHex(text);
+    // Vectorize hard caps id at 64 bytes. For overlong entity_ids we
+    // substitute a stable truncated-prefix + fnv hash form; the original
+    // entity_id is always preserved in metadata.
+    const vectorId = entity_id.length > 64
+      ? entity_id.slice(0, 55) + "_" + fnv1aHex(entity_id)
+      : entity_id;
+    docs.push({
+      entity_id,
+      vector_id: vectorId,
+      text,
+      hash,
+      metadata: { entity_id, friendly_name, domain, area, device_class, hash }
+    });
+  }
+
+  const existingHash = new Map();
+  if (!force && env.VECTORIZE && typeof env.VECTORIZE.getByIds === "function") {
+    const LOOKUP_BATCH = 100;
+    for (let i = 0; i < docs.length; i += LOOKUP_BATCH) {
+      const slice = docs.slice(i, i + LOOKUP_BATCH).map((d) => d.vector_id);
+      try {
+        const existing = await env.VECTORIZE.getByIds(slice);
+        if (Array.isArray(existing)) {
+          for (const v of existing) {
+            if (v && v.id && v.metadata && v.metadata.hash) existingHash.set(v.id, v.metadata.hash);
+          }
+        }
+      } catch (err) {
+        console.warn("Vectorize getByIds failed, will re-embed all:", err.message);
+        existingHash.clear();
+        break;
+      }
+    }
+  }
+
+  const toEmbed = [];
+  let skipped = 0;
+  for (const d of docs) {
+    if (!force && existingHash.get(d.vector_id) === d.hash) skipped++;
+    else toEmbed.push(d);
+  }
+
+  const EMBED_BATCH = 50;
+  const UPSERT_BATCH = 1000;
+  let embedded = 0;
+  let errors = 0;
+  let pending = [];
+
+  const flushUpsert = async () => {
+    if (pending.length === 0) return;
+    const batch = pending;
+    pending = [];
+    try {
+      await env.VECTORIZE.upsert(batch);
+    } catch (err) {
+      console.error("Vectorize upsert failed:", err.message);
+      errors += batch.length;
+      embedded -= batch.length;
+    }
+  };
+
+  for (let i = 0; i < toEmbed.length; i += EMBED_BATCH) {
+    const slice = toEmbed.slice(i, i + EMBED_BATCH);
+    let aiResult;
+    try {
+      aiResult = await env.AI.run("@cf/baai/bge-large-en-v1.5", {
+        text: slice.map((d) => d.text),
+        pooling: "cls"
+      });
+    } catch (err) {
+      console.error("Embedding batch failed:", err.message);
+      errors += slice.length;
+      continue;
+    }
+
+    const vectors = aiResult && aiResult.data;
+    if (!Array.isArray(vectors) || vectors.length !== slice.length) {
+      console.error("Embedding batch returned malformed result");
+      errors += slice.length;
+      continue;
+    }
+
+    for (let j = 0; j < slice.length; j++) {
+      const v = vectors[j];
+      if (!Array.isArray(v) || v.length !== 1024) {
+        errors++;
+        continue;
+      }
+      pending.push({ id: slice[j].vector_id, values: v, metadata: slice[j].metadata });
+      embedded++;
+      if (pending.length >= UPSERT_BATCH) await flushUpsert();
+    }
+  }
+  await flushUpsert();
+
+  return {
+    total_entities: entityRegistry.length,
+    embedded,
+    skipped,
+    errors
+  };
+}
+
 async function handleMCP(request, env) {
   const { id, method, params } = request;
   try {
@@ -2047,6 +2226,30 @@ var worker_default = {
     }
   }
 }
+    if (url.pathname === "/admin/backfill-vectors") {
+      if (request.method !== "POST") {
+        return new Response("Method not allowed", { status: 405 });
+      }
+      if (!env.AI || !env.VECTORIZE) {
+        return new Response(JSON.stringify({ error: "AI or VECTORIZE binding not configured" }), {
+          status: 500,
+          headers: { ...corsHeaders, "Content-Type": "application/json" }
+        });
+      }
+      const t0 = Date.now();
+      try {
+        const force = url.searchParams.get("force") === "1" || url.searchParams.get("force") === "true";
+        const summary = await backfillEntityVectors(env, { force });
+        return new Response(JSON.stringify({ ...summary, duration_ms: Date.now() - t0 }), {
+          headers: { ...corsHeaders, "Content-Type": "application/json" }
+        });
+      } catch (e) {
+        return new Response(JSON.stringify({ error: e.message, duration_ms: Date.now() - t0 }), {
+          status: 500,
+          headers: { ...corsHeaders, "Content-Type": "application/json" }
+        });
+      }
+    }
     if (url.pathname === "/mcp" || url.pathname === "/") {
       if (env.MCP_AUTH_TOKEN) {
         const auth = request.headers.get("Authorization");

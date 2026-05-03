@@ -26,6 +26,10 @@ command = "npx esbuild src/worker.js --bundle --outdir=dist --format=esm --outba
 binding = "HA_CACHE"
 id = "d341a11cfff149cdb99e5edee7612132"
 
+[[vectorize]]
+binding = "VECTORIZE"
+index_name = "ha-entities"
+
 [durable_objects]
 bindings = [
   { name = "HA_WS", class_name = "HAWebSocket" }
