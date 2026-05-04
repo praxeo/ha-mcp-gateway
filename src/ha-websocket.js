@@ -35,6 +35,15 @@ export class HAWebSocket {
     "humidity", "battery_level", "hvac_action", "hvac_mode"
   ];
 
+  // Domains worth persisting to the snapshot. Diagnostic-heavy domains
+  // (update, sun, zone, device_tracker, number, button, event, ...) are
+  // skipped — the agent never reads them and they balloon the snapshot
+  // past the 128KB DO storage per-value limit.
+  static SNAPSHOT_DOMAIN_ALLOWLIST = new Set([
+    "lock", "cover", "climate", "binary_sensor", "person",
+    "input_boolean", "light", "switch", "sensor", "fan", "media_player"
+  ]);
+
   // Noisy switch patterns — entities that inflate the switch domain without being useful
   // for the agent to control. Primarily Tapo camera config, Zigbee motion sensor LED configs,
   // and similar per-device toggles that belong in HA's UI, not the agent's context.
@@ -1112,17 +1121,35 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
   _serializeStateCacheForSnapshot() {
     const out = [];
     for (const [id, s] of this.stateCache) {
-      const attrs = {};
+      const domain = id.split(".")[0];
+      if (!HAWebSocket.SNAPSHOT_DOMAIN_ALLOWLIST.has(domain)) continue;
+      if (s.state === "unavailable" || s.state === "unknown") continue;
+      if (domain === "switch" && HAWebSocket.isNoisySwitch(id)) continue;
+
+      const attrs = s.attributes || {};
+      if (domain === "sensor") {
+        const deviceClass = attrs.device_class || "";
+        if (HAWebSocket.SENSOR_WHITELIST.has(deviceClass)) {
+          // keep
+        } else if (deviceClass === "battery") {
+          const pct = parseFloat(s.state);
+          if (isNaN(pct) || pct > HAWebSocket.BATTERY_LOW_THRESHOLD) continue;
+        } else {
+          continue;
+        }
+      }
+
+      const filteredAttrs = {};
       for (const k of HAWebSocket.SNAPSHOT_ATTR_ALLOWLIST) {
-        if (s.attributes && s.attributes[k] !== undefined) {
-          attrs[k] = s.attributes[k];
+        if (attrs[k] !== undefined) {
+          filteredAttrs[k] = attrs[k];
         }
       }
       out.push({
         entity_id: id,
         state: s.state,
         last_changed: s.last_changed,
-        attributes: attrs
+        attributes: filteredAttrs
       });
     }
     return { cached_at: Date.now(), entities: out };
