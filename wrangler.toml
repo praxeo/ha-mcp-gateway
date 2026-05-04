@@ -1,4 +1,4 @@
-﻿name = "ha-mcp-gateway"
+name = "ha-mcp-gateway"
 main = "dist/worker.js"
 compatibility_date = "2024-01-01"
 workers_dev = true
@@ -26,9 +26,15 @@ command = "npx esbuild src/worker.js --bundle --outdir=dist --format=esm --outba
 binding = "HA_CACHE"
 id = "d341a11cfff149cdb99e5edee7612132"
 
+# Unified multi-kind index — entity / automation / script / scene / area /
+# device / service / memory / observation. The legacy ha-entities index and
+# its VECTORIZE binding were dropped after the multi-kind index was verified.
+# The ha-entities index itself is retained on Cloudflare as a rollback
+# parachute and can be deleted via `wrangler vectorize delete ha-entities`
+# once you're confident.
 [[vectorize]]
-binding = "VECTORIZE"
-index_name = "ha-entities"
+binding = "KNOWLEDGE"
+index_name = "ha-knowledge"
 
 [durable_objects]
 bindings = [
@@ -39,5 +45,11 @@ bindings = [
 tag = "v1"
 new_classes = ["HAWebSocket"]
 
+# Two cron triggers:
+#   "* * * * *"   — minute-level cache prewarm (existing behavior)
+#   "30 8 * * *"  — daily heavy resync of the slow-changing kinds in the
+#                   knowledge index. 08:30 UTC = 03:30 CDT (a low-activity
+#                   window for this household; in CST winter it lands at
+#                   02:30 local — also fine).
 [triggers]
-crons = ["* * * * *"]
+crons = ["* * * * *", "30 8 * * *"]

@@ -1,5 +1,22 @@
-// ha-websocket.js — PATCHED: JSON mode + retry + honest failure + action claim detection + log sharding + observations
+// ha-websocket.js — multi-kind knowledge index + write-through + native vector_search
 import { NATIVE_AGENT_TOOLS, NATIVE_TOOL_NAMES, NATIVE_ACTION_TOOL_NAMES } from "./agent-tools.js";
+import {
+  fnv1aHex,
+  vectorIdFor,
+  buildEntityEmbedText,
+  buildDeviceEmbedText,
+  buildMemoryEmbedText,
+  buildObservationEmbedText,
+  buildMetadata,
+  entityCategoryFor,
+  isNoisyEntity,
+  isNoisySwitch,
+  NOISY_SWITCH_PATTERNS,
+  NOISY_DOMAINS,
+  NOISY_SENSOR_DEVICE_CLASSES,
+  NOISY_SENSOR_UNITS,
+  extractTopicTag
+} from "./vectorize-schema.js";
 
 export class HAWebSocket {
   // Static config for prioritized entity context building
@@ -44,37 +61,9 @@ export class HAWebSocket {
     "input_boolean", "light", "switch", "sensor", "fan", "media_player"
   ]);
 
-  // Noisy switch patterns — entities that inflate the switch domain without being useful
-  // for the agent to control. Primarily Tapo camera config, Zigbee motion sensor LED configs,
-  // and similar per-device toggles that belong in HA's UI, not the agent's context.
-  static NOISY_SWITCH_PATTERNS = [
-    /_trigger_alarm_on_/,
-    /_smart_track_/,
-    /_smart_dual_track_/,
-    /_privacy$/,
-    /_privacy_zones$/,
-    /_record_audio$/,
-    /_record_to_sd_card$/,
-    /_microphone_mute$/,
-    /_microphone_noise_cancellation$/,
-    /_lens_distortion/,
-    /_flip(_fixed_lens)?$/,
-    /_auto_track$/,
-    /_notifications$/,
-    /_rich_notifications$/,
-    /_automatically_upgrade_firmware$/,
-    /_media_sync$/,
-    /_diagnose_mode$/,
-    /_indicator_led$/,
-    /_child_lock$/,
-    /_led_trigger_indicator$/,
-    /_scene_control_multi_tap/,
-    /_disable_double_click$/
-  ];
-
-  static isNoisySwitch(entityId) {
-    return HAWebSocket.NOISY_SWITCH_PATTERNS.some(p => p.test(entityId));
-  }
+  // Noisy-switch ruleset and is_noisy helpers now live in vectorize-schema.js
+  // and are imported at the top of this module. They're used both for entity
+  // context filtering and for embedding-time noise classification.
 
   // Extract the first complete top-level JSON object from text.
   // Handles nested braces, quoted strings, and escape sequences correctly.
@@ -99,43 +88,27 @@ export class HAWebSocket {
     return null;
   }
 
-  // ==========================================================================
-  // Vectorize helpers — duplicated from worker.js so the DO can re-embed
-  // entities incrementally on registry change events. Keep these in sync with
-  // their counterparts in worker.js (fnv1aHex, buildEntityEmbedText, and the
-  // 64-byte vectorId truncation scheme used by the backfill).
-  // ==========================================================================
-  static fnv1aHex(str) {
-    let h = 0x811c9dc5;
-    for (let i = 0; i < str.length; i++) {
-      h ^= str.charCodeAt(i);
-      h = Math.imul(h, 0x01000193);
-    }
-    return (h >>> 0).toString(16).padStart(8, "0");
-  }
+  // Vectorize helpers (fnv1aHex, vectorIdFor, buildEntityEmbedText, etc.) are
+  // imported from ./vectorize-schema.js. The DO uses them for incremental
+  // re-embed on registry events and write-through embeds for memory/
+  // observation. Pooling is "cls" everywhere — must match the index build.
 
-  static buildEntityEmbedText(d) {
-    const trunc = (v, n) => {
-      if (v === null || v === undefined) return "";
-      const s = String(v);
-      return s.length > n ? s.slice(0, n) : s;
-    };
-    const aliases = Array.isArray(d.aliases) ? d.aliases.join(", ") : "";
-    const text =
-      trunc(d.friendly_name, 200) +
-      " | " + trunc(d.entity_id, 100) +
-      " | area: " + trunc(d.area, 100) +
-      " | device: " + trunc(d.device_name, 200) +
-      " | domain: " + trunc(d.domain, 50) +
-      " | device_class: " + trunc(d.device_class, 50) +
-      " | aliases: " + trunc(aliases, 300);
-    return text.length > 2000 ? text.slice(0, 2000) : text;
-  }
-
-  static vectorIdForEntity(entityId) {
-    return entityId.length > 64
-      ? entityId.slice(0, 55) + "_" + HAWebSocket.fnv1aHex(entityId)
-      : entityId;
+  // Central-time formatter for timeline timestamps surfaced to MiniMax. The
+  // raw aiLog entries stay ISO 8601 / UTC for parseability, but rendering
+  // them verbatim into the system prompt was leaking "04:28 UTC" /
+  // "01:05Z" formats into user-facing replies — the model copied what we
+  // showed it. Format on injection so the model never sees UTC strings.
+  static _formatTimelineTimestamp(iso) {
+    try {
+      const d = new Date(iso);
+      if (isNaN(d.getTime())) return iso;
+      return d.toLocaleString("en-US", {
+        timeZone: "America/Chicago",
+        month: "short", day: "numeric",
+        hour: "numeric", minute: "2-digit",
+        hour12: true
+      });
+    } catch { return iso; }
   }
 
   constructor(state, env) {
@@ -191,8 +164,8 @@ A dedicated HA Green appliance (Raspberry-Pi-class ARM board from Nabu Casa) run
 Layer 4 – ha-mcp-gateway  (this service — YOU live here)
 A Cloudflare Worker + Durable Object that holds a persistent WebSocket to HA, caches entity state in memory, and translates natural-language requests into HA service calls. Auth is via Cloudflare Access (JWT) + a long-lived HA token stored as a Worker secret.
 
-Layer 5 – Vectorize entity index
-A Cloudflare Vectorize store (1 024-dim, cosine, model @cf/baai/bge-large-en-v1.5) that holds an embedding for every HA entity. On each request the gateway embeds the user query, retrieves the top-K most relevant entities, and injects only those into the LLM context — replacing the old approach of dumping all ~300 entities.
+Layer 5 – Vectorize knowledge index (ha-knowledge)
+A Cloudflare Vectorize store (1024-dim, cosine, model @cf/baai/bge-large-en-v1.5, cls pooling) holding embeddings across NINE kinds: entity, automation, script, scene, area, device, service, memory (your saved memories), and observation (your saved observations). On each request the gateway embeds the query, retrieves top-K matches restricted by kind, and injects the relevant entities, plus semantic top-5 memory and top-5 observation matches, into the LLM context. You also have direct access via the vector_search tool — call it with kinds=[...] when something isn't in the pre-injected context (e.g. discovering an HA service or finding a specific past observation by topic).
 
 Layer 6 – LLM  (MiniMax M2.7 High Speed)
 An OpenAI-compatible chat-completion model at api.minimax.io. The gateway sends the system prompt + tool definitions + conversation, and the model returns tool_calls or a final answer. A native tool loop re-calls the model until it stops emitting tool_calls.
@@ -730,24 +703,36 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
 
         case "/ai_memory_append": {
           const body = await request.json();
+          if (!body.memory) {
+            return new Response(JSON.stringify({ error: "memory is required" }), { status: 400, headers });
+          }
+          // Delegate to executeAIAction so write-through embed/upsert and
+          // FIFO-evict vector cleanup happen on this path too.
+          await this.executeAIAction({ type: "save_memory", memory: body.memory }, "tool_call");
           const memory = await this.state.storage.get("ai_memory") || [];
-          memory.push(body.memory);
-          if (memory.length > 100) memory.splice(0, memory.length - 100);
-          await this.state.storage.put("ai_memory", memory);
           return new Response(JSON.stringify({ saved: true, count: memory.length }), { headers });
         }
 
         case "/ai_observation_append": {
           const body = await request.json();
           if (!body.text) return new Response(JSON.stringify({ error: "text is required" }), { status: 400, headers });
-          let observations = await this.state.storage.get("ai_observations") || [];
-          if (body.replaces) {
-            observations = observations.filter(o => !o.startsWith(body.replaces));
-          }
-          observations.push(body.text);
-          if (observations.length > 500) observations.splice(0, observations.length - 500);
-          await this.state.storage.put("ai_observations", observations);
+          await this.executeAIAction({ type: "save_observation", text: body.text, replaces: body.replaces }, "tool_call");
+          const observations = await this.state.storage.get("ai_observations") || [];
           return new Response(JSON.stringify({ saved: true, count: observations.length }), { headers });
+        }
+
+        case "/vector_search": {
+          const body = await request.json();
+          const k = Math.min(Math.max(parseInt(body.top_k || 15, 10) || 15, 1), 50);
+          const matches = await this.retrieveKnowledge({
+            query: body.query,
+            k,
+            kinds: body.kinds,
+            domain: body.domain,
+            area: body.area,
+            includeNoisy: !!body.include_noisy
+          });
+          return new Response(JSON.stringify({ matches, count: matches.length }), { headers });
         }
 
         case "/ai_log_append": {
@@ -1124,7 +1109,7 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
       const domain = id.split(".")[0];
       if (!HAWebSocket.SNAPSHOT_DOMAIN_ALLOWLIST.has(domain)) continue;
       if (s.state === "unavailable" || s.state === "unknown") continue;
-      if (domain === "switch" && HAWebSocket.isNoisySwitch(id)) continue;
+      if (domain === "switch" && isNoisySwitch(id)) continue;
 
       const attrs = s.attributes || {};
       if (domain === "sensor") {
@@ -1159,11 +1144,14 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
     try {
       const snapshot = this._serializeStateCacheForSnapshot();
       const json = JSON.stringify(snapshot);
-      if (json.length > 120000) {
-        this.logAI("snapshot_too_large",
-          `Snapshot ${json.length} bytes — skipping persist`,
+      // DO storage hard limit is 128 KiB (131072 bytes); leave a margin so
+      // metadata overhead can't push the put over. Above the cap we log a
+      // warning but still attempt — silently dropping the snapshot is worse
+      // than a put-exception we'll catch and log below.
+      if (json.length > 127000) {
+        this.logAI("snapshot_oversize",
+          `Snapshot ${json.length} bytes — over 127KB cap, attempting put anyway`,
           { size: json.length });
-        return;
       }
       await this.state.storage.put("state_cache_snapshot", snapshot);
     } catch (err) {
@@ -1206,13 +1194,13 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
   }
 
   // ========================================================================
-  // Registry event subscriptions — keep the Vectorize index in sync with HA
-  // entity/device registry changes incrementally. Skips silently if the AI or
-  // VECTORIZE bindings are absent.
+  // Registry event subscriptions — keep the unified knowledge index in sync
+  // with HA entity/device registry changes. Each event triggers a per-kind
+  // re-embed via reembedRefs. Skips silently if AI or KNOWLEDGE is unbound.
   // ========================================================================
   async subscribeToRegistryEvents() {
     if (this.subscribedRegistryEvents) return;
-    if (!this.env.AI || !this.env.VECTORIZE) return;
+    if (!this.env.AI || !this.env.KNOWLEDGE) return;
     try {
       await this.sendCommand({ type: "subscribe_events", event_type: "entity_registry_updated" });
       await this.sendCommand({ type: "subscribe_events", event_type: "device_registry_updated" });
@@ -1227,23 +1215,24 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
     const action = data.action;
     const entityId = data.entity_id;
     if (!entityId) return;
-    if (!this.env.AI || !this.env.VECTORIZE) return;
+    if (!this.env.AI || !this.env.KNOWLEDGE) return;
 
     try {
       if (action === "remove") {
-        const vectorId = HAWebSocket.vectorIdForEntity(entityId);
-        await this.env.VECTORIZE.deleteByIds([vectorId]);
-        this.logAI("vector_delete", `${entityId} removed from index`, { entity_id: entityId, action });
+        const vectorId = vectorIdFor("entity", entityId);
+        await this.env.KNOWLEDGE.deleteByIds([vectorId]);
+        this.logAI("vector_delete", `${entityId} removed from index`, { entity_id: entityId, action }, "vector_event");
         return;
       }
-      const result = await this.reembedEntities([entityId]);
+      const result = await this.reembedRefs({ kind: "entity", refIds: [entityId] });
       this.logAI(
         "vector_reembed",
         `${entityId} (${action}) — embedded=${result.embedded} skipped=${result.skipped} errors=${result.errors}`,
-        { entity_id: entityId, action, ...result }
+        { entity_id: entityId, action, ...result },
+        "vector_event"
       );
     } catch (err) {
-      this.logAI("vector_error", `entity_registry_updated ${entityId}: ${err.message}`, { entity_id: entityId, action });
+      this.logAI("vector_error", `entity_registry_updated ${entityId}: ${err.message}`, { entity_id: entityId, action }, "vector_event");
     }
   }
 
@@ -1251,37 +1240,53 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
     const action = data.action;
     const deviceId = data.device_id;
     if (!deviceId) return;
-    if (!this.env.AI || !this.env.VECTORIZE) return;
-    // "remove" propagates to per-entity entity_registry_updated removes; nothing to do here.
-    if (action !== "update" && action !== "create") return;
+    if (!this.env.AI || !this.env.KNOWLEDGE) return;
 
     try {
+      if (action === "remove") {
+        // Delete the device's own kind=device vector. Per-entity
+        // entity_registry_updated events will clean up the entities.
+        const vectorId = vectorIdFor("device", deviceId);
+        await this.env.KNOWLEDGE.deleteByIds([vectorId]);
+        this.logAI("vector_delete", `device ${deviceId} removed from index`, { device_id: deviceId, action }, "vector_event");
+        return;
+      }
+      if (action !== "update" && action !== "create") return;
+
       const entityRegRes = await this.sendCommand({ type: "config/entity_registry/list" });
       const entities = (entityRegRes && entityRegRes.result) || [];
       const affected = entities.filter((e) => e && e.device_id === deviceId).map((e) => e.entity_id);
-      if (affected.length === 0) {
-        this.logAI("vector_skip", `device ${deviceId} has no entities`, { device_id: deviceId, action });
-        return;
-      }
-      const result = await this.reembedEntities(affected);
+
+      // Re-embed both the device's own kind=device doc AND the entities it
+      // owns (their device_name field changes when the device is renamed).
+      const [deviceResult, entityResult] = await Promise.all([
+        this.reembedRefs({ kind: "device", refIds: [deviceId] }),
+        affected.length > 0
+          ? this.reembedRefs({ kind: "entity", refIds: affected })
+          : Promise.resolve({ embedded: 0, errors: 0, skipped: 0 })
+      ]);
       this.logAI(
         "vector_reembed",
-        `device ${deviceId} (${action}) → ${affected.length} entities — embedded=${result.embedded} skipped=${result.skipped} errors=${result.errors}`,
-        { device_id: deviceId, action, entity_count: affected.length, ...result }
+        `device ${deviceId} (${action}) — device emb=${deviceResult.embedded}, ${affected.length} entities emb=${entityResult.embedded}`,
+        {
+          device_id: deviceId,
+          action,
+          device: deviceResult,
+          entities: { count: affected.length, ...entityResult }
+        },
+        "vector_event"
       );
     } catch (err) {
-      this.logAI("vector_error", `device_registry_updated ${deviceId}: ${err.message}`, { device_id: deviceId, action });
+      this.logAI("vector_error", `device_registry_updated ${deviceId}: ${err.message}`, { device_id: deviceId, action }, "vector_event");
     }
   }
 
-  // Re-embed a list of entity IDs into Vectorize. Mirrors the backfill path in
-  // worker.js: looks up area/device/state context, builds the embed text,
-  // skips unchanged docs by hash, embeds in batches of 50, upserts in one call.
-  async reembedEntities(entityIds) {
-    if (!Array.isArray(entityIds) || entityIds.length === 0) {
-      return { embedded: 0, errors: 0, skipped: 0 };
-    }
-
+  // Per-kind doc builders for incremental re-embed. Pull HA registries via
+  // the WebSocket (cheaper than a REST round-trip from the DO), then assemble
+  // the canonical-schema doc for each ref. Match worker.js's backfill output
+  // shape so skip-by-hash works identically across both code paths.
+  async _buildEntityDocsForRefs(entityIds) {
+    if (!Array.isArray(entityIds) || entityIds.length === 0) return [];
     const [entityRegRes, deviceRegRes, areaRegRes] = await Promise.all([
       this.sendCommand({ type: "config/entity_registry/list" }),
       this.sendCommand({ type: "config/device_registry/list" }),
@@ -1318,29 +1323,100 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
       const device_name = (dev && dev.name) || "";
       const aliases = Array.isArray(e.aliases) ? e.aliases : [];
 
-      const text = HAWebSocket.buildEntityEmbedText({
+      const text = buildEntityEmbedText({
         friendly_name, entity_id: entityId, area, device_name, domain, device_class, aliases
       });
-      const hash = HAWebSocket.fnv1aHex(text);
-      const vectorId = HAWebSocket.vectorIdForEntity(entityId);
+      const hash = fnv1aHex(text);
+      const ref_id = entityId;
+      const vector_id = vectorIdFor("entity", ref_id);
+      const category = entityCategoryFor(e, state);
+      const noisy = isNoisyEntity(e, state);
+
       docs.push({
-        entity_id: entityId,
-        vector_id: vectorId,
-        text,
-        hash,
-        metadata: { entity_id: entityId, friendly_name, domain, area, device_class, hash }
+        kind: "entity", ref_id, vector_id, text, hash,
+        metadata: buildMetadata({
+          kind: "entity", ref_id, friendly_name, domain, area,
+          entity_category: category, is_noisy: noisy, topic_tag: "", hash,
+          extra: { device_class }
+        })
       });
     }
+    return docs;
+  }
 
-    if (docs.length === 0) return { embedded: 0, errors: 0, skipped: 0 };
+  async _buildDeviceDocsForRefs(deviceIds) {
+    if (!Array.isArray(deviceIds) || deviceIds.length === 0) return [];
+    const [deviceRegRes, areaRegRes, entityRegRes] = await Promise.all([
+      this.sendCommand({ type: "config/device_registry/list" }),
+      this.sendCommand({ type: "config/area_registry/list" }),
+      this.sendCommand({ type: "config/entity_registry/list" })
+    ]);
+    const deviceReg = (deviceRegRes && deviceRegRes.result) || [];
+    const areaReg = (areaRegRes && areaRegRes.result) || [];
+    const entityReg = (entityRegRes && entityRegRes.result) || [];
+
+    const areaById = new Map();
+    for (const a of areaReg) if (a && a.area_id) areaById.set(a.area_id, a.name || "");
+    const deviceById = new Map();
+    for (const d of deviceReg) if (d && d.id) deviceById.set(d.id, d);
+
+    const entitiesByDevice = new Map();
+    for (const e of entityReg) {
+      if (!e || !e.device_id) continue;
+      let bucket = entitiesByDevice.get(e.device_id);
+      if (!bucket) { bucket = []; entitiesByDevice.set(e.device_id, bucket); }
+      bucket.push(e.entity_id);
+    }
+
+    const docs = [];
+    for (const deviceId of deviceIds) {
+      const d = deviceById.get(deviceId);
+      if (!d) continue;
+      const ref_id = deviceId;
+      const friendly_name = d.name_by_user || d.name || ref_id;
+      const area = d.area_id ? (areaById.get(d.area_id) || "") : "";
+      const ents = entitiesByDevice.get(ref_id) || [];
+
+      const text = buildDeviceEmbedText({
+        name: friendly_name,
+        manufacturer: d.manufacturer || "",
+        model: d.model || "",
+        area,
+        entity_count: ents.length,
+        sample_entities: ents.slice(0, 5)
+      });
+      const hash = fnv1aHex(text);
+      const vector_id = vectorIdFor("device", ref_id);
+
+      docs.push({
+        kind: "device", ref_id, vector_id, text, hash,
+        metadata: buildMetadata({
+          kind: "device", ref_id, friendly_name, domain: "device", area,
+          entity_category: "primary", is_noisy: false, topic_tag: "", hash
+        })
+      });
+    }
+    return docs;
+  }
+
+  // Skip-by-hash + batched embed + upsert. Shared across all incremental
+  // paths (entity/device re-embed, single-doc write-through). Returns
+  // {embedded, errors, skipped}.
+  async _embedAndUpsertDocs(docs) {
+    if (!Array.isArray(docs) || docs.length === 0) {
+      return { embedded: 0, errors: 0, skipped: 0 };
+    }
+    if (!this.env.AI || !this.env.KNOWLEDGE) {
+      return { embedded: 0, errors: docs.length, skipped: 0 };
+    }
 
     const existingHash = new Map();
-    if (typeof this.env.VECTORIZE.getByIds === "function") {
+    if (typeof this.env.KNOWLEDGE.getByIds === "function") {
       const LOOKUP_BATCH = 20;
       for (let i = 0; i < docs.length; i += LOOKUP_BATCH) {
         const slice = docs.slice(i, i + LOOKUP_BATCH).map((d) => d.vector_id);
         try {
-          const existing = await this.env.VECTORIZE.getByIds(slice);
+          const existing = await this.env.KNOWLEDGE.getByIds(slice);
           if (Array.isArray(existing)) {
             for (const v of existing) {
               if (v && v.id && v.metadata && v.metadata.hash) existingHash.set(v.id, v.metadata.hash);
@@ -1358,7 +1434,6 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
     if (toEmbed.length === 0) return { embedded: 0, errors: 0, skipped };
 
     const EMBED_BATCH = 50;
-    let embedded = 0;
     let errors = 0;
     const pending = [];
 
@@ -1389,9 +1464,10 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
       }
     }
 
+    let embedded = 0;
     if (pending.length > 0) {
       try {
-        await this.env.VECTORIZE.upsert(pending);
+        await this.env.KNOWLEDGE.upsert(pending);
         embedded = pending.length;
       } catch {
         errors += pending.length;
@@ -1401,27 +1477,119 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
     return { embedded, errors, skipped };
   }
 
+  // Generalized re-embed entry point. Currently supports kind=entity and
+  // kind=device — the other kinds use either write-through (memory,
+  // observation) or the worker-side nightly cron (automation, script,
+  // scene, area, service).
+  async reembedRefs({ kind, refIds }) {
+    if (!this.env.AI || !this.env.KNOWLEDGE) return { embedded: 0, errors: 0, skipped: 0 };
+    if (!Array.isArray(refIds) || refIds.length === 0) return { embedded: 0, errors: 0, skipped: 0 };
+
+    let docs = [];
+    if (kind === "entity") docs = await this._buildEntityDocsForRefs(refIds);
+    else if (kind === "device") docs = await this._buildDeviceDocsForRefs(refIds);
+    else return { embedded: 0, errors: 0, skipped: 0 };
+
+    return await this._embedAndUpsertDocs(docs);
+  }
+
+  // Back-compat shim — still called by handleEntityRegistryUpdated and any
+  // other legacy site that hasn't been migrated. Restricts to kind=entity.
+  async reembedEntities(entityIds) {
+    return await this.reembedRefs({ kind: "entity", refIds: entityIds });
+  }
+
+  // Build the per-doc memory record, matching the canonical schema. Used
+  // by the write-through path in executeAIAction.
+  _memoryDocFor(text) {
+    if (typeof text !== "string" || !text) return null;
+    const ref_id = fnv1aHex(text);
+    const vector_id = vectorIdFor("memory", ref_id);
+    const friendly_name = text.slice(0, 80);
+    const embedText = buildMemoryEmbedText(text);
+    const hash = fnv1aHex(embedText);
+    return {
+      kind: "memory", ref_id, vector_id, text: embedText, hash,
+      metadata: buildMetadata({
+        kind: "memory", ref_id, friendly_name,
+        domain: "memory", area: "",
+        entity_category: "primary", is_noisy: false,
+        topic_tag: "", hash
+      })
+    };
+  }
+
+  _observationDocFor(text) {
+    if (typeof text !== "string" || !text) return null;
+    const ref_id = fnv1aHex(text);
+    const vector_id = vectorIdFor("observation", ref_id);
+    const friendly_name = text.slice(0, 80);
+    const embedText = buildObservationEmbedText(text);
+    const hash = fnv1aHex(embedText);
+    const topic_tag = extractTopicTag(text);
+    return {
+      kind: "observation", ref_id, vector_id, text: embedText, hash,
+      metadata: buildMetadata({
+        kind: "observation", ref_id, friendly_name,
+        domain: "observation", area: "",
+        entity_category: "primary", is_noisy: false,
+        topic_tag, hash
+      })
+    };
+  }
+
+  // Embed a single doc and upsert. Single-text variant of _embedAndUpsertDocs
+  // for the memory/observation write-through path; throws so caller can log.
+  async _embedAndUpsertSingle(doc) {
+    if (!this.env.AI || !this.env.KNOWLEDGE) return;
+    if (!doc || !doc.text || !doc.vector_id) return;
+    const aiResult = await this.env.AI.run("@cf/baai/bge-large-en-v1.5", {
+      text: [doc.text],
+      pooling: "cls"
+    });
+    const v = aiResult && Array.isArray(aiResult.data) && aiResult.data[0];
+    if (!Array.isArray(v) || v.length !== 1024) {
+      throw new Error("embed returned malformed vector");
+    }
+    await this.env.KNOWLEDGE.upsert([{ id: doc.vector_id, values: v, metadata: doc.metadata }]);
+  }
+
+  async _deleteVectorIds(ids) {
+    if (!this.env.KNOWLEDGE || !Array.isArray(ids) || ids.length === 0) return;
+    await this.env.KNOWLEDGE.deleteByIds(ids);
+  }
+
   // ========================================================================
-  // Vectorize semantic search — embed a query with the same model+pooling as
-  // the backfill, then return the top-k matching entities by cosine similarity.
-  // CLS pooling is required: the index was built with pooling:"cls"; using mean
-  // pooling here would compare vectors from a different geometry and rank them
-  // nearly randomly. Returns [] on any failure so callers can fall back safely.
+  // Vectorize semantic search — query the unified `ha-knowledge` index with
+  // optional metadata filters. CLS pooling is required: the index was built
+  // with pooling:"cls"; using mean pooling here would compare vectors from a
+  // different geometry and rank them nearly randomly. Returns [] on failure
+  // so callers can fall back safely.
+  //
+  // Filters supported: kinds (one or more), domain, area, includeNoisy.
+  // is_noisy is stored as the string "true"/"false" because the metadata
+  // index is declared as --type=string. Vectorize V2 supports $in for
+  // multi-kind queries; if the SDK rejects it for any reason, we fall back
+  // to one query per kind and merge by score.
   // ========================================================================
-  async retrieveRelevantEntities(query, k = 15) {
+  async retrieveKnowledge({ query, k = 15, kinds = null, domain = null, area = null, includeNoisy = false } = {}) {
     const start = Date.now();
-    if (!this.env.AI || !this.env.VECTORIZE) {
-      this.logAI("vector_query", "AI or VECTORIZE binding missing — returning []", {
+    let safeKinds = null;
+    if (Array.isArray(kinds) && kinds.length > 0) safeKinds = kinds;
+    else if (typeof kinds === "string" && kinds.length > 0) safeKinds = [kinds];
+
+    if (!this.env.AI || !this.env.KNOWLEDGE) {
+      this.logAI("vector_query", "AI or KNOWLEDGE binding missing — returning []", {
         query_length: typeof query === "string" ? query.length : 0,
         count: 0,
         duration_ms: Date.now() - start
-      });
+      }, "vector_query");
       return [];
     }
     if (typeof query !== "string" || query.length === 0) {
       this.logAI("vector_query", "empty query — returning []", {
         query_length: 0, count: 0, duration_ms: Date.now() - start
-      });
+      }, "vector_query");
       return [];
     }
 
@@ -1436,7 +1604,7 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
     } catch (err) {
       this.logAI("vector_query", "embed failed: " + err.message, {
         query_length: text.length, count: 0, duration_ms: Date.now() - start
-      });
+      }, "vector_query");
       return [];
     }
 
@@ -1444,34 +1612,77 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
     if (!Array.isArray(queryVector) || queryVector.length !== 1024) {
       this.logAI("vector_query", "embed returned malformed vector", {
         query_length: text.length, count: 0, duration_ms: Date.now() - start
-      });
+      }, "vector_query");
       return [];
     }
 
+    const baseFilter = {};
+    if (domain) baseFilter.domain = domain;
+    if (area) baseFilter.area = area;
+    if (!includeNoisy) baseFilter.is_noisy = "false";
+
+    const buildFilter = (kindArr) => {
+      const f = { ...baseFilter };
+      if (kindArr && kindArr.length === 1) f.kind = kindArr[0];
+      else if (kindArr && kindArr.length > 1) f.kind = { $in: kindArr };
+      return f;
+    };
+
+    const callQuery = async (filter) => {
+      const opts = { topK: k, returnMetadata: true };
+      if (Object.keys(filter).length > 0) opts.filter = filter;
+      return await this.env.KNOWLEDGE.query(queryVector, opts);
+    };
+
     let queryRes;
     try {
-      queryRes = await this.env.VECTORIZE.query(queryVector, {
-        topK: k,
-        returnMetadata: true
-      });
+      queryRes = await callQuery(buildFilter(safeKinds));
     } catch (err) {
-      this.logAI("vector_query", "vectorize query failed: " + err.message, {
-        query_length: text.length, count: 0, duration_ms: Date.now() - start
-      });
-      return [];
+      // If $in isn't supported for kind, fall back to one query per kind
+      // and merge by score. Cheap (small kinds list, vectorize is fast).
+      const looksLikeInError = safeKinds && safeKinds.length > 1 &&
+        /\$in|filter|operator/i.test(err && err.message ? err.message : "");
+      if (looksLikeInError) {
+        try {
+          const merged = [];
+          for (const kind of safeKinds) {
+            const sub = await callQuery(buildFilter([kind]));
+            if (sub && Array.isArray(sub.matches)) merged.push(...sub.matches);
+          }
+          merged.sort((a, b) => (b.score || 0) - (a.score || 0));
+          queryRes = { matches: merged.slice(0, k) };
+          this.logAI("vector_query", "fell back to per-kind merge ($in not supported)", {
+            kinds: safeKinds, query_length: text.length
+          }, "vector_query");
+        } catch (err2) {
+          this.logAI("vector_query", "fallback multi-query failed: " + err2.message, {
+            query_length: text.length, count: 0, duration_ms: Date.now() - start
+          }, "vector_query");
+          return [];
+        }
+      } else {
+        this.logAI("vector_query", "knowledge query failed: " + err.message, {
+          query_length: text.length, count: 0, duration_ms: Date.now() - start
+        }, "vector_query");
+        return [];
+      }
     }
 
     const matches = (queryRes && Array.isArray(queryRes.matches)) ? queryRes.matches : [];
     const out = [];
     for (const m of matches) {
       const md = m && m.metadata;
-      if (!md || !md.entity_id) continue;
+      if (!md || !md.kind || !md.ref_id) continue;
       out.push({
-        entity_id: md.entity_id,
+        kind: md.kind,
+        ref_id: md.ref_id,
         friendly_name: md.friendly_name || "",
-        domain: md.domain || "",
+        domain: md.domain || md.kind,
         area: md.area || "",
         device_class: md.device_class || "",
+        entity_category: md.entity_category || "primary",
+        is_noisy: md.is_noisy === "true",
+        topic_tag: md.topic_tag || "",
         score: typeof m.score === "number" ? m.score : null
       });
     }
@@ -1480,8 +1691,10 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
       query_length: text.length,
       count: out.length,
       top_k: k,
+      kinds: safeKinds,
+      domain, area, include_noisy: !!includeNoisy,
       duration_ms: Date.now() - start
-    });
+    }, "vector_query");
     return out;
   }
 
@@ -1642,7 +1855,7 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
       const recentActions = persistentLog
         .filter(e => ["chat_user", "chat_reply", "action", "action_verified", "notification", "decision", "state_change", "memory_saved", "observation_saved"].includes(e.type))
         .slice(-150)
-        .map(e => `[${e.timestamp}] ${e.type}: ${e.message}`)
+        .map(e => `[${HAWebSocket._formatTimelineTimestamp(e.timestamp)}] ${e.type}: ${e.message}`)
         .join("\n");
 
       const byDomain = new Map();
@@ -1650,7 +1863,7 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
         const domain = id.split(".")[0];
         const attr = state.attributes || {};
         const deviceClass = attr.device_class || "";
-        if (domain === "switch" && HAWebSocket.isNoisySwitch(id)) continue;
+        if (domain === "switch" && isNoisySwitch(id)) continue;
         if (state.state === "unavailable" || state.state === "unknown") continue;
         if (HAWebSocket.CONTEXT_DOMAIN_PRIORITY.includes(domain)) {
           const entry = { entity_id: id, friendly_name: attr.friendly_name || id, state: state.state };
@@ -1838,7 +2051,7 @@ Analyze these events AND the unified timeline above. Decide what actions to take
     const timeline = persistentLog
       .filter((e) => ["chat_user", "chat_reply", "action", "action_verified", "notification", "decision", "state_change", "memory_saved", "observation_saved"].includes(e.type))
       .slice(-150)
-      .map((e) => `[${e.timestamp}] ${e.type}: ${e.message}`)
+      .map((e) => `[${HAWebSocket._formatTimelineTimestamp(e.timestamp)}] ${e.type}: ${e.message}`)
       .join("\n");
 
     // ---- Entity context snapshot ----
@@ -1847,7 +2060,7 @@ Analyze these events AND the unified timeline above. Decide what actions to take
       const domain = id.split(".")[0];
       const attr = state.attributes || {};
       const deviceClass = attr.device_class || "";
-      if (domain === "switch" && HAWebSocket.isNoisySwitch(id)) continue;
+      if (domain === "switch" && isNoisySwitch(id)) continue;
       if (state.state === "unavailable" || state.state === "unknown") continue;
 
       if (HAWebSocket.CONTEXT_DOMAIN_PRIORITY.includes(domain)) {
@@ -2200,9 +2413,34 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
         console.log("AI saving memory:", action.memory);
         const memory = await this.state.storage.get("ai_memory") || [];
         memory.push(action.memory);
-        if (memory.length > 100) memory.splice(0, memory.length - 100);
+        // Capture FIFO-evicted entries so we can clean up their vectors.
+        let evicted = [];
+        if (memory.length > 100) {
+          evicted = memory.splice(0, memory.length - 100);
+        }
         await this.state.storage.put("ai_memory", memory);
         this.logAI("memory_saved", action.memory, {}, source);
+        // Write-through: embed the new memory and upsert into KNOWLEDGE.
+        // Errors are logged but don't fail the action — the timeline is the
+        // canonical record; the vector index is a derived view.
+        if (this.env.AI && this.env.KNOWLEDGE) {
+          try {
+            const doc = this._memoryDocFor(action.memory);
+            if (doc) await this._embedAndUpsertSingle(doc);
+          } catch (err) {
+            this.logAI("vector_error", "memory upsert: " + err.message, {}, source);
+          }
+          if (evicted.length > 0) {
+            try {
+              const ids = evicted
+                .filter((t) => typeof t === "string" && t)
+                .map((t) => vectorIdFor("memory", fnv1aHex(t)));
+              if (ids.length > 0) await this._deleteVectorIds(ids);
+            } catch (err) {
+              this.logAI("vector_error", "memory evict delete: " + err.message, {}, source);
+            }
+          }
+        }
         break;
       }
       case "save_observation": {
@@ -2212,14 +2450,40 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
           break;
         }
         let observations = await this.state.storage.get("ai_observations") || [];
+        // Capture entries removed by `replaces` so we can delete their vectors.
+        let removedTexts = [];
         if (typeof action.replaces === "string" && action.replaces.length > 0) {
           const prefix = action.replaces;
+          removedTexts = observations.filter((o) => o.startsWith(prefix));
           observations = observations.filter((o) => !o.startsWith(prefix));
         }
         observations.push(text);
-        if (observations.length > 500) observations.splice(0, observations.length - 500);
+        let evictedTexts = [];
+        if (observations.length > 500) {
+          evictedTexts = observations.splice(0, observations.length - 500);
+        }
         await this.state.storage.put("ai_observations", observations);
         this.logAI("observation_saved", text.substring(0, 200), { replaces: action.replaces || null }, source);
+        // Write-through: embed + upsert the new observation, then delete the
+        // vectors for any prefix-replaced or FIFO-evicted entries.
+        if (this.env.AI && this.env.KNOWLEDGE) {
+          try {
+            const doc = this._observationDocFor(text);
+            if (doc) await this._embedAndUpsertSingle(doc);
+          } catch (err) {
+            this.logAI("vector_error", "observation upsert: " + err.message, {}, source);
+          }
+          const toDelete = [...removedTexts, ...evictedTexts]
+            .filter((t) => typeof t === "string" && t)
+            .map((t) => vectorIdFor("observation", fnv1aHex(t)));
+          if (toDelete.length > 0) {
+            try {
+              await this._deleteVectorIds(toDelete);
+            } catch (err) {
+              this.logAI("vector_error", "observation prefix-delete: " + err.message, {}, source);
+            }
+          }
+        }
         break;
       }
       default:
@@ -2318,6 +2582,22 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
           } catch (err) {
             return { error: "Logbook fetch failed: " + err.message };
           }
+        }
+
+        case "vector_search": {
+          if (typeof args.query !== "string" || !args.query.trim()) {
+            return { error: "query is required" };
+          }
+          const k = Math.min(Math.max(parseInt(args.top_k || 15, 10) || 15, 1), 50);
+          const matches = await this.retrieveKnowledge({
+            query: args.query,
+            k,
+            kinds: Array.isArray(args.kinds) ? args.kinds : (typeof args.kinds === "string" ? [args.kinds] : null),
+            domain: args.domain || null,
+            area: args.area || null,
+            includeNoisy: !!args.include_noisy
+          });
+          return { matches, count: matches.length };
         }
 
         case "render_template": {
@@ -2515,13 +2795,54 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
       }
     }
 
+    // Synthesis fallback — model has done the work, just hasn't composed.
+    // Force one final call with tools disabled so it returns prose only.
+    // Removes the "iteration cliff" failure mode where users got back a tool
+    // trace instead of an actual answer.
     this.logAI(
-      "error",
-      `Native loop: max_iterations_exceeded (${maxIterations} iterations)`,
+      "iteration_ceiling_synthesize",
+      `${maxIterations} iterations hit; forcing synthesis call`,
       { actions_taken: actionsTaken },
       "native_loop"
     );
-    if (onEvent) onEvent({ type: "error", message: "max_iterations_exceeded" });
+    safeEmit({ type: "thinking" });
+    messages.push({
+      role: "user",
+      content: "You've gathered enough information. STOP using tools and " +
+        "compose a final reply now from what you already have. No more tool " +
+        "calls. Reply in prose only."
+    });
+    try {
+      const finalResp = await this.callMiniMaxWithTools(messages, []);
+      const finalMsg = finalResp.choices?.[0]?.message;
+      if (finalMsg) messages.push(finalMsg);
+      const cleaned = stripThink(finalMsg?.content || "");
+      if (cleaned) {
+        safeEmit({ type: "reply", text: cleaned });
+        return {
+          reply: cleaned,
+          actions_taken: actionsTaken,
+          messages,
+          iterations: maxIterations,
+          synthesized: true
+        };
+      }
+      // Synthesis returned empty — fall through to apology below.
+      this.logAI(
+        "iteration_ceiling_synthesize_empty",
+        "Synthesis call returned empty content",
+        { actions_taken: actionsTaken },
+        "native_loop"
+      );
+    } catch (err) {
+      this.logAI(
+        "error",
+        "Synthesis fallback failed: " + err.message,
+        { actions_taken: actionsTaken },
+        "native_loop"
+      );
+    }
+    safeEmit({ type: "error", message: "max_iterations_exceeded" });
     return {
       reply: "I hit my iteration ceiling without finishing — actions so far: " +
         (actionsTaken.length > 0 ? actionsTaken.join(", ") : "none") +
@@ -2537,13 +2858,18 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
   // Native-loop context helpers — shared between runAIAgentNative and
   // chatWithAgentNative.
   //
-  // When env.USE_VECTOR_ENTITY_RETRIEVAL === "true" and a non-empty `query` is
-  // supplied (and AI+VECTORIZE bindings exist), the context is built from a
-  // semantic search over the Vectorize index instead of the flat MAX_CONTEXT_
-  // ENTITIES snapshot. Vector results are enriched with live state from
-  // stateCache so the model still sees current state for matched entities.
-  // Returns { entities, vectorRetrieved } so the prompt builder can frame the
-  // section appropriately. Falls back to the flat snapshot on any failure.
+  // When env.USE_VECTOR_ENTITY_RETRIEVAL === "true" and a non-empty `query`
+  // is supplied (and AI+KNOWLEDGE bindings exist), three semantic searches
+  // run in parallel: top-15 entities, top-5 memories, top-5 observations.
+  // The full memory/observation lists still appear in the system prompt, but
+  // the semantic top-K bubbles up the most query-relevant entries — which
+  // is the architectural payoff: MiniMax sees the right memory/observation
+  // for THIS turn instead of relying solely on the FIFO timeline.
+  //
+  // Returns { entities, memories, observations, vectorRetrieved }. Falls
+  // back to the flat snapshot (with empty memory/observation arrays) on any
+  // failure. Memory/observation arrays in the fallback path stay empty
+  // because the full lists are already in the prompt — no need to repeat.
   // ========================================================================
   async _buildNativeContextEntities(query = null) {
     const useVector =
@@ -2552,14 +2878,19 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
 
     if (useVector && typeof query === "string" && query.trim().length > 0) {
       try {
-        const matches = await this.retrieveRelevantEntities(query, 15);
-        if (Array.isArray(matches) && matches.length > 0) {
-          const enriched = matches.map((m) => {
-            const cached = this.stateCache.get(m.entity_id);
+        const [entityMatches, memoryMatches, observationMatches] = await Promise.all([
+          this.retrieveKnowledge({ query, k: 15, kinds: ["entity"], includeNoisy: false }),
+          this.retrieveKnowledge({ query, k: 5, kinds: ["memory"], includeNoisy: false }),
+          this.retrieveKnowledge({ query, k: 5, kinds: ["observation"], includeNoisy: false })
+        ]);
+        if (Array.isArray(entityMatches) && entityMatches.length > 0) {
+          const enriched = entityMatches.map((m) => {
+            const entity_id = m.ref_id;
+            const cached = this.stateCache.get(entity_id);
             const out = {
-              entity_id: m.entity_id,
-              friendly_name: m.friendly_name || (cached?.attributes?.friendly_name) || m.entity_id,
-              domain: m.domain || (m.entity_id.split(".")[0] || ""),
+              entity_id,
+              friendly_name: m.friendly_name || (cached?.attributes?.friendly_name) || entity_id,
+              domain: m.domain || (entity_id.split(".")[0] || ""),
               area: m.area || "",
               device_class: m.device_class || (cached?.attributes?.device_class) || "",
               score: typeof m.score === "number" ? Number(m.score.toFixed(3)) : null,
@@ -2587,16 +2918,26 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
             }
             return out;
           });
-          return { entities: enriched, vectorRetrieved: true };
+          return {
+            entities: enriched,
+            memories: Array.isArray(memoryMatches) ? memoryMatches : [],
+            observations: Array.isArray(observationMatches) ? observationMatches : [],
+            vectorRetrieved: true
+          };
         }
       } catch (err) {
         this.logAI("vector_query", "context build fell back to flat list: " + err.message, {
           query_length: query.length
-        });
+        }, "vector_query");
       }
     }
 
-    return { entities: this._buildFlatContextEntities(), vectorRetrieved: false };
+    return {
+      entities: this._buildFlatContextEntities(),
+      memories: [],
+      observations: [],
+      vectorRetrieved: false
+    };
   }
 
   _buildFlatContextEntities() {
@@ -2605,7 +2946,7 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
       const domain = id.split(".")[0];
       const attr = state.attributes || {};
       const deviceClass = attr.device_class || "";
-      if (domain === "switch" && HAWebSocket.isNoisySwitch(id)) continue;
+      if (domain === "switch" && isNoisySwitch(id)) continue;
       if (state.state === "unavailable" || state.state === "unknown") continue;
 
       if (HAWebSocket.CONTEXT_DOMAIN_PRIORITY.includes(domain)) {
@@ -2665,7 +3006,7 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
     return this.aiLog
       .filter((e) => relevantTypes.includes(e.type))
       .slice(-150)
-      .map((e) => `[${e.timestamp}] ${e.type}${e.source ? "/" + e.source : ""}: ${e.message}`)
+      .map((e) => `[${HAWebSocket._formatTimelineTimestamp(e.timestamp)}] ${e.type}${e.source ? "/" + e.source : ""}: ${e.message}`)
       .join("\n");
   }
 
@@ -2675,7 +3016,16 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
   // MODE block and the `from` context are interpolated in.
   // ========================================================================
   getNativeAgentSystemPrompt(role, ctx) {
-    const { memory = [], observations = [], timeline = "", contextEntities = [], from = "default", vectorRetrieved = false } = ctx;
+    const {
+      memory = [],
+      observations = [],
+      timeline = "",
+      contextEntities = [],
+      from = "default",
+      vectorRetrieved = false,
+      semanticMemories = [],
+      semanticObservations = []
+    } = ctx;
 
     const stateHealth = {
       ws_connected: this.connected,
@@ -2714,6 +3064,7 @@ TOOLS — they're attached to this request. Invoke them directly. No JSON-with-a
 - get_state — look up a single entity's full state when the pre-injected context block doesn't have the detail you need.
 - get_logbook — pull logbook entries for an entity or time window. Useful for debugging ("did the automation fire?", "who closed the garage?").
 - render_template — run a Jinja2 template in HA's context. Use for cross-entity queries or HA helpers (area_name, device_attr, expand, state_attr) that the context block can't answer.
+- vector_search — semantic search over the unified knowledge index (entities, automations, scripts, scenes, areas, devices, HA services, your memories, your observations). Use when something isn't in the pre-injected context — vector_search covers the FULL set, not just the top-K shown below. Restrict scope with the kinds array (e.g., kinds=["service"] to discover an HA service, kinds=["memory","observation"] to find prior notes on a topic).
 
 COMMITMENT RULE: If your final reply says you did something ("opening the garage", "turning off the lights"), you MUST have invoked the corresponding tool. Saying you did something you didn't do is a lie and unacceptable. Your timeline is the record.
 
@@ -2727,8 +3078,14 @@ UNIFIED TIMELINE — everything recent: chat messages, your replies, state chang
 
 ${timeline || "Timeline is empty."}
 
-${vectorRetrieved
-  ? `RELEVANT ENTITIES (${contextEntities.length}, semantic-search top-k for this turn) — these were selected by similarity to the current query/events from the FULL set of HA entities, so an entity not in this block may still exist; use get_state to probe specific entity_ids you suspect. Each entry includes the live state from the WebSocket-maintained cache (state=null means HA hasn't reported a value). Higher score = more relevant. Don't invent entity_ids or timestamps for events you didn't witness.`
+${vectorRetrieved && (semanticMemories.length > 0 || semanticObservations.length > 0)
+  ? `SEMANTICALLY RELEVANT FROM YOUR MEMORY/OBSERVATIONS (top matches for this turn — the full lists above contain everything; this is just what's most relevant to what's happening right now):
+${semanticMemories.map((m) => "- [memory · score " + (typeof m.score === "number" ? m.score.toFixed(2) : "?") + "] " + (m.friendly_name || "")).join("\n")}
+${semanticObservations.map((o) => "- [observation · score " + (typeof o.score === "number" ? o.score.toFixed(2) : "?") + "] " + (o.friendly_name || "")).join("\n")}
+
+`
+  : ""}${vectorRetrieved
+  ? `RELEVANT ENTITIES (${contextEntities.length}, semantic-search top-k for this turn) — these were selected by similarity to the current query/events from the FULL set of HA entities, so an entity not in this block may still exist; use get_state to probe specific entity_ids you suspect, or use vector_search with kinds=["entity"] for a wider sweep. Each entry includes the live state from the WebSocket-maintained cache (state=null means HA hasn't reported a value). Higher score = more relevant. Don't invent entity_ids or timestamps for events you didn't witness.`
   : `CURRENT STATE OF ENTITIES (${contextEntities.length}) — your live, authoritative snapshot from a maintained WebSocket to HA. If an entity is here, its state is current. Do not say "I don't have visibility" or reason about refresh lag — that's a layer beneath you that you can't see. If an entity is NOT here, say so honestly or use get_state to probe. Never invent entity IDs or fabricate timestamps for events you didn't witness.`}
 
 ${JSON.stringify(contextEntities, null, 1)}
@@ -2742,7 +3099,8 @@ OPERATIONAL REMINDERS:
 6. Aux heat running (whole-home power >5000W sustained) is worth a notification. A brief spike isn't.
 7. Save memories sparingly and only for confirmed facts. Hypotheses go to save_observation.
 8. Don't notify for the same thing twice in one session unless the state materially changed.
-9. Observer-mode suggestions are NOT alerts — deliver them in a chat reply or via save_observation. Never wake anyone at 2 AM to propose an automation.`;
+9. Observer-mode suggestions are NOT alerts — deliver them in a chat reply or via save_observation. Never wake anyone at 2 AM to propose an automation.
+10. TIMESTAMP FORMAT — All timestamps in your replies MUST be Central time formatted as "H:MM AM/PM" or "MMM D, H:MM AM/PM" (e.g. "10:47 PM", "May 4, 11:32 AM"). Never emit UTC, ISO 8601, or "Z"-suffix timestamps in replies — even if you see them in tool results like get_logbook output. The TIMELINE block above is already pre-formatted for you in Central time; copy that style.`;
   }
 
   // ========================================================================
@@ -2759,7 +3117,12 @@ OPERATIONAL REMINDERS:
       .map((e) => `${e.entity_id || ""} ${e.friendly_name || ""}`.trim())
       .filter(Boolean)
       .join(" | ");
-    const { entities: contextEntities, vectorRetrieved } = await this._buildNativeContextEntities(eventQuery);
+    const {
+      entities: contextEntities,
+      memories: semanticMemories,
+      observations: semanticObservations,
+      vectorRetrieved
+    } = await this._buildNativeContextEntities(eventQuery);
     const timeline = this._buildNativeTimeline();
 
     const systemPrompt = this.getNativeAgentSystemPrompt("autonomous", {
@@ -2767,7 +3130,9 @@ OPERATIONAL REMINDERS:
       observations,
       timeline,
       contextEntities,
-      vectorRetrieved
+      vectorRetrieved,
+      semanticMemories,
+      semanticObservations
     });
 
     const lastObservation = observations.length > 0 ? observations[observations.length - 1] : "";
@@ -2782,6 +3147,9 @@ ${JSON.stringify(eventsToProcess, null, 1)}
 Evaluate these events against the timeline above. Take action only if warranted.`;
 
     console.log("Native AI Agent processing", eventsToProcess.length, "events...");
+    // Autonomous: tight ceiling. Heartbeat is rate-bounded (30s ticks) and
+    // doing-nothing is the right answer most of the time, so bounded depth
+    // outweighs depth flexibility. Synthesis fallback below catches overflow.
     const result = await this.runNativeToolLoop(
       [
         { role: "system", content: systemPrompt },
@@ -2817,7 +3185,12 @@ Evaluate these events against the timeline above. Take action only if warranted.
     this.logAI("chat_user", `${from}: ${message}`, { from, message });
 
     const timeline = this._buildNativeTimeline();
-    const { entities: contextEntities, vectorRetrieved } = await this._buildNativeContextEntities(message);
+    const {
+      entities: contextEntities,
+      memories: semanticMemories,
+      observations: semanticObservations,
+      vectorRetrieved
+    } = await this._buildNativeContextEntities(message);
 
     const systemPrompt = this.getNativeAgentSystemPrompt("chat", {
       memory,
@@ -2825,6 +3198,8 @@ Evaluate these events against the timeline above. Take action only if warranted.
       timeline,
       contextEntities,
       vectorRetrieved,
+      semanticMemories,
+      semanticObservations,
       from
     });
 
@@ -2838,7 +3213,11 @@ Evaluate these events against the timeline above. Take action only if warranted.
 
     try {
       const oldHistoryLen = conversationHistory.length;
-      const result = await this.runNativeToolLoop(initialMessages, { maxIterations: 8, onEvent });
+      // Chat: looser ceiling than autonomous. A user is waiting on a real
+      // answer, and multi-faceted questions ("status of the house") legitimately
+      // need 8+ tool calls. Overflow falls through to the synthesis fallback
+      // in runNativeToolLoop, which forces a final prose reply with tools off.
+      const result = await this.runNativeToolLoop(initialMessages, { maxIterations: 12, onEvent });
       const reply = (result.reply && result.reply.trim()) || "Done.";
 
       this.logAI("chat_reply", reply.substring(0, 300), { from, full_reply: reply }, "native_loop");

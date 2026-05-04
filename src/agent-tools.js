@@ -91,7 +91,8 @@ const ACTION_TOOLS = [
         "stable, validated facts — preferences John has confirmed, events you've witnessed " +
         "and verified, knowledge that won't churn. Do NOT use for hypotheses, patterns in " +
         "progress, or speculative observations — those go to save_observation. Once a " +
-        "memory is saved, it persists across sessions until FIFO eviction.",
+        "memory is saved, it persists across sessions until FIFO eviction. Memories are " +
+        "also embedded into the knowledge index so vector_search can surface them by topic.",
       parameters: {
         type: "object",
         properties: {
@@ -114,7 +115,7 @@ const ACTION_TOOLS = [
         "[attic-temp-gap], or [suggestion-rejected]. Use the `replaces` field with the " +
         "SAME tag to supersede a prior observation on that topic — this deletes all " +
         "entries starting with the prefix before appending the new one. Observations " +
-        "are where you build evidence over time before promoting to save_memory.",
+        "are embedded into the knowledge index so vector_search can surface them by topic.",
       parameters: {
         type: "object",
         properties: {
@@ -167,8 +168,12 @@ const READ_TOOLS = [
       description:
         "Fetch Home Assistant logbook entries for event attribution and pattern verification. " +
         "Use to check WHO or WHAT triggered a state change, to verify an automation fired " +
-        "(or didn't), or to confirm a pattern across a time window. Requires start_time in " +
-        "ISO 8601 format. Prefer narrow windows — this can return a lot of data.",
+        "(or didn't), or to confirm a pattern across a time window. Prefer narrow windows " +
+        "— this can return a lot of data. CRITICAL: start_time and end_time MUST include an " +
+        "explicit timezone offset (e.g., '-05:00' for CDT, '-06:00' for CST). A naive ISO " +
+        "string like '2026-04-17T20:00:00' may be interpreted as UTC and shift your window " +
+        "5–6 hours into a quiet period, returning empty results. When in doubt, use '-05:00' " +
+        "(this household is America/Chicago).",
       parameters: {
         type: "object",
         properties: {
@@ -178,11 +183,11 @@ const READ_TOOLS = [
           },
           start_time: {
             type: "string",
-            description: "ISO 8601 start time, e.g., '2026-04-17T00:00:00-05:00'."
+            description: "ISO 8601 start time WITH timezone offset, e.g., '2026-04-17T20:00:00-05:00'. Never pass a naive ISO without offset."
           },
           end_time: {
             type: "string",
-            description: "Optional ISO 8601 end time. Defaults to now on the HA side."
+            description: "Optional ISO 8601 end time WITH timezone offset, e.g., '2026-04-18T04:00:00-05:00'. Defaults to now if omitted."
           }
         },
         required: ["start_time"]
@@ -210,6 +215,56 @@ const READ_TOOLS = [
         required: ["template"]
       }
     }
+  },
+  {
+    type: "function",
+    function: {
+      name: "vector_search",
+      description:
+        "Semantic search across the unified home knowledge index. Returns ranked matches " +
+        "across entities, automations, scripts, scenes, areas, devices, HA services, your " +
+        "own saved memories, and your saved observations. Use this when an entity, " +
+        "automation, or service isn't in the pre-injected context — vector search covers " +
+        "the FULL set, not just the top-context subset. Defaults filter out diagnostic / " +
+        "config / counter entities; pass include_noisy: true to include them. Restrict " +
+        "scope with the `kinds` array when you know what you're looking for (e.g., " +
+        "kinds=['service'] for HA service discovery, kinds=['memory','observation'] to " +
+        "find prior notes on a topic). top_k defaults to 15, max 50.",
+      parameters: {
+        type: "object",
+        properties: {
+          query: {
+            type: "string",
+            description: "Natural-language query — describe what you're looking for."
+          },
+          kinds: {
+            type: "array",
+            items: {
+              type: "string",
+              enum: ["entity", "automation", "script", "scene", "area", "device", "service", "memory", "observation"]
+            },
+            description: "Restrict to these kinds. Omit for all kinds."
+          },
+          domain: {
+            type: "string",
+            description: "Entity domain filter (light, switch, sensor, ...). Only meaningful with kind=entity."
+          },
+          area: {
+            type: "string",
+            description: "Area name filter. Case-sensitive — match the canonical area name."
+          },
+          top_k: {
+            type: "number",
+            description: "How many matches to return. Default 15, max 50."
+          },
+          include_noisy: {
+            type: "boolean",
+            description: "Include diagnostic/config/counter entities and destructive services. Default false."
+          }
+        },
+        required: ["query"]
+      }
+    }
   }
 ];
 
@@ -221,7 +276,7 @@ export const NATIVE_TOOL_NAMES = new Set(
 );
 
 // Subset that mutates state — these get logged as actions with source: "native_loop"
-// and counted in `actions_taken`. Read tools do not.
+// and counted in `actions_taken`. Read tools (incl. vector_search) do not.
 export const NATIVE_ACTION_TOOL_NAMES = new Set(
   ACTION_TOOLS.map((t) => t.function.name)
 );

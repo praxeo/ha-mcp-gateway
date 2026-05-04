@@ -1,4 +1,27 @@
 import { HAWebSocket } from "./ha-websocket.js";
+import {
+  ALL_KINDS,
+  fnv1aHex,
+  vectorIdFor,
+  buildEmbedText,
+  buildEntityEmbedText,
+  buildAutomationEmbedText,
+  buildScriptEmbedText,
+  buildSceneEmbedText,
+  buildAreaEmbedText,
+  buildDeviceEmbedText,
+  buildServiceEmbedText,
+  buildMemoryEmbedText,
+  buildObservationEmbedText,
+  buildMetadata,
+  entityCategoryFor,
+  isNoisyEntity,
+  isNoisyService,
+  flattenServiceFields,
+  summarizeTriggers,
+  summarizeActions,
+  extractTopicTag
+} from "./vectorize-schema.js";
 
 
 // src/worker.js
@@ -486,6 +509,30 @@ var TOOLS = [
       required: ["item_type", "item_id"]
     }
   },
+  // --- Vector Search ---
+  {
+    name: "vector_search",
+    description: "Semantic search over the unified home knowledge index. Returns ranked matches across entities, automations, scripts, scenes, areas, devices, HA services, agent memories, and agent observations. By default filters out diagnostic/config/counter entities and destructive services; pass include_noisy: true to include them. Restrict to specific kinds via the kinds array.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "Natural-language query" },
+        kinds: {
+          type: "array",
+          items: {
+            type: "string",
+            enum: ["entity", "automation", "script", "scene", "area", "device", "service", "memory", "observation"]
+          },
+          description: "Restrict to these kinds. Omit for all kinds."
+        },
+        domain: { type: "string", description: "Entity domain filter (light/switch/sensor/...). Most meaningful with kind=entity." },
+        area: { type: "string", description: "Area name filter." },
+        top_k: { type: "number", description: "How many matches to return. Default 15, max 50." },
+        include_noisy: { type: "boolean", description: "Include diagnostic/config entities and destructive services. Default false." }
+      },
+      required: ["query"]
+    }
+  },
   // --- AI Agent ---
   { name: "ai_status", description: "Check the autonomous AI agent status.", inputSchema: { type: "object" } },
   { name: "ai_enable", description: "Enable the autonomous AI agent.", inputSchema: { type: "object" } },
@@ -545,7 +592,7 @@ var TOOLS = [
   // --- Agent State ---
   {
     name: "save_memory",
-    description: "Append a memory entry to the AI agent's persistent memory store (capped at 100).",
+    description: "Append a memory entry to the AI agent's persistent memory store (capped at 100). Memories are also embedded into the knowledge index for semantic retrieval via vector_search.",
     inputSchema: {
       type: "object",
       properties: { memory: { type: "string", description: "The memory text to save" } },
@@ -554,7 +601,7 @@ var TOOLS = [
   },
   {
     name: "save_observation",
-    description: "Append an observation to the AI agent's observation log (capped at 500). If 'replaces' is set, prior entries whose text starts with that prefix are removed first.",
+    description: "Append an observation to the AI agent's observation log (capped at 500). If 'replaces' is set, prior entries whose text starts with that prefix are removed first. Observations are embedded into the knowledge index for semantic retrieval via vector_search.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1141,11 +1188,11 @@ const CHAT_HTML = `<!DOCTYPE html>
           try { evt = JSON.parse(line.slice(6)); } catch { continue; }
 
           if (evt.type === 'thinking') {
-            showStatus('Thinking\u2026');
+            showStatus('Thinking…');
           } else if (evt.type === 'tool_call') {
-            showStatus('\u26a1 ' + (evt.label || evt.name) + '\u2026');
+            showStatus('⚡ ' + (evt.label || evt.name) + '…');
           } else if (evt.type === 'tool_result') {
-            showStatus((evt.ok ? '\u2713 ' : '\u2717 ') + evt.name);
+            showStatus((evt.ok ? '✓ ' : '✗ ') + evt.name);
           } else if (evt.type === 'reply') {
             typing.classList.remove('active');
             clearStatus();
@@ -1810,6 +1857,20 @@ async function handleTool(env, name, args) {
       if (r) return r;
       return { error: "search_related requires WebSocket Durable Object" };
     }
+    // ---- Vector Search ----
+    case "vector_search": {
+      const body = {
+        query: args.query,
+        kinds: Array.isArray(args.kinds) ? args.kinds : null,
+        domain: args.domain || null,
+        area: args.area || null,
+        top_k: args.top_k,
+        include_noisy: !!args.include_noisy
+      };
+      const r = await doFetch(env, "/vector_search", body);
+      if (r) return r;
+      return { error: "vector_search requires Durable Object" };
+    }
     // ---- AI Agent ----
     case "ai_status": {
       const status = await doFetch(env, "/status");
@@ -1897,46 +1958,52 @@ async function handleTool(env, name, args) {
   }
 }
 
-// --- Vectorize backfill helpers ---
-// 32-bit FNV-1a — fast, deterministic, sufficient for change-detection.
-function fnv1aHex(str) {
-  let h = 0x811c9dc5;
-  for (let i = 0; i < str.length; i++) {
-    h ^= str.charCodeAt(i);
-    h = Math.imul(h, 0x01000193);
-  }
-  return (h >>> 0).toString(16).padStart(8, "0");
+// ============================================================================
+// Knowledge backfill — multi-kind unified Vectorize index (`ha-knowledge`).
+//
+// Replaces the entity-only backfillEntityVectors. Pulls source data per kind,
+// builds canonical-schema docs, hashes embed text for change detection, then
+// embeds in batches of 50 (cls pooling — index was created that way) and
+// upserts in batches of 1000.
+//
+// kinds: an optional array; omitted means all of ALL_KINDS.
+// ============================================================================
+
+async function fetchAutomationConfigSafe(env, internalId) {
+  if (!internalId) return null;
+  try {
+    const r = await haRequest(env, "GET", "/api/config/automation/config/" + internalId);
+    if (r && !r.error) return r;
+  } catch {}
+  return null;
 }
 
-function buildEntityEmbedText(d) {
-  const trunc = (v, n) => {
-    if (v === null || v === undefined) return "";
-    const s = String(v);
-    return s.length > n ? s.slice(0, n) : s;
-  };
-  const aliases = Array.isArray(d.aliases) ? d.aliases.join(", ") : "";
-  const text =
-    trunc(d.friendly_name, 200) +
-    " | " + trunc(d.entity_id, 100) +
-    " | area: " + trunc(d.area, 100) +
-    " | device: " + trunc(d.device_name, 200) +
-    " | domain: " + trunc(d.domain, 50) +
-    " | device_class: " + trunc(d.device_class, 50) +
-    " | aliases: " + trunc(aliases, 300);
-  return text.length > 2000 ? text.slice(0, 2000) : text;
+async function fetchScriptConfigSafe(env, scriptObjectId) {
+  if (!scriptObjectId) return null;
+  try {
+    const r = await haRequest(env, "GET", "/api/config/script/config/" + scriptObjectId);
+    if (r && !r.error) return r;
+  } catch {}
+  return null;
 }
 
-async function backfillEntityVectors(env, { force = false } = {}) {
+async function fetchSceneConfigSafe(env, sceneObjectId) {
+  if (!sceneObjectId) return null;
+  try {
+    const r = await haRequest(env, "GET", "/api/config/scene/config/" + sceneObjectId);
+    if (r && !r.error) return r;
+  } catch {}
+  return null;
+}
+
+async function buildEntityDocs(env) {
   const [entityRegistry, areaRegistry, deviceRegistry, states] = await Promise.all([
     getEntityRegistry(env, false),
     getAreaRegistry(env, false),
     getDeviceRegistry(env, false),
     getStates(env, false)
   ]);
-
-  if (!Array.isArray(entityRegistry) || entityRegistry.length === 0) {
-    throw new Error("Entity registry empty or unavailable");
-  }
+  if (!Array.isArray(entityRegistry) || entityRegistry.length === 0) return [];
 
   const areaById = new Map();
   if (Array.isArray(areaRegistry)) {
@@ -1944,7 +2011,9 @@ async function backfillEntityVectors(env, { force = false } = {}) {
   }
   const deviceById = new Map();
   if (Array.isArray(deviceRegistry)) {
-    for (const d of deviceRegistry) if (d && d.id) deviceById.set(d.id, { name: d.name || "", area_id: d.area_id || null });
+    for (const d of deviceRegistry) {
+      if (d && d.id) deviceById.set(d.id, { name: d.name_by_user || d.name || "", area_id: d.area_id || null });
+    }
   }
   const stateById = new Map();
   if (Array.isArray(states)) {
@@ -1972,36 +2041,512 @@ async function backfillEntityVectors(env, { force = false } = {}) {
       friendly_name, entity_id, area, device_name, domain, device_class, aliases
     });
     const hash = fnv1aHex(text);
-    // Vectorize hard caps id at 64 bytes. For overlong entity_ids we
-    // substitute a stable truncated-prefix + fnv hash form; the original
-    // entity_id is always preserved in metadata.
-    const vectorId = entity_id.length > 64
-      ? entity_id.slice(0, 55) + "_" + fnv1aHex(entity_id)
-      : entity_id;
+    const ref_id = entity_id;
+    const vector_id = vectorIdFor("entity", ref_id);
+    const category = entityCategoryFor(e, state);
+    const noisy = isNoisyEntity(e, state);
+
     docs.push({
-      entity_id,
-      vector_id: vectorId,
+      kind: "entity",
+      ref_id,
+      vector_id,
       text,
       hash,
-      metadata: { entity_id, friendly_name, domain, area, device_class, hash }
+      metadata: buildMetadata({
+        kind: "entity",
+        ref_id,
+        friendly_name,
+        domain,
+        area,
+        entity_category: category,
+        is_noisy: noisy,
+        topic_tag: "",
+        hash,
+        extra: { device_class }
+      })
     });
   }
+  return docs;
+}
 
+async function buildAutomationDocs(env) {
+  const states = await getStates(env, false);
+  if (!Array.isArray(states)) return [];
+  const automations = states.filter((s) => s.entity_id.startsWith("automation."));
+
+  const docs = [];
+  // Bounded concurrency to avoid hammering HA's REST API.
+  const BATCH = 8;
+  for (let i = 0; i < automations.length; i += BATCH) {
+    const slice = automations.slice(i, i + BATCH);
+    const configs = await Promise.all(slice.map((s) => {
+      const internalId = s.attributes && s.attributes.id;
+      return internalId ? fetchAutomationConfigSafe(env, internalId) : Promise.resolve(null);
+    }));
+
+    for (let j = 0; j < slice.length; j++) {
+      const s = slice[j];
+      const cfg = configs[j];
+      const internalId = (s.attributes && s.attributes.id) || s.entity_id;
+      const friendly_name = (s.attributes && s.attributes.friendly_name) || s.entity_id;
+
+      let triggerSummary = "";
+      let actionSummary = "";
+      let description = "";
+      let aliases = [];
+      let mode = "single";
+
+      if (cfg && typeof cfg === "object") {
+        description = cfg.description || "";
+        aliases = Array.isArray(cfg.aliases) ? cfg.aliases : [];
+        mode = cfg.mode || "single";
+        const triggers = cfg.triggers || cfg.trigger;
+        const actions = cfg.actions || cfg.action;
+        if (Array.isArray(triggers)) triggerSummary = summarizeTriggers(triggers);
+        if (Array.isArray(actions)) actionSummary = summarizeActions(actions);
+      }
+
+      const text = buildAutomationEmbedText({
+        friendly_name,
+        alias: cfg && cfg.alias,
+        id: internalId,
+        description,
+        triggerSummary,
+        actionSummary,
+        mode,
+        aliases
+      });
+      const hash = fnv1aHex(text);
+      const ref_id = String(internalId);
+      const vector_id = vectorIdFor("automation", ref_id);
+
+      docs.push({
+        kind: "automation",
+        ref_id,
+        vector_id,
+        text,
+        hash,
+        metadata: buildMetadata({
+          kind: "automation",
+          ref_id,
+          friendly_name,
+          domain: "automation",
+          area: "",
+          entity_category: "primary",
+          is_noisy: false,
+          topic_tag: "",
+          hash,
+          extra: { entity_id: s.entity_id }
+        })
+      });
+    }
+  }
+  return docs;
+}
+
+async function buildScriptDocs(env) {
+  const states = await getStates(env, false);
+  if (!Array.isArray(states)) return [];
+  const scripts = states.filter((s) => s.entity_id.startsWith("script."));
+
+  const docs = [];
+  const BATCH = 8;
+  for (let i = 0; i < scripts.length; i += BATCH) {
+    const slice = scripts.slice(i, i + BATCH);
+    const configs = await Promise.all(slice.map((s) => {
+      const objectId = s.entity_id.split(".")[1];
+      return objectId ? fetchScriptConfigSafe(env, objectId) : Promise.resolve(null);
+    }));
+
+    for (let j = 0; j < slice.length; j++) {
+      const s = slice[j];
+      const cfg = configs[j];
+      const friendly_name = (s.attributes && s.attributes.friendly_name) || s.entity_id;
+
+      let description = "";
+      let actionSummary = "";
+      if (cfg && typeof cfg === "object") {
+        description = cfg.description || "";
+        const sequence = cfg.sequence || cfg.actions || cfg.action;
+        if (Array.isArray(sequence)) actionSummary = summarizeActions(sequence);
+      }
+
+      const text = buildScriptEmbedText({
+        friendly_name,
+        entity_id: s.entity_id,
+        description,
+        actionSummary
+      });
+      const hash = fnv1aHex(text);
+      const ref_id = s.entity_id;
+      const vector_id = vectorIdFor("script", ref_id);
+
+      docs.push({
+        kind: "script",
+        ref_id,
+        vector_id,
+        text,
+        hash,
+        metadata: buildMetadata({
+          kind: "script",
+          ref_id,
+          friendly_name,
+          domain: "script",
+          area: "",
+          entity_category: "primary",
+          is_noisy: false,
+          topic_tag: "",
+          hash
+        })
+      });
+    }
+  }
+  return docs;
+}
+
+async function buildSceneDocs(env) {
+  const states = await getStates(env, false);
+  if (!Array.isArray(states)) return [];
+  const scenes = states.filter((s) => s.entity_id.startsWith("scene."));
+
+  const docs = [];
+  const BATCH = 8;
+  for (let i = 0; i < scenes.length; i += BATCH) {
+    const slice = scenes.slice(i, i + BATCH);
+    const configs = await Promise.all(slice.map((s) => {
+      const objectId = s.entity_id.split(".")[1];
+      return objectId ? fetchSceneConfigSafe(env, objectId) : Promise.resolve(null);
+    }));
+
+    for (let j = 0; j < slice.length; j++) {
+      const s = slice[j];
+      const cfg = configs[j];
+      const friendly_name = (s.attributes && s.attributes.friendly_name) || s.entity_id;
+      let entities = [];
+      if (cfg && cfg.entities && typeof cfg.entities === "object") {
+        entities = Object.keys(cfg.entities);
+      } else if (s.attributes && Array.isArray(s.attributes.entity_id)) {
+        entities = s.attributes.entity_id;
+      }
+
+      const text = buildSceneEmbedText({
+        friendly_name,
+        entity_id: s.entity_id,
+        entities
+      });
+      const hash = fnv1aHex(text);
+      const ref_id = s.entity_id;
+      const vector_id = vectorIdFor("scene", ref_id);
+
+      docs.push({
+        kind: "scene",
+        ref_id,
+        vector_id,
+        text,
+        hash,
+        metadata: buildMetadata({
+          kind: "scene",
+          ref_id,
+          friendly_name,
+          domain: "scene",
+          area: "",
+          entity_category: "primary",
+          is_noisy: false,
+          topic_tag: "",
+          hash
+        })
+      });
+    }
+  }
+  return docs;
+}
+
+async function buildAreaDocs(env) {
+  const [areas, floors] = await Promise.all([
+    getAreaRegistry(env, false),
+    getFloorRegistry(env, false)
+  ]);
+  if (!Array.isArray(areas)) return [];
+  const floorById = new Map();
+  if (Array.isArray(floors)) {
+    for (const f of floors) if (f && f.floor_id) floorById.set(f.floor_id, f.name || "");
+  }
+
+  const docs = [];
+  for (const a of areas) {
+    if (!a || !a.area_id) continue;
+    const ref_id = a.area_id;
+    const friendly_name = a.name || ref_id;
+    const aliases = Array.isArray(a.aliases) ? a.aliases : [];
+    const floor_name = a.floor_id ? (floorById.get(a.floor_id) || "") : "";
+
+    const text = buildAreaEmbedText({
+      name: friendly_name,
+      floor_name,
+      aliases
+    });
+    const hash = fnv1aHex(text);
+    const vector_id = vectorIdFor("area", ref_id);
+
+    docs.push({
+      kind: "area",
+      ref_id,
+      vector_id,
+      text,
+      hash,
+      metadata: buildMetadata({
+        kind: "area",
+        ref_id,
+        friendly_name,
+        domain: "area",
+        area: friendly_name,
+        entity_category: "primary",
+        is_noisy: false,
+        topic_tag: "",
+        hash
+      })
+    });
+  }
+  return docs;
+}
+
+async function buildDeviceDocs(env) {
+  const [deviceRegistry, areaRegistry, entityRegistry] = await Promise.all([
+    getDeviceRegistry(env, false),
+    getAreaRegistry(env, false),
+    getEntityRegistry(env, false)
+  ]);
+  if (!Array.isArray(deviceRegistry)) return [];
+  const areaById = new Map();
+  if (Array.isArray(areaRegistry)) {
+    for (const a of areaRegistry) if (a && a.area_id) areaById.set(a.area_id, a.name || "");
+  }
+  // Count entities per device + collect a small sample per device.
+  const entitiesByDevice = new Map();
+  if (Array.isArray(entityRegistry)) {
+    for (const e of entityRegistry) {
+      if (!e || !e.device_id) continue;
+      let bucket = entitiesByDevice.get(e.device_id);
+      if (!bucket) { bucket = []; entitiesByDevice.set(e.device_id, bucket); }
+      bucket.push(e.entity_id);
+    }
+  }
+
+  const docs = [];
+  for (const d of deviceRegistry) {
+    if (!d || !d.id) continue;
+    const ref_id = d.id;
+    const friendly_name = d.name || d.id;
+    const area = d.area_id ? (areaById.get(d.area_id) || "") : "";
+    const ents = entitiesByDevice.get(ref_id) || [];
+
+    const text = buildDeviceEmbedText({
+      name: friendly_name,
+      manufacturer: d.manufacturer || "",
+      model: d.model || "",
+      area,
+      entity_count: ents.length,
+      sample_entities: ents.slice(0, 5)
+    });
+    const hash = fnv1aHex(text);
+    const vector_id = vectorIdFor("device", ref_id);
+
+    docs.push({
+      kind: "device",
+      ref_id,
+      vector_id,
+      text,
+      hash,
+      metadata: buildMetadata({
+        kind: "device",
+        ref_id,
+        friendly_name,
+        domain: "device",
+        area,
+        entity_category: "primary",
+        is_noisy: false,
+        topic_tag: "",
+        hash
+      })
+    });
+  }
+  return docs;
+}
+
+async function buildServiceDocs(env) {
+  const services = await getServices(env, false);
+  if (!Array.isArray(services)) return [];
+  const docs = [];
+  for (const domainObj of services) {
+    if (!domainObj || !domainObj.domain) continue;
+    const domain = domainObj.domain;
+    const svcMap = domainObj.services;
+    if (!svcMap || typeof svcMap !== "object") continue;
+    for (const [service, info] of Object.entries(svcMap)) {
+      if (!service) continue;
+      const fields = flattenServiceFields(info);
+      const text = buildServiceEmbedText({
+        domain,
+        service,
+        name: (info && info.name) || "",
+        description: (info && info.description) || "",
+        fieldDescriptions: fields
+      });
+      const hash = fnv1aHex(text);
+      const ref_id = domain + "." + service;
+      const vector_id = vectorIdFor("service", ref_id);
+      const noisy = isNoisyService(domain, service);
+      const friendly_name = ref_id;
+
+      docs.push({
+        kind: "service",
+        ref_id,
+        vector_id,
+        text,
+        hash,
+        metadata: buildMetadata({
+          kind: "service",
+          ref_id,
+          friendly_name,
+          domain,
+          area: "",
+          entity_category: "primary",
+          is_noisy: noisy,
+          topic_tag: "",
+          hash
+        })
+      });
+    }
+  }
+  return docs;
+}
+
+async function buildMemoryDocs(env) {
+  const memory = await doFetch(env, "/ai_memory");
+  if (!Array.isArray(memory)) return [];
+  const docs = [];
+  for (const text of memory) {
+    if (typeof text !== "string" || !text) continue;
+    const ref_id = fnv1aHex(text);
+    const vector_id = vectorIdFor("memory", ref_id);
+    const friendly_name = text.slice(0, 80);
+    const embedText = buildMemoryEmbedText(text);
+    const hash = fnv1aHex(embedText);
+
+    docs.push({
+      kind: "memory",
+      ref_id,
+      vector_id,
+      text: embedText,
+      hash,
+      metadata: buildMetadata({
+        kind: "memory",
+        ref_id,
+        friendly_name,
+        domain: "memory",
+        area: "",
+        entity_category: "primary",
+        is_noisy: false,
+        topic_tag: "",
+        hash
+      })
+    });
+  }
+  return docs;
+}
+
+async function buildObservationDocs(env) {
+  const observations = await doFetch(env, "/ai_observations");
+  if (!Array.isArray(observations)) return [];
+  const docs = [];
+  for (const text of observations) {
+    if (typeof text !== "string" || !text) continue;
+    const ref_id = fnv1aHex(text);
+    const vector_id = vectorIdFor("observation", ref_id);
+    const friendly_name = text.slice(0, 80);
+    const embedText = buildObservationEmbedText(text);
+    const hash = fnv1aHex(embedText);
+    const topic_tag = extractTopicTag(text);
+
+    docs.push({
+      kind: "observation",
+      ref_id,
+      vector_id,
+      text: embedText,
+      hash,
+      metadata: buildMetadata({
+        kind: "observation",
+        ref_id,
+        friendly_name,
+        domain: "observation",
+        area: "",
+        entity_category: "primary",
+        is_noisy: false,
+        topic_tag,
+        hash
+      })
+    });
+  }
+  return docs;
+}
+
+async function buildKindDocs(env, kind) {
+  switch (kind) {
+    case "entity": return await buildEntityDocs(env);
+    case "automation": return await buildAutomationDocs(env);
+    case "script": return await buildScriptDocs(env);
+    case "scene": return await buildSceneDocs(env);
+    case "area": return await buildAreaDocs(env);
+    case "device": return await buildDeviceDocs(env);
+    case "service": return await buildServiceDocs(env);
+    case "memory": return await buildMemoryDocs(env);
+    case "observation": return await buildObservationDocs(env);
+    default:
+      throw new Error("Unknown kind: " + kind);
+  }
+}
+
+async function backfillKnowledge(env, { force = false, kinds = null } = {}) {
+  if (!env.AI || !env.KNOWLEDGE) {
+    throw new Error("AI or KNOWLEDGE binding not configured");
+  }
+
+  const targetKinds = Array.isArray(kinds) && kinds.length > 0
+    ? kinds.filter((k) => ALL_KINDS.includes(k))
+    : [...ALL_KINDS];
+
+  // Build docs per kind. Failures in one kind are logged and we continue.
+  const perKindStats = {};
+  const allDocs = [];
+  for (const kind of targetKinds) {
+    const t0 = Date.now();
+    let docs = [];
+    try {
+      docs = await buildKindDocs(env, kind);
+    } catch (err) {
+      console.error("buildKindDocs(" + kind + ") failed:", err.message);
+      perKindStats[kind] = { found: 0, error: err.message, build_ms: Date.now() - t0 };
+      continue;
+    }
+    perKindStats[kind] = { found: docs.length, build_ms: Date.now() - t0 };
+    for (const d of docs) allDocs.push(d);
+  }
+
+  // Skip-by-hash: look up existing vectors in batches of 20.
   const existingHash = new Map();
-  if (!force && env.VECTORIZE && typeof env.VECTORIZE.getByIds === "function") {
-    // Vectorize getByIds caps at 20 ids/call.
+  if (!force && typeof env.KNOWLEDGE.getByIds === "function" && allDocs.length > 0) {
     const LOOKUP_BATCH = 20;
-    for (let i = 0; i < docs.length; i += LOOKUP_BATCH) {
-      const slice = docs.slice(i, i + LOOKUP_BATCH).map((d) => d.vector_id);
+    for (let i = 0; i < allDocs.length; i += LOOKUP_BATCH) {
+      const slice = allDocs.slice(i, i + LOOKUP_BATCH).map((d) => d.vector_id);
       try {
-        const existing = await env.VECTORIZE.getByIds(slice);
+        const existing = await env.KNOWLEDGE.getByIds(slice);
         if (Array.isArray(existing)) {
           for (const v of existing) {
             if (v && v.id && v.metadata && v.metadata.hash) existingHash.set(v.id, v.metadata.hash);
           }
         }
       } catch (err) {
-        console.warn("Vectorize getByIds failed, will re-embed all:", err.message);
+        console.warn("KNOWLEDGE.getByIds failed, will re-embed all:", err.message);
         existingHash.clear();
         break;
       }
@@ -2010,7 +2555,7 @@ async function backfillEntityVectors(env, { force = false } = {}) {
 
   const toEmbed = [];
   let skipped = 0;
-  for (const d of docs) {
+  for (const d of allDocs) {
     if (!force && existingHash.get(d.vector_id) === d.hash) skipped++;
     else toEmbed.push(d);
   }
@@ -2026,9 +2571,9 @@ async function backfillEntityVectors(env, { force = false } = {}) {
     const batch = pending;
     pending = [];
     try {
-      await env.VECTORIZE.upsert(batch);
+      await env.KNOWLEDGE.upsert(batch);
     } catch (err) {
-      console.error("Vectorize upsert failed:", err.message);
+      console.error("KNOWLEDGE.upsert failed:", err.message);
       errors += batch.length;
       embedded -= batch.length;
     }
@@ -2069,10 +2614,11 @@ async function backfillEntityVectors(env, { force = false } = {}) {
   await flushUpsert();
 
   return {
-    total_entities: entityRegistry.length,
+    total_docs: allDocs.length,
     embedded,
     skipped,
-    errors
+    errors,
+    kinds: perKindStats
   };
 }
 
@@ -2081,7 +2627,7 @@ async function handleMCP(request, env) {
   try {
     switch (method) {
       case "initialize":
-        return { jsonrpc: "2.0", id, result: { protocolVersion: "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: "ha-mcp-gateway", version: "5.0.0" } } };
+        return { jsonrpc: "2.0", id, result: { protocolVersion: "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: "ha-mcp-gateway", version: "5.1.0" } } };
       case "notifications/initialized":
         return { jsonrpc: "2.0", id, result: {} };
       case "tools/list":
@@ -2113,9 +2659,10 @@ var worker_default = {
       const doStatus = await doFetch(env, "/status");
       return new Response(JSON.stringify({
         status: "ok",
-        version: "5.0.0",
+        version: "5.1.0",
         tools: TOOLS.length,
         cache: env.HA_CACHE ? "enabled" : "disabled",
+        knowledge: env.KNOWLEDGE ? "bound" : "unbound",
         websocket: doStatus || { connected: false }
       }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
     }
@@ -2227,12 +2774,16 @@ var worker_default = {
     }
   }
 }
-    if (url.pathname === "/admin/backfill-vectors") {
+    // Multi-kind knowledge backfill. Body is optional; query params control
+    // behavior:
+    //   ?force=1                    re-embed everything regardless of hash
+    //   ?kinds=entity,automation    comma-separated subset (default: all)
+    if (url.pathname === "/admin/rebuild-knowledge") {
       if (request.method !== "POST") {
         return new Response("Method not allowed", { status: 405 });
       }
-      if (!env.AI || !env.VECTORIZE) {
-        return new Response(JSON.stringify({ error: "AI or VECTORIZE binding not configured" }), {
+      if (!env.AI || !env.KNOWLEDGE) {
+        return new Response(JSON.stringify({ error: "AI or KNOWLEDGE binding not configured" }), {
           status: 500,
           headers: { ...corsHeaders, "Content-Type": "application/json" }
         });
@@ -2240,7 +2791,11 @@ var worker_default = {
       const t0 = Date.now();
       try {
         const force = url.searchParams.get("force") === "1" || url.searchParams.get("force") === "true";
-        const summary = await backfillEntityVectors(env, { force });
+        const kindsParam = url.searchParams.get("kinds");
+        const kinds = kindsParam
+          ? kindsParam.split(",").map((s) => s.trim()).filter(Boolean)
+          : null;
+        const summary = await backfillKnowledge(env, { force, kinds });
         return new Response(JSON.stringify({ ...summary, duration_ms: Date.now() - t0 }), {
           headers: { ...corsHeaders, "Content-Type": "application/json" }
         });
@@ -2268,6 +2823,13 @@ var worker_default = {
     return new Response("Not found", { status: 404 });
   },
   async scheduled(event, env, ctx) {
+    // Cron dispatcher — branch on the matched cron pattern. The minute-level
+    // "* * * * *" trigger runs cache prewarm; "30 8 * * *" runs the heavy
+    // daily knowledge resync. event.cron is the matched pattern.
+    if (event && event.cron === "30 8 * * *") {
+      ctx.waitUntil(this.dailyKnowledgeResync(env));
+      return;
+    }
     ctx.waitUntil(this.prewarmCache(env));
   },
   async prewarmCache(env, forceAll = false) {
@@ -2299,10 +2861,31 @@ var worker_default = {
     } catch (error) {
       console.error("Cache pre-warm failed:", error);
     }
+  },
+  // Daily heavy resync — re-embeds the kinds that aren't already covered by
+  // event-driven (entity/device on registry events) or write-through (memory/
+  // observation in executeAIAction) updates. Skips unchanged docs by hash so
+  // a full daily run typically completes with most docs in the skipped column.
+  async dailyKnowledgeResync(env) {
+    if (!env.AI || !env.KNOWLEDGE) {
+      console.log("dailyKnowledgeResync: AI or KNOWLEDGE binding missing — skipping");
+      return;
+    }
+    const t0 = Date.now();
+    try {
+      const summary = await backfillKnowledge(env, {
+        force: false,
+        kinds: ["automation", "script", "scene", "area", "device", "service"]
+      });
+      console.log(
+        "dailyKnowledgeResync: " + JSON.stringify({ ...summary, duration_ms: Date.now() - t0 })
+      );
+    } catch (err) {
+      console.error("dailyKnowledgeResync failed:", err.message);
+    }
   }
 };
 export {
   HAWebSocket,
   worker_default as default
 };
-//# sourceMappingURL=worker.js.map
