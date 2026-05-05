@@ -853,6 +853,69 @@ const CHAT_HTML = `<!DOCTYPE html>
     color: var(--error);
     font-size: 12px;
     font-family: 'JetBrains Mono', monospace;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    align-items: center;
+  }
+
+  /* ── Message action buttons (copy / retry) ── */
+  .msg-actions {
+    display: flex;
+    gap: 4px;
+    margin-top: 8px;
+    opacity: 0;
+    transition: opacity 0.15s;
+  }
+
+  .msg:hover .msg-actions,
+  .msg:focus-within .msg-actions { opacity: 1; }
+
+  .msg.user .msg-actions { justify-content: flex-end; }
+
+  .bubble-btn {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+    border-radius: 6px;
+    padding: 3px 8px;
+    font-size: 10px;
+    font-family: 'JetBrains Mono', monospace;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    transition: all 0.15s;
+    text-transform: lowercase;
+    letter-spacing: 0.04em;
+  }
+
+  .bubble-btn:hover {
+    color: var(--text);
+    border-color: var(--accent);
+    background: var(--surface-hover);
+  }
+
+  .bubble-btn svg { width: 11px; height: 11px; }
+
+  .bubble-btn.copied {
+    color: var(--success);
+    border-color: var(--success);
+  }
+
+  .msg.error .bubble-btn {
+    color: var(--error);
+    border-color: rgba(239,68,68,0.4);
+  }
+
+  .msg.error .bubble-btn:hover {
+    background: rgba(239,68,68,0.15);
+    color: var(--error);
+  }
+
+  /* On touch devices, always show actions since hover doesn't apply */
+  @media (hover: none) {
+    .msg-actions { opacity: 0.65; }
   }
 
   /* ── Typing indicator ── */
@@ -1065,9 +1128,12 @@ const CHAT_HTML = `<!DOCTYPE html>
       <p>Chat with your smart home. Ask about status, control devices, or just say hello.</p>
       <div class="quick-actions">
         <button class="quick-btn" onclick="sendQuick('What is the status of the house?')">House status</button>
-        <button class="quick-btn" onclick="sendQuick('Are all the doors locked?')">Lock check</button>
-        <button class="quick-btn" onclick="sendQuick('What is the temperature?')">Temperature</button>
         <button class="quick-btn" onclick="sendQuick('Any alerts?')">Alerts</button>
+        <button class="quick-btn" onclick="sendQuick('Toggle the garage bay door')">Toggle garage bay</button>
+        <button class="quick-btn" onclick="sendQuick('Toggle the basement bay door')">Toggle basement bay</button>
+        <button class="quick-btn" onclick="sendQuick('Set the temperature to 72')">Set temperature</button>
+        <button class="quick-btn" onclick="sendQuick('Lock all the doors')">Lock doors</button>
+        <button class="quick-btn" onclick="sendQuick('Unlock the front door')">Unlock front door</button>
       </div>
     </div>
   </div>
@@ -1137,9 +1203,61 @@ const CHAT_HTML = `<!DOCTYPE html>
       });
   }
 
+  let lastUserMessage = null;
+
+  // SVG icon helpers (template literals)
+  const ICON_COPY = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>';
+  const ICON_CHECK = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>';
+  const ICON_RETRY = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path></svg>';
+
   function sendQuick(text) {
     input.value = text;
     send();
+  }
+
+  function makeCopyBtn(text) {
+    const btn = document.createElement('button');
+    btn.className = 'bubble-btn';
+    btn.type = 'button';
+    btn.innerHTML = ICON_COPY + '<span>copy</span>';
+    btn.onclick = async () => {
+      try {
+        await navigator.clipboard.writeText(text);
+      } catch {
+        // Fallback for non-secure contexts
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.position = 'fixed';
+        ta.style.left = '-9999px';
+        document.body.appendChild(ta);
+        ta.select();
+        try { document.execCommand('copy'); } catch {}
+        document.body.removeChild(ta);
+      }
+      btn.classList.add('copied');
+      btn.innerHTML = ICON_CHECK + '<span>copied</span>';
+      setTimeout(() => {
+        btn.classList.remove('copied');
+        btn.innerHTML = ICON_COPY + '<span>copy</span>';
+      }, 1400);
+    };
+    return btn;
+  }
+
+  function makeRetryBtn() {
+    const btn = document.createElement('button');
+    btn.className = 'bubble-btn';
+    btn.type = 'button';
+    btn.innerHTML = ICON_RETRY + '<span>retry</span>';
+    btn.onclick = () => {
+      if (!lastUserMessage) return;
+      // Remove the error bubble we're attached to
+      const parent = btn.closest('.msg');
+      if (parent && parent.parentNode) parent.parentNode.removeChild(parent);
+      input.value = lastUserMessage;
+      send();
+    };
+    return btn;
   }
 
   function addMsg(role, text, actions) {
@@ -1168,8 +1286,32 @@ const CHAT_HTML = `<!DOCTYPE html>
         actDiv.textContent = '⚡ ' + actions.join(', ');
         div.appendChild(actDiv);
       }
+
+      const acts = document.createElement('div');
+      acts.className = 'msg-actions';
+      acts.appendChild(makeCopyBtn(text));
+      div.appendChild(acts);
     } else if (role === 'error') {
-      div.textContent = text;
+      const body = document.createElement('div');
+      body.textContent = text;
+      div.appendChild(body);
+
+      const acts = document.createElement('div');
+      acts.className = 'msg-actions';
+      acts.style.opacity = '1'; // always visible on errors
+      if (lastUserMessage) acts.appendChild(makeRetryBtn());
+      acts.appendChild(makeCopyBtn(text));
+      div.appendChild(acts);
+    } else if (role === 'user') {
+      const body = document.createElement('div');
+      body.className = 'msg-text';
+      body.textContent = text;
+      div.appendChild(body);
+
+      const acts = document.createElement('div');
+      acts.className = 'msg-actions';
+      acts.appendChild(makeCopyBtn(text));
+      div.appendChild(acts);
     } else {
       div.textContent = text;
     }
@@ -1182,6 +1324,7 @@ const CHAT_HTML = `<!DOCTYPE html>
     const text = input.value.trim();
     if (!text) return;
 
+    lastUserMessage = text;
     input.value = '';
     input.style.height = 'auto';
     sendBtn.disabled = true;
@@ -1274,6 +1417,7 @@ const CHAT_HTML = `<!DOCTYPE html>
       msgEl.removeChild(msgEl.lastChild);
     }
     if (welcome) welcome.style.display = 'flex';
+    lastUserMessage = null;
   }
 
   // ── Voice input (ElevenLabs Scribe) ──
@@ -1353,6 +1497,7 @@ const CHAT_HTML = `<!DOCTYPE html>
   }
 
   async function transcribeAndSend() {
+    // Release the mic regardless of outcome
     if (micStream) {
       try { micStream.getTracks().forEach(t => t.stop()); } catch {}
       micStream = null;
