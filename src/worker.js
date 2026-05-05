@@ -939,6 +939,49 @@ const CHAT_HTML = `<!DOCTYPE html>
 
   #sendBtn svg { width: 18px; height: 18px; }
 
+  /* ── Mic button (large, thumb-friendly) ── */
+  #micBtn {
+    width: 52px; height: 52px;
+    background: var(--surface-hover);
+    border: 1px solid var(--border);
+    border-radius: 50%;
+    color: var(--text-dim);
+    cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    flex-shrink: 0;
+    transition: background 0.15s, color 0.15s, border-color 0.15s;
+    -webkit-tap-highlight-color: transparent;
+    touch-action: manipulation;
+  }
+
+  #micBtn:hover { color: var(--text); border-color: var(--accent); }
+  #micBtn:disabled { opacity: 0.4; cursor: not-allowed; }
+  #micBtn svg { width: 24px; height: 24px; }
+
+  #micBtn.recording {
+    background: var(--error);
+    color: white;
+    border-color: var(--error);
+    animation: micPulse 1.2s infinite;
+  }
+
+  #micBtn.transcribing {
+    color: var(--accent);
+    border-color: var(--accent);
+  }
+
+  #micBtn.transcribing svg { animation: spin 0.9s linear infinite; }
+
+  @keyframes micPulse {
+    0%   { box-shadow: 0 0 0 0 rgba(239,68,68,0.55); }
+    70%  { box-shadow: 0 0 0 12px rgba(239,68,68,0); }
+    100% { box-shadow: 0 0 0 0 rgba(239,68,68,0); }
+  }
+
+  @keyframes spin {
+    to { transform: rotate(360deg); }
+  }
+
   /* ── Welcome ── */
   .welcome {
     display: flex;
@@ -1036,6 +1079,14 @@ const CHAT_HTML = `<!DOCTYPE html>
   <div class="input-area">
     <div class="input-row">
       <textarea id="msgInput" rows="1" placeholder="Message your home..." autocomplete="off"></textarea>
+      <button id="micBtn" type="button" onclick="toggleMic()" aria-label="Voice input">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"></path>
+          <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
+          <line x1="12" y1="19" x2="12" y2="23"></line>
+          <line x1="8" y1="23" x2="16" y2="23"></line>
+        </svg>
+      </button>
       <button id="sendBtn" onclick="send()">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
           <line x1="22" y1="2" x2="11" y2="13"></line>
@@ -1223,6 +1274,121 @@ const CHAT_HTML = `<!DOCTYPE html>
       msgEl.removeChild(msgEl.lastChild);
     }
     if (welcome) welcome.style.display = 'flex';
+  }
+
+  // ── Voice input (ElevenLabs Scribe) ──
+  const micBtn = document.getElementById('micBtn');
+  const ICON_MIC_HTML = micBtn.innerHTML;
+  const ICON_STOP_HTML = '<svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"></rect></svg>';
+  const ICON_SPIN_HTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M12 2a10 10 0 0 1 10 10" opacity="0.25"/><path d="M12 2a10 10 0 0 1 10 10"/></svg>';
+
+  let mediaRecorder = null;
+  let audioChunks = [];
+  let micStream = null;
+  let isRecording = false;
+
+  function pickMime() {
+    if (typeof MediaRecorder === 'undefined') return null;
+    const candidates = [
+      'audio/webm;codecs=opus',
+      'audio/webm',
+      'audio/mp4;codecs=mp4a.40.2',
+      'audio/mp4',
+      'audio/mpeg',
+      'audio/ogg;codecs=opus'
+    ];
+    for (const c of candidates) {
+      try { if (MediaRecorder.isTypeSupported(c)) return c; } catch {}
+    }
+    return '';
+  }
+
+  async function toggleMic() {
+    if (isRecording) { stopRecording(); return; }
+    await startRecording();
+  }
+
+  async function startRecording() {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || typeof MediaRecorder === 'undefined') {
+      addMsg('error', 'Voice input not supported in this browser.');
+      return;
+    }
+    try {
+      micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch (err) {
+      addMsg('error', 'Microphone access denied: ' + err.message);
+      return;
+    }
+    const mime = pickMime();
+    audioChunks = [];
+    try {
+      mediaRecorder = new MediaRecorder(micStream, mime ? { mimeType: mime } : undefined);
+    } catch {
+      mediaRecorder = new MediaRecorder(micStream);
+    }
+    mediaRecorder.ondataavailable = (e) => { if (e.data && e.data.size > 0) audioChunks.push(e.data); };
+    mediaRecorder.onstop = () => transcribeAndSend();
+    mediaRecorder.start();
+    isRecording = true;
+    micBtn.classList.add('recording');
+    micBtn.innerHTML = ICON_STOP_HTML;
+    micBtn.setAttribute('aria-label', 'Stop recording');
+  }
+
+  function stopRecording() {
+    if (!mediaRecorder || mediaRecorder.state !== 'recording') return;
+    mediaRecorder.stop();
+    isRecording = false;
+    micBtn.classList.remove('recording');
+    micBtn.classList.add('transcribing');
+    micBtn.innerHTML = ICON_SPIN_HTML;
+    micBtn.disabled = true;
+  }
+
+  function resetMic() {
+    micBtn.classList.remove('recording', 'transcribing');
+    micBtn.innerHTML = ICON_MIC_HTML;
+    micBtn.disabled = false;
+    micBtn.setAttribute('aria-label', 'Voice input');
+  }
+
+  async function transcribeAndSend() {
+    if (micStream) {
+      try { micStream.getTracks().forEach(t => t.stop()); } catch {}
+      micStream = null;
+    }
+
+    if (!audioChunks.length) { resetMic(); return; }
+    const mime = (mediaRecorder && mediaRecorder.mimeType) || 'audio/webm';
+    const blob = new Blob(audioChunks, { type: mime });
+
+    if (blob.size < 800) {
+      resetMic();
+      addMsg('error', 'No audio captured. Try again.');
+      return;
+    }
+
+    try {
+      const resp = await fetch('/transcribe', {
+        method: 'POST',
+        headers: { 'Content-Type': mime },
+        body: blob
+      });
+      if (!resp.ok) {
+        let detail = '';
+        try { detail = (await resp.text()).slice(0, 200); } catch {}
+        throw new Error('HTTP ' + resp.status + (detail ? ' — ' + detail : ''));
+      }
+      const data = await resp.json();
+      const text = (data.text || '').trim();
+      resetMic();
+      if (!text) { addMsg('error', 'Empty transcription.'); return; }
+      input.value = text;
+      send();
+    } catch (err) {
+      resetMic();
+      addMsg('error', 'Transcription failed: ' + err.message);
+    }
   }
 </script>
 </body>
@@ -2665,6 +2831,62 @@ var worker_default = {
         knowledge: env.KNOWLEDGE ? "bound" : "unbound",
         websocket: doStatus || { connected: false }
       }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
+    }
+    if (url.pathname === "/transcribe") {
+      if (request.method !== "POST") {
+        return new Response("Method not allowed", { status: 405, headers: corsHeaders });
+      }
+      if (!env.ELEVENLABS_API_KEY) {
+        return new Response(JSON.stringify({ error: "ELEVENLABS_API_KEY not configured" }), {
+          status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" }
+        });
+      }
+      try {
+        const audioBlob = await request.blob();
+        if (audioBlob.size === 0) {
+          return new Response(JSON.stringify({ error: "Empty audio body" }), {
+            status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" }
+          });
+        }
+        const ct = (request.headers.get("Content-Type") || "audio/webm").toLowerCase();
+        let filename = "audio.webm";
+        if (ct.includes("mp4") || ct.includes("aac") || ct.includes("m4a")) filename = "audio.m4a";
+        else if (ct.includes("mpeg")) filename = "audio.mp3";
+        else if (ct.includes("wav")) filename = "audio.wav";
+        else if (ct.includes("ogg")) filename = "audio.ogg";
+
+        const form = new FormData();
+        form.append("file", audioBlob, filename);
+        form.append("model_id", "scribe_v1");
+
+        const elevResp = await fetch("https://api.elevenlabs.io/v1/speech-to-text", {
+          method: "POST",
+          headers: { "xi-api-key": env.ELEVENLABS_API_KEY },
+          body: form
+        });
+        const respText = await elevResp.text();
+        if (!elevResp.ok) {
+          return new Response(JSON.stringify({
+            error: "ElevenLabs error",
+            status: elevResp.status,
+            body: respText.slice(0, 500)
+          }), {
+            status: 502, headers: { ...corsHeaders, "Content-Type": "application/json" }
+          });
+        }
+        let data;
+        try { data = JSON.parse(respText); } catch { data = { text: respText }; }
+        return new Response(JSON.stringify({
+          text: data.text || "",
+          language_code: data.language_code
+        }), {
+          headers: { ...corsHeaders, "Content-Type": "application/json" }
+        });
+      } catch (e) {
+        return new Response(JSON.stringify({ error: e.message }), {
+          status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" }
+        });
+      }
     }
     if (url.pathname === "/refresh") {
       try {
