@@ -1328,6 +1328,7 @@ const CHAT_HTML = `<!DOCTYPE html>
     input.value = '';
     input.style.height = 'auto';
     sendBtn.disabled = true;
+    window.__chatRetried = false;
 
     addMsg('user', text);
     typing.classList.add('active');
@@ -1381,7 +1382,9 @@ const CHAT_HTML = `<!DOCTYPE html>
           let evt;
           try { evt = JSON.parse(line.slice(6)); } catch { continue; }
 
-          if (evt.type === 'thinking') {
+          if (evt.type === 'started') {
+            // server alive — no UI action needed
+          } else if (evt.type === 'thinking') {
             showStatus('Thinking…');
           } else if (evt.type === 'tool_call') {
             showStatus('⚡ ' + (evt.label || evt.name) + '…');
@@ -1403,6 +1406,61 @@ const CHAT_HTML = `<!DOCTYPE html>
       clearStatus();
 
     } catch (err) {
+      const retryable = /load failed|network|fetch/i.test(err.message || '');
+      if (retryable && !window.__chatRetried) {
+        window.__chatRetried = true;
+        showStatus('Reconnecting…');
+        try {
+          const resp2 = await fetch('/chat', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Accept': 'text/event-stream' },
+            body: JSON.stringify({ message: text })
+          });
+          if (resp2.ok && resp2.body) {
+            const reader = resp2.body.getReader();
+            const decoder = new TextDecoder();
+            let buf = '';
+            while (true) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              buf += decoder.decode(value, { stream: true });
+              const lines = buf.split('\\n');
+              buf = lines.pop();
+              for (const line of lines) {
+                if (!line.startsWith('data: ')) continue;
+                let evt;
+                try { evt = JSON.parse(line.slice(6)); } catch { continue; }
+                if (evt.type === 'started') {
+                  // server alive
+                } else if (evt.type === 'thinking') {
+                  showStatus('Thinking…');
+                } else if (evt.type === 'tool_call') {
+                  showStatus('⚡ ' + (evt.label || evt.name) + '…');
+                } else if (evt.type === 'tool_result') {
+                  showStatus((evt.ok ? '✓ ' : '✗ ') + evt.name);
+                } else if (evt.type === 'reply') {
+                  typing.classList.remove('active');
+                  clearStatus();
+                  addMsg('agent', evt.text || 'No response.');
+                } else if (evt.type === 'error') {
+                  typing.classList.remove('active');
+                  clearStatus();
+                  addMsg('error', evt.message || 'Agent error');
+                }
+              }
+            }
+            typing.classList.remove('active');
+            clearStatus();
+            window.__chatRetried = false;
+            sendBtn.disabled = false;
+            input.focus();
+            return;
+          }
+        } catch (err2) {
+          // fall through to error display
+        }
+        window.__chatRetried = false;
+      }
       typing.classList.remove('active');
       clearStatus();
       addMsg('error', 'Failed to reach agent: ' + err.message);
