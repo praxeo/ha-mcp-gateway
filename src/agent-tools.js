@@ -280,3 +280,16 @@ export const NATIVE_TOOL_NAMES = new Set(
 export const NATIVE_ACTION_TOOL_NAMES = new Set(
   ACTION_TOOLS.map((t) => t.function.name)
 );
+
+// Names of tools the CHAT profile is allowed to expose to MiniMax.
+// save_memory and save_observation are intentionally excluded — confirmed
+// facts and patterns get picked up by the autonomous heartbeat from the
+// unified timeline. Removing the temptation makes chat replies tighter.
+export const CHAT_ALLOWED_TOOL_NAMES = new Set([
+  "call_service",
+  "ai_send_notification",
+  "get_state",
+  "get_logbook",
+  "render_template",
+  "vector_search"
+]);
