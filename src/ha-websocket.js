@@ -1,5 +1,5 @@
 // ha-websocket.js — multi-kind knowledge index + write-through + native vector_search
-import { NATIVE_AGENT_TOOLS, NATIVE_TOOL_NAMES, NATIVE_ACTION_TOOL_NAMES } from "./agent-tools.js";
+import { NATIVE_AGENT_TOOLS, NATIVE_TOOL_NAMES, NATIVE_ACTION_TOOL_NAMES, CHAT_ALLOWED_TOOL_NAMES } from "./agent-tools.js";
 import {
   fnv1aHex,
   vectorIdFor,
@@ -17,6 +17,12 @@ import {
   NOISY_SENSOR_UNITS,
   extractTopicTag
 } from "./vectorize-schema.js";
+
+function sanitizeChannelKey(from) {
+  if (!from || typeof from !== "string") return "default";
+  const cleaned = from.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+  return cleaned.substring(0, 64) || "default";
+}
 
 export class HAWebSocket {
   // Static config for prioritized entity context building
@@ -754,7 +760,14 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
           const encoder = new TextEncoder();
           const write = (chunk) => writer.write(encoder.encode(chunk)).catch(() => {});
 
-          const keepalive = setInterval(() => write(":\n\n"), 8000);
+          // Immediate first byte — tells iOS Safari the server is alive before
+          // any model latency. Without this, the first wire activity is the
+          // 3s keepalive or the model's first event, whichever is sooner.
+          write(`data: ${JSON.stringify({ type: "started" })}\n\n`);
+
+          // 3s keepalive (was 8s). iOS Safari on cellular drops longer-idle streams.
+          const keepalive = setInterval(() => write(":\n\n"), 3000);
+
           this.chatWithAgent(body.message, body.from || "default", (event) => {
             write(`data: ${JSON.stringify(event)}\n\n`);
           }).then(() => {
@@ -2650,7 +2663,7 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
   //
   // Returns the raw API response with the assistant message UNMUTATED.
   // ========================================================================
-  async callMiniMaxWithTools(messages, tools, maxTokens = 65536) {
+  async callMiniMaxWithTools(messages, tools, maxTokens = 4096, timeoutMs = 45000) {
     const body = {
       model: "MiniMax-M2.7-highspeed",
       messages,
@@ -2659,31 +2672,49 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
       temperature: 0,
       reasoning_split: true
     };
-    const response = await fetch("https://api.minimax.io/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${this.env.MINIMAX_API_KEY}`
-      },
-      body: JSON.stringify(body)
-    });
-    if (!response.ok) {
-      const errText = await response.text();
-      throw new Error(`MiniMax API ${response.status}: ${errText.substring(0, 200)}`);
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const response = await fetch("https://api.minimax.io/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${this.env.MINIMAX_API_KEY}`
+        },
+        body: JSON.stringify(body),
+        signal: controller.signal
+      });
+      if (!response.ok) {
+        const errText = await response.text();
+        throw new Error(`MiniMax API ${response.status}: ${errText.substring(0, 200)}`);
+      }
+      return await response.json();
+    } catch (err) {
+      if (err.name === "AbortError") {
+        throw new Error(`MiniMax API timeout after ${timeoutMs}ms`);
+      }
+      throw err;
+    } finally {
+      clearTimeout(timeout);
     }
-    return await response.json();
   }
 
   // ========================================================================
   // Native tool-calling loop — Phase 2
   // ========================================================================
   async runNativeToolLoop(initialMessages, options = {}) {
-    const { maxIterations = 8, systemPrompt = null, onEvent = null } = options;
+    const {
+      maxIterations = 8,
+      systemPrompt = null,
+      onEvent = null,
+      allowedTools = NATIVE_AGENT_TOOLS,
+      hallucinationGuard = true,
+      maxTokens = 4096
+    } = options;
     const messages = [...initialMessages];
     if (systemPrompt && (messages.length === 0 || messages[0].role !== "system")) {
       messages.unshift({ role: "system", content: systemPrompt });
     }
-
     const actionsTaken = [];
     const stripThink = (s) => (s || "").replace(/<think>[\s\S]*?<\/think>/g, "").trim();
     const safeEmit = (evt) => { try { if (onEvent) onEvent(evt); } catch {} };
@@ -2692,7 +2723,7 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
       let response;
       safeEmit({ type: "thinking" });
       try {
-        response = await this.callMiniMaxWithTools(messages, NATIVE_AGENT_TOOLS);
+        response = await this.callMiniMaxWithTools(messages, allowedTools, maxTokens);
       } catch (err) {
         this.logAI("error", "Native loop API call failed: " + err.message, { iteration: iter }, "native_loop");
         safeEmit({ type: "error", message: err.message });
@@ -2704,9 +2735,7 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
           iterations: iter
         };
       }
-
       const assistantMsg = response.choices?.[0]?.message;
-
       if (!assistantMsg) {
         this.logAI("error", "Native loop: no assistant message in response", { iteration: iter, debug_keys: Object.keys(response || {}) }, "native_loop");
         safeEmit({ type: "error", message: "empty_response" });
@@ -2718,19 +2747,27 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
           iterations: iter
         };
       }
-
       messages.push(assistantMsg);
-
       const toolCalls = Array.isArray(assistantMsg.tool_calls) ? assistantMsg.tool_calls : [];
-
       if (toolCalls.length === 0) {
         const cleaned = stripThink(assistantMsg.content);
-        // Hallucinated-completion tripwire: model says "opening/closing/turning on..."
-        // but emitted no tool_call. Force one corrective iteration instead of returning
-        // the lie to the user. Mirrors the legacy claim-mismatch check at
-        // chatWithAgent but acts on it rather than just logging.
-        const actionClaimVerbs = /\b(opening|closing|turning on|turning off|locking|unlocking|setting|activating|dimming|starting|stopping)\b/i;
-        if (actionsTaken.length === 0 && actionClaimVerbs.test(cleaned)) {
+
+        // First-person action claim only — narration like "the lights are
+        // turning off" no longer false-positives. Completion idioms ("Done.",
+        // "Closing it now") still trigger. Disclaim phrases short-circuit.
+        const firstPersonClaim = /\b(?:i'?m|i\s+am|i'?ll|i\s+will|let\s+me|going\s+to|i\s+just|i'?ve|i\s+have)\s+(?:now\s+|just\s+)?(?:open|clos|turn|lock|unlock|set|activat|dim|start|stop)/i;
+        const completionClaim = /^(?:done\b|closing\s+it\s+now|opening\s+it\s+now|on\s+it\b|locked\b|unlocked\b|closed\b|opened\b|turned\s+(?:on|off)\b)/i;
+        const explicitNoAction = /\b(?:no\s+action|nothing\s+to\s+act|not\s+acting|won'?t\s+act|no\s+tool|standing\s+by|just\s+observing|monitoring\s+only|heartbeat\s+only)\b/i;
+
+        const looksLikeClaim = firstPersonClaim.test(cleaned) || completionClaim.test(cleaned.trim());
+        const disclaimsAction = explicitNoAction.test(cleaned);
+
+        if (
+          hallucinationGuard &&
+          actionsTaken.length === 0 &&
+          looksLikeClaim &&
+          !disclaimsAction
+        ) {
           this.logAI(
             "action_hallucination",
             `Claim without tool call — forcing retry: "${cleaned.substring(0, 150)}"`,
@@ -2739,7 +2776,7 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
           );
           messages.push({
             role: "user",
-            content: "You just said you performed an action (e.g. \"opening\", \"closing\", \"turning on\") but did not emit a tool_call. That is a hallucination. Call the appropriate tool NOW to actually do what you said. If you truly cannot or should not act, reply plainly saying so — do not claim completion."
+            content: 'You just said you performed an action (e.g. "I\'m closing the garage", "Done — locked") but did not emit a tool_call. That is a hallucination. Call the appropriate tool NOW to actually do what you said. If you truly cannot or should not act, reply plainly saying so — do not claim completion.'
           });
           safeEmit({ type: "thinking" });
           continue;
@@ -2752,7 +2789,6 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
           iterations: iter + 1
         };
       }
-
       for (const tc of toolCalls) {
         const name = tc.function?.name;
         const argsRaw = tc.function?.arguments || "{}";
@@ -2764,29 +2800,20 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
           parseError = parseErr.message;
           this.logAI("action_error", `Native loop: failed to parse args for ${name}: ${parseErr.message}`, { tool: name, raw: argsRaw.substring(0, 300) }, "native_loop");
         }
-
-        const evtLabel = name === "call_service" && args.domain && args.service
-          ? `${args.domain}.${args.service}`
-          : name;
+        const evtLabel = name === "call_service" && args.domain && args.service ? `${args.domain}.${args.service}` : name;
         safeEmit({ type: "tool_call", name, label: evtLabel, args });
         let result;
         if (parseError) {
           result = { error: "Invalid JSON arguments: " + parseError };
         } else if (!NATIVE_TOOL_NAMES.has(name)) {
-          result = { error: "Unknown tool: " + name };
-          this.logAI("action_error", `Native loop: unknown tool ${name}`, { tool: name }, "native_loop");
+          result = { error: `Unknown tool: ${name}` };
+        } else if (NATIVE_ACTION_TOOL_NAMES.has(name)) {
+          result = await this.executeAIAction({ action: name, ...args }, "native_loop");
+          if (!result.error) actionsTaken.push(name);
         } else {
           result = await this.executeNativeTool(name, args);
         }
-        safeEmit({ type: "tool_result", name, ok: !result?.error, summary: result?.error ? String(result.error).slice(0, 120) : "done" });
-
-        if (name) {
-          const label = name === "call_service" && args.domain && args.service
-            ? `call_service: ${args.domain}.${args.service}`
-            : name;
-          actionsTaken.push(label);
-        }
-
+        safeEmit({ type: "tool_result", name, ok: !result?.error });
         messages.push({
           role: "tool",
           tool_call_id: tc.id,
@@ -2794,11 +2821,6 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
         });
       }
     }
-
-    // Synthesis fallback — model has done the work, just hasn't composed.
-    // Force one final call with tools disabled so it returns prose only.
-    // Removes the "iteration cliff" failure mode where users got back a tool
-    // trace instead of an actual answer.
     this.logAI(
       "iteration_ceiling_synthesize",
       `${maxIterations} iterations hit; forcing synthesis call`,
@@ -2808,12 +2830,10 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
     safeEmit({ type: "thinking" });
     messages.push({
       role: "user",
-      content: "You've gathered enough information. STOP using tools and " +
-        "compose a final reply now from what you already have. No more tool " +
-        "calls. Reply in prose only."
+      content: "You've gathered enough information. STOP using tools and compose a final reply now from what you already have. No more tool calls. Reply in prose only."
     });
     try {
-      const finalResp = await this.callMiniMaxWithTools(messages, []);
+      const finalResp = await this.callMiniMaxWithTools(messages, [], maxTokens);
       const finalMsg = finalResp.choices?.[0]?.message;
       if (finalMsg) messages.push(finalMsg);
       const cleaned = stripThink(finalMsg?.content || "");
@@ -2827,26 +2847,13 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
           synthesized: true
         };
       }
-      // Synthesis returned empty — fall through to apology below.
-      this.logAI(
-        "iteration_ceiling_synthesize_empty",
-        "Synthesis call returned empty content",
-        { actions_taken: actionsTaken },
-        "native_loop"
-      );
+      this.logAI("iteration_ceiling_synthesize_empty", "Synthesis call returned empty content", { actions_taken: actionsTaken }, "native_loop");
     } catch (err) {
-      this.logAI(
-        "error",
-        "Synthesis fallback failed: " + err.message,
-        { actions_taken: actionsTaken },
-        "native_loop"
-      );
+      this.logAI("error", "Synthesis fallback failed: " + err.message, { actions_taken: actionsTaken }, "native_loop");
     }
     safeEmit({ type: "error", message: "max_iterations_exceeded" });
     return {
-      reply: "I hit my iteration ceiling without finishing — actions so far: " +
-        (actionsTaken.length > 0 ? actionsTaken.join(", ") : "none") +
-        ". Re-ask if you need me to continue.",
+      reply: "I hit my iteration ceiling without finishing — actions so far: " + (actionsTaken.length > 0 ? actionsTaken.join(", ") : "none") + ". Re-ask if you need me to continue.",
       actions_taken: actionsTaken,
       messages,
       error: "max_iterations_exceeded",
@@ -2871,7 +2878,8 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
   // failure. Memory/observation arrays in the fallback path stay empty
   // because the full lists are already in the prompt — no need to repeat.
   // ========================================================================
-  async _buildNativeContextEntities(query = null) {
+  async _buildNativeContextEntities(query = null, options = {}) {
+    const { entityTopK = 15 } = options;
     const useVector =
       this.env.USE_VECTOR_ENTITY_RETRIEVAL === "true" ||
       this.env.USE_VECTOR_ENTITY_RETRIEVAL === "1";
@@ -2879,7 +2887,7 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
     if (useVector && typeof query === "string" && query.trim().length > 0) {
       try {
         const [entityMatches, memoryMatches, observationMatches] = await Promise.all([
-          this.retrieveKnowledge({ query, k: 15, kinds: ["entity"], includeNoisy: false }),
+          this.retrieveKnowledge({ query, k: entityTopK, kinds: ["entity"], includeNoisy: false }),
           this.retrieveKnowledge({ query, k: 5, kinds: ["memory"], includeNoisy: false }),
           this.retrieveKnowledge({ query, k: 5, kinds: ["observation"], includeNoisy: false })
         ]);
@@ -3008,6 +3016,68 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
       .slice(-150)
       .map((e) => `[${HAWebSocket._formatTimelineTimestamp(e.timestamp)}] ${e.type}${e.source ? "/" + e.source : ""}: ${e.message}`)
       .join("\n");
+  }
+
+  // ========================================================================
+  // CHAT_SYSTEM_PROMPT — lean prompt for the chat profile. Does not include
+  // pattern-inference or autonomous observer instructions.
+  // ========================================================================
+  getChatSystemPrompt(ctx) {
+    const {
+      timeline = "",
+      contextEntities = [],
+      from = "default",
+      semanticMemories = [],
+      semanticObservations = [],
+      climatePreamble = ""
+    } = ctx;
+    const stateHealth = {
+      ws_connected: this.connected,
+      ws_authenticated: this.authenticated,
+      states_ready: this.statesReady,
+      last_pong_age_seconds: this.lastPongAt ? Math.round((Date.now() - this.lastPongAt) / 1e3) : null,
+      cached_entity_count: this.stateCache.size
+    };
+    const SCORE_FLOOR = 0.65;
+    const relevantMemories = semanticMemories.filter(m => typeof m.score === "number" && m.score >= SCORE_FLOOR);
+    const relevantObservations = semanticObservations.filter(o => typeof o.score === "number" && o.score >= SCORE_FLOOR);
+    return `${this.getAgentContext()}
+
+You are answering a chat from "${from}". Be concise. Take action when asked. If you took an action, say what you did plainly, past tense, one sentence. If a question needs the timeline or live state, USE THE TOOLS — don't guess.
+
+GATEWAY HEALTH:
+${JSON.stringify(stateHealth, null, 1)}
+
+TOOLS — attached to this request. Invoke them directly. The turn you emit NO tool calls is your final reply.
+- call_service — execute any HA service (lights, locks, covers, climate, scripts, scenes). Use for destructive/irreversible actions too.
+- ai_send_notification — push to phone AND log to timeline. Reserve for security events, aux heat >5000W sustained, leaks, unexpected entry.
+- get_state — single entity's full state when the snapshot below lacks detail.
+- get_logbook — historical entries. ALWAYS pass tz_offset="-05:00" for Central time.
+- render_template — Jinja2 in HA context (area_name, device_attr, expand, state_attr).
+- vector_search — semantic search across entities, automations, scripts, scenes, areas, services, your memories, your observations. Use when something isn't in the snapshot below.
+
+COMMITMENT RULE: If your reply says you did something ("opening the garage", "turning off the lights"), you MUST have invoked the corresponding tool. Saying you did something you didn't is a lie.
+
+QUICK FACTS:
+- climate.t6_pro_z_wave_programmable_thermostat_2 = main level INCLUDING MBR
+- climate.t6_pro_z_wave_programmable_thermostat = basement
+- Smoke/CO detectors are NOT in HA — don't reference their state.
+- Automation editing via call_service returns 405 on this instance — tell John to edit in HA UI (Settings → Automations).
+- Timestamps in your replies MUST be Central, "H:MM AM/PM" or "MMM D, H:MM AM/PM". Never UTC, ISO 8601, or Z-suffix — even if get_logbook returns those.
+${climatePreamble ? "\n" + climatePreamble + "\n" : ""}
+UNIFIED TIMELINE — recent events (chat, state changes, your past actions). Already pre-formatted in Central time:
+
+${timeline || "Timeline is empty."}
+
+${relevantMemories.length > 0 ? `RELEVANT MEMORIES (semantic top-matches for this turn):
+${relevantMemories.map((m) => "- [score " + m.score.toFixed(2) + "] " + (m.friendly_name || "")).join("\n")}
+
+` : ""}${relevantObservations.length > 0 ? `RELEVANT OBSERVATIONS (semantic top-matches for this turn):
+${relevantObservations.map((o) => "- [score " + o.score.toFixed(2) + "] " + (o.friendly_name || "")).join("\n")}
+
+` : ""}RELEVANT ENTITIES (${contextEntities.length}, semantic top-K from live state cache) — an entity not here may still exist; use vector_search or get_state to probe. state=null means HA hasn't reported a value. Don't invent entity_ids or fabricate timestamps for events you didn't witness.
+
+${JSON.stringify(contextEntities, null, 1)}`;
   }
 
   // ========================================================================
@@ -3155,7 +3225,12 @@ Evaluate these events against the timeline above. Take action only if warranted.
         { role: "system", content: systemPrompt },
         { role: "user", content: userMessage }
       ],
-      { maxIterations: 8 }
+      {
+        maxIterations: 8,
+        allowedTools: NATIVE_AGENT_TOOLS,
+        hallucinationGuard: false,
+        maxTokens: 8192
+      }
     );
 
     this.logAI(
@@ -3179,56 +3254,50 @@ Evaluate these events against the timeline above. Take action only if warranted.
   async chatWithAgentNative(message, from = "default", onEvent = null) {
     const now = new Date();
     const now_str = now.toLocaleString("en-US", { timeZone: "America/Chicago" });
-    const memory = await this.state.storage.get("ai_memory") || [];
-    const observations = await this.state.storage.get("ai_observations") || [];
-    const conversationHistory = await this.state.storage.get("chat_history") || [];
-    this.logAI("chat_user", `${from}: ${message}`, { from, message });
+    const channelKey = sanitizeChannelKey(from);
+    const historyKey = `chat_history:${channelKey}`;
 
+    const conversationHistory = await this.state.storage.get(historyKey) || [];
+    this.logAI("chat_user", `${from}: ${message}`, { from, message, channel: channelKey });
     const timeline = this._buildNativeTimeline();
+
+    // Chat profile uses tighter top-K than autonomous (10 vs 15) to keep
+    // prompt focused. Override the default by passing topK.
     const {
       entities: contextEntities,
       memories: semanticMemories,
-      observations: semanticObservations,
-      vectorRetrieved
-    } = await this._buildNativeContextEntities(message);
-
-    const systemPrompt = this.getNativeAgentSystemPrompt("chat", {
-      memory,
-      observations,
-      timeline,
-      contextEntities,
-      vectorRetrieved,
-      semanticMemories,
-      semanticObservations,
-      from
-    });
+      observations: semanticObservations
+    } = await this._buildNativeContextEntities(message, { entityTopK: 10 });
 
     const climatePreamble = await this._buildClimatePreambleIfNeeded(message, "chat_native");
+
+    const systemPrompt = this.getChatSystemPrompt({
+      timeline,
+      contextEntities,
+      semanticMemories,
+      semanticObservations,
+      from,
+      climatePreamble: climatePreamble || ""
+    });
 
     const initialMessages = [
       { role: "system", content: systemPrompt },
       ...conversationHistory,
-      { role: "user", content: `Current time: ${now_str}${climatePreamble ? "\n\n" + climatePreamble : ""}\n\n${message}` }
+      { role: "user", content: `Current time: ${now_str}\n\n${message}` }
     ];
 
     try {
       const oldHistoryLen = conversationHistory.length;
-      // Chat: looser ceiling than autonomous. A user is waiting on a real
-      // answer, and multi-faceted questions ("status of the house") legitimately
-      // need 8+ tool calls. Overflow falls through to the synthesis fallback
-      // in runNativeToolLoop, which forces a final prose reply with tools off.
-      const result = await this.runNativeToolLoop(initialMessages, { maxIterations: 12, onEvent });
-      const reply = (result.reply && result.reply.trim()) || "Done.";
+      const result = await this.runNativeToolLoop(initialMessages, {
+        maxIterations: 6,
+        onEvent,
+        allowedTools: NATIVE_AGENT_TOOLS.filter(t => CHAT_ALLOWED_TOOL_NAMES.has(t.function.name)),
+        hallucinationGuard: true,
+        maxTokens: 4096
+      });
+      const reply = result.reply && result.reply.trim() || "Done.";
+      this.logAI("chat_reply", reply.substring(0, 300), { from, full_reply: reply, channel: channelKey }, "native_loop");
 
-      this.logAI("chat_reply", reply.substring(0, 300), { from, full_reply: reply }, "native_loop");
-
-      // Preserve the full tool-calling trace in history. Prior storage kept only
-      // {user, assistant-text-only} pairs — across turns the model saw zero evidence
-      // of past tool use and drifted toward chat-mode replies ("Done —  opening")
-      // without emitting tool_calls. Storing assistant.tool_calls + tool-role
-      // responses gives it its own track record.
-      //
-      // Extract loop additions (everything added after [system, ...oldHistory, currentUser]).
       const TOOL_CONTENT_CAP = 4000;
       const loopAdditions = result.messages.slice(1 + oldHistoryLen + 1).map((m) => {
         if (m.role === "tool" && typeof m.content === "string" && m.content.length > TOOL_CONTENT_CAP) {
@@ -3236,31 +3305,23 @@ Evaluate these events against the timeline above. Take action only if warranted.
         }
         return m;
       });
-      // Drop any trailing imbalanced messages (e.g. assistant with pending tool_calls,
-      // or a trailing tool message) — the next turn's API call requires a clean state.
       while (loopAdditions.length > 0) {
         const last = loopAdditions[loopAdditions.length - 1];
         const pendingTools = last.role === "assistant" && Array.isArray(last.tool_calls) && last.tool_calls.length > 0;
         if (last.role === "assistant" && !pendingTools) break;
         loopAdditions.pop();
       }
-      // If the trace ended without a final assistant reply (max_iterations, API error),
-      // synthesize one from the reply text we're returning so history reflects what the user saw.
-      const endsCleanly = loopAdditions.length > 0 &&
-        loopAdditions[loopAdditions.length - 1].role === "assistant" &&
-        !loopAdditions[loopAdditions.length - 1].tool_calls?.length;
+      const endsCleanly = loopAdditions.length > 0
+        && loopAdditions[loopAdditions.length - 1].role === "assistant"
+        && !loopAdditions[loopAdditions.length - 1].tool_calls?.length;
       if (!endsCleanly) {
         loopAdditions.push({ role: "assistant", content: reply });
       }
-
       const nextHistory = [
         ...conversationHistory,
         { role: "user", content: `[${from}]: ${message}` },
         ...loopAdditions
       ];
-
-      // Cap at the last N user-initiated turns. Capping by raw message count could
-      // split a user→assistant(tool_calls)→tool→assistant chain, which the API rejects.
       const MAX_TURNS = 10;
       const userIdxs = [];
       for (let i = 0; i < nextHistory.length; i++) {
@@ -3273,29 +3334,28 @@ Evaluate these events against the timeline above. Take action only if warranted.
       while (nextHistory.length > 2 && JSON.stringify(nextHistory).length > HISTORY_BYTE_CAP) {
         nextHistory.shift();
       }
-      await this.state.storage.put("chat_history", nextHistory);
-
+      await this.state.storage.put(historyKey, nextHistory);
       this.logAI(
         "chat",
         `done | exec=${result.actions_taken.length} iter=${result.iterations}${result.error ? " err=" + result.error : ""}`,
         {
           actions_executed: result.actions_taken.length,
           from,
+          channel: channelKey,
           iterations: result.iterations,
           context_size: contextEntities.length,
-          ...(result.error ? { error: result.error } : {})
+          ...result.error ? { error: result.error } : {}
         },
         "native_loop"
       );
-
       await this.persistLog();
       return {
         reply,
         actions_taken: result.actions_taken,
-        ...(result.error ? { error: result.error } : {})
+        ...result.error ? { error: result.error } : {}
       };
     } catch (err) {
-      this.logAI("chat_error", err.message, {}, "native_loop");
+      this.logAI("chat_error", err.message, { from, channel: channelKey }, "native_loop");
       return { error: "AI failed: " + err.message };
     }
   }
