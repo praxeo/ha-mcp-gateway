@@ -1103,6 +1103,19 @@ const CHAT_HTML = `<!DOCTYPE html>
 
   /* ── Markdown-ish formatting ── */
   .msg-text strong, .msg-text b { color: #fff; font-weight: 600; }
+
+  .msg.reasoning {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.85em;
+    color: #8a8a8a;
+    background: rgba(255, 255, 255, 0.03);
+    border-left: 2px solid #444;
+    padding: 8px 12px;
+    margin: 4px 0 4px 16px;
+    white-space: pre-wrap;
+    border-radius: 4px;
+    opacity: 0.7;
+  }
 </style>
 </head>
 <body>
@@ -1384,6 +1397,8 @@ const CHAT_HTML = `<!DOCTYPE html>
 
           if (evt.type === 'started') {
             // server alive — no UI action needed
+          } else if (evt.type === 'reasoning') {
+            addMsg('reasoning', evt.text);
           } else if (evt.type === 'thinking') {
             showStatus('Thinking…');
           } else if (evt.type === 'tool_call') {
@@ -1432,6 +1447,8 @@ const CHAT_HTML = `<!DOCTYPE html>
                 try { evt = JSON.parse(line.slice(6)); } catch { continue; }
                 if (evt.type === 'started') {
                   // server alive
+                } else if (evt.type === 'reasoning') {
+                  addMsg('reasoning', evt.text);
                 } else if (evt.type === 'thinking') {
                   showStatus('Thinking…');
                 } else if (evt.type === 'tool_call') {
