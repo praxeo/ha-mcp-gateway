@@ -1031,10 +1031,11 @@ const CHAT_HTML = `<!DOCTYPE html>
   #micBtn:active { transform: scale(0.96); }
 
   #micBtn .mic-label {
-    font-size: 11px;
+    font-size: 10px;
     font-weight: 700;
-    letter-spacing: 0.5px;
     text-transform: uppercase;
+    max-width: 80px;
+    text-align: center;
   }
 
   #micBtn[data-state="recording"] {
