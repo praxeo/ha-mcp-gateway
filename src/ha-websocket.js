@@ -2752,7 +2752,7 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
         };
       }
       messages.push(assistantMsg);
-      const reasoningMid = extractThink(assistantMsg.content);
+      const reasoningMid = (assistantMsg.reasoning_content || assistantMsg.reasoning || "").trim() || extractThink(assistantMsg.content);
       if (reasoningMid) {
         safeEmit({ type: "reasoning", text: reasoningMid });
       }
