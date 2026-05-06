@@ -2807,11 +2807,11 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
           result = { error: "Invalid JSON arguments: " + parseError };
         } else if (!NATIVE_TOOL_NAMES.has(name)) {
           result = { error: `Unknown tool: ${name}` };
-        } else if (NATIVE_ACTION_TOOL_NAMES.has(name)) {
-          result = await this.executeAIAction({ action: name, ...args }, "native_loop");
-          if (!result.error) actionsTaken.push(name);
         } else {
           result = await this.executeNativeTool(name, args);
+          if (NATIVE_ACTION_TOOL_NAMES.has(name) && !result?.error) {
+            actionsTaken.push(name);
+          }
         }
         safeEmit({ type: "tool_result", name, ok: !result?.error });
         messages.push({
