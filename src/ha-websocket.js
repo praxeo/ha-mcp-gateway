@@ -2717,6 +2717,10 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
     }
     const actionsTaken = [];
     const stripThink = (s) => (s || "").replace(/<think>[\s\S]*?<\/think>/g, "").trim();
+    const extractThink = (s) => {
+      const matches = [...(s || "").matchAll(/<think>([\s\S]*?)<\/think>/g)];
+      return matches.map(m => m[1].trim()).filter(Boolean).join("\n\n");
+    };
     const safeEmit = (evt) => { try { if (onEvent) onEvent(evt); } catch {} };
 
     for (let iter = 0; iter < maxIterations; iter++) {
@@ -2748,6 +2752,10 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
         };
       }
       messages.push(assistantMsg);
+      const reasoningMid = extractThink(assistantMsg.content);
+      if (reasoningMid) {
+        safeEmit({ type: "reasoning", text: reasoningMid });
+      }
       const toolCalls = Array.isArray(assistantMsg.tool_calls) ? assistantMsg.tool_calls : [];
       if (toolCalls.length === 0) {
         const cleaned = stripThink(assistantMsg.content);
