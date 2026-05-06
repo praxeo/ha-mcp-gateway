@@ -949,8 +949,10 @@ const CHAT_HTML = `<!DOCTYPE html>
 
   /* ── Input ── */
   .input-area {
-    padding: 12px 16px;
-    padding-bottom: max(12px, env(safe-area-inset-bottom));
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    padding: 12px 12px max(18px, env(safe-area-inset-bottom));
     background: var(--surface);
     border-top: 1px solid var(--border);
     flex-shrink: 0;
@@ -960,19 +962,13 @@ const CHAT_HTML = `<!DOCTYPE html>
     display: flex;
     gap: 8px;
     align-items: flex-end;
+  }
+
+  #input {
+    flex: 1;
     background: var(--bg);
     border: 1px solid var(--border);
     border-radius: var(--radius);
-    padding: 4px;
-    transition: border-color 0.15s;
-  }
-
-  .input-row:focus-within { border-color: var(--accent); }
-
-  #msgInput {
-    flex: 1;
-    background: transparent;
-    border: none;
     outline: none;
     color: var(--text);
     font-family: 'DM Sans', sans-serif;
@@ -981,68 +977,85 @@ const CHAT_HTML = `<!DOCTYPE html>
     resize: none;
     max-height: 120px;
     line-height: 1.4;
+    transition: border-color 0.15s;
   }
 
-  #msgInput::placeholder { color: var(--text-dim); }
+  #input:focus { border-color: var(--accent); }
+  #input::placeholder { color: var(--text-dim); }
 
   #sendBtn {
-    width: 40px; height: 40px;
-    background: var(--accent);
+    width: 44px;
+    height: 44px;
+    border-radius: 50%;
     border: none;
-    border-radius: 10px;
+    background: var(--accent);
     color: white;
     cursor: pointer;
-    display: flex; align-items: center; justify-content: center;
+    display: flex;
+    align-items: center;
+    justify-content: center;
     flex-shrink: 0;
-    transition: all 0.15s;
+    transition: filter 0.15s, transform 0.1s;
   }
 
-  #sendBtn:hover { filter: brightness(1.15); }
+  #sendBtn:hover { filter: brightness(1.1); }
   #sendBtn:disabled { opacity: 0.4; cursor: not-allowed; }
+  #sendBtn:active { transform: scale(0.96); }
 
-  #sendBtn svg { width: 18px; height: 18px; }
+  /* ── Mic button (hero) ── */
+  .mic-row {
+    display: flex;
+    justify-content: center;
+  }
 
-  /* ── Mic button (large, thumb-friendly) ── */
   #micBtn {
-    width: 52px; height: 52px;
-    background: var(--surface-hover);
-    border: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    width: 96px;
+    height: 96px;
     border-radius: 50%;
-    color: var(--text-dim);
+    border: none;
+    background: var(--accent);
+    color: white;
     cursor: pointer;
-    display: flex; align-items: center; justify-content: center;
+    box-shadow: 0 4px 14px rgba(59, 130, 246, 0.4);
+    transition: background 0.2s, transform 0.1s, box-shadow 0.2s;
     flex-shrink: 0;
-    transition: background 0.15s, color 0.15s, border-color 0.15s;
     -webkit-tap-highlight-color: transparent;
     touch-action: manipulation;
   }
 
-  #micBtn:hover { color: var(--text); border-color: var(--accent); }
-  #micBtn:disabled { opacity: 0.4; cursor: not-allowed; }
-  #micBtn svg { width: 24px; height: 24px; }
+  #micBtn:active { transform: scale(0.96); }
 
-  #micBtn.recording {
-    background: var(--error);
-    color: white;
-    border-color: var(--error);
-    animation: micPulse 1.2s infinite;
+  #micBtn .mic-label {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
   }
 
-  #micBtn.transcribing {
-    color: var(--accent);
-    border-color: var(--accent);
+  #micBtn[data-state="recording"] {
+    background: #dc2626;
+    box-shadow: 0 4px 14px rgba(220, 38, 38, 0.5);
+    animation: micPulse 1.5s ease-in-out infinite;
   }
 
-  #micBtn.transcribing svg { animation: spin 0.9s linear infinite; }
+  #micBtn[data-state="processing"] {
+    background: #6b7280;
+    cursor: wait;
+    box-shadow: 0 4px 14px rgba(107, 114, 128, 0.4);
+  }
 
   @keyframes micPulse {
-    0%   { box-shadow: 0 0 0 0 rgba(239,68,68,0.55); }
-    70%  { box-shadow: 0 0 0 12px rgba(239,68,68,0); }
-    100% { box-shadow: 0 0 0 0 rgba(239,68,68,0); }
+    0%, 100% { box-shadow: 0 4px 14px rgba(220, 38, 38, 0.5); }
+    50%      { box-shadow: 0 4px 22px rgba(220, 38, 38, 0.85); }
   }
 
-  @keyframes spin {
-    to { transform: rotate(360deg); }
+  @media (max-width: 480px) {
+    #micBtn { width: 88px; height: 88px; }
   }
 
   /* ── Welcome ── */
@@ -1107,14 +1120,39 @@ const CHAT_HTML = `<!DOCTYPE html>
   .msg.reasoning {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     font-size: 0.85em;
-    color: #8a8a8a;
     background: rgba(255, 255, 255, 0.03);
     border-left: 2px solid #444;
-    padding: 8px 12px;
+    padding: 2px 12px;
     margin: 4px 0 4px 16px;
-    white-space: pre-wrap;
     border-radius: 4px;
-    opacity: 0.7;
+  }
+
+  .msg.reasoning summary {
+    cursor: pointer;
+    color: #666;
+    user-select: none;
+    padding: 6px 0;
+    list-style: none;
+  }
+
+  .msg.reasoning summary::-webkit-details-marker { display: none; }
+
+  .msg.reasoning summary::before {
+    content: '▶ ';
+    font-size: 0.75em;
+  }
+
+  details.msg.reasoning[open] summary::before {
+    content: '▼ ';
+  }
+
+  .msg.reasoning summary:hover { color: #8a8a8a; }
+
+  .msg.reasoning .reasoning-body {
+    color: #8a8a8a;
+    white-space: pre-wrap;
+    padding: 6px 0 8px;
+    opacity: 0.8;
   }
 </style>
 </head>
@@ -1157,20 +1195,21 @@ const CHAT_HTML = `<!DOCTYPE html>
 
   <div class="input-area">
     <div class="input-row">
-      <textarea id="msgInput" rows="1" placeholder="Message your home..." autocomplete="off"></textarea>
-      <button id="micBtn" type="button" onclick="toggleMic()" aria-label="Voice input">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"></path>
-          <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
-          <line x1="12" y1="19" x2="12" y2="23"></line>
-          <line x1="8" y1="23" x2="16" y2="23"></line>
+      <textarea id="input" placeholder="Message your home..." rows="1"></textarea>
+      <button id="sendBtn" type="button" aria-label="Send" onclick="send()">
+        <svg viewBox="0 0 24 24" fill="currentColor" width="20" height="20">
+          <path d="M2 12l20-9-9 20-2-9-9-2z"/>
         </svg>
       </button>
-      <button id="sendBtn" onclick="send()">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-          <line x1="22" y1="2" x2="11" y2="13"></line>
-          <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
-        </svg>
+    </div>
+    <div class="mic-row">
+      <button id="micBtn" type="button" aria-label="Tap to speak" data-state="idle">
+        <span class="mic-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="currentColor" width="32" height="32">
+            <path d="M12 2a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3zm5 9a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-3.08A7 7 0 0 0 19 11h-2z"/>
+          </svg>
+        </span>
+        <span class="mic-label">Tap to speak</span>
       </button>
     </div>
   </div>
@@ -1178,7 +1217,7 @@ const CHAT_HTML = `<!DOCTYPE html>
 
 <script>
   const msgEl = document.getElementById('messages');
-  const input = document.getElementById('msgInput');
+  const input = document.getElementById('input');
   const sendBtn = document.getElementById('sendBtn');
   const typing = document.getElementById('typing');
   const welcome = document.getElementById('welcome');
@@ -1333,6 +1372,20 @@ const CHAT_HTML = `<!DOCTYPE html>
     msgEl.scrollTop = msgEl.scrollHeight;
   }
 
+  function addReasoning(text) {
+    const det = document.createElement('details');
+    det.className = 'msg reasoning';
+    const sum = document.createElement('summary');
+    sum.textContent = 'reasoning';
+    det.appendChild(sum);
+    const body = document.createElement('div');
+    body.className = 'reasoning-body';
+    body.textContent = text;
+    det.appendChild(body);
+    msgEl.appendChild(det);
+    msgEl.scrollTop = msgEl.scrollHeight;
+  }
+
   async function send() {
     const text = input.value.trim();
     if (!text) return;
@@ -1398,7 +1451,7 @@ const CHAT_HTML = `<!DOCTYPE html>
           if (evt.type === 'started') {
             // server alive — no UI action needed
           } else if (evt.type === 'reasoning') {
-            addMsg('reasoning', evt.text);
+            addReasoning(evt.text);
           } else if (evt.type === 'thinking') {
             showStatus('Thinking…');
           } else if (evt.type === 'tool_call') {
@@ -1448,7 +1501,7 @@ const CHAT_HTML = `<!DOCTYPE html>
                 if (evt.type === 'started') {
                   // server alive
                 } else if (evt.type === 'reasoning') {
-                  addMsg('reasoning', evt.text);
+                  addReasoning(evt.text);
                 } else if (evt.type === 'thinking') {
                   showStatus('Thinking…');
                 } else if (evt.type === 'tool_call') {
@@ -1495,19 +1548,15 @@ const CHAT_HTML = `<!DOCTYPE html>
     lastUserMessage = null;
   }
 
-  // ── Voice input (ElevenLabs Scribe) ──
+  // ── Voice input (ElevenLabs Scribe) — 3-state machine ──
   const micBtn = document.getElementById('micBtn');
-  const ICON_MIC_HTML = micBtn.innerHTML;
-  const ICON_STOP_HTML = '<svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"></rect></svg>';
-  const ICON_SPIN_HTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M12 2a10 10 0 0 1 10 10" opacity="0.25"/><path d="M12 2a10 10 0 0 1 10 10"/></svg>';
-
+  const micLabel = micBtn.querySelector('.mic-label');
   let mediaRecorder = null;
   let audioChunks = [];
   let micStream = null;
-  let isRecording = false;
 
   function pickMime() {
-    if (typeof MediaRecorder === 'undefined') return null;
+    if (typeof MediaRecorder === 'undefined') return '';
     const candidates = [
       'audio/webm;codecs=opus',
       'audio/webm',
@@ -1522,94 +1571,93 @@ const CHAT_HTML = `<!DOCTYPE html>
     return '';
   }
 
-  async function toggleMic() {
-    if (isRecording) { stopRecording(); return; }
-    await startRecording();
+  function setMicState(state) {
+    micBtn.setAttribute('data-state', state);
+    if (state === 'idle') {
+      micLabel.textContent = 'Tap to speak';
+      micBtn.disabled = false;
+    } else if (state === 'recording') {
+      micLabel.textContent = 'Send';
+      micBtn.disabled = false;
+    } else if (state === 'processing') {
+      micLabel.textContent = '…';
+      micBtn.disabled = true;
+    }
   }
+  setMicState('idle');
 
-  async function startRecording() {
-    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || typeof MediaRecorder === 'undefined') {
-      addMsg('error', 'Voice input not supported in this browser.');
-      return;
-    }
-    try {
-      micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    } catch (err) {
-      addMsg('error', 'Microphone access denied: ' + err.message);
-      return;
-    }
-    const mime = pickMime();
-    audioChunks = [];
-    try {
-      mediaRecorder = new MediaRecorder(micStream, mime ? { mimeType: mime } : undefined);
-    } catch {
-      mediaRecorder = new MediaRecorder(micStream);
-    }
-    mediaRecorder.ondataavailable = (e) => { if (e.data && e.data.size > 0) audioChunks.push(e.data); };
-    mediaRecorder.onstop = () => transcribeAndSend();
-    mediaRecorder.start();
-    isRecording = true;
-    micBtn.classList.add('recording');
-    micBtn.innerHTML = ICON_STOP_HTML;
-    micBtn.setAttribute('aria-label', 'Stop recording');
-  }
+  micBtn.addEventListener('click', async () => {
+    const state = micBtn.getAttribute('data-state');
 
-  function stopRecording() {
-    if (!mediaRecorder || mediaRecorder.state !== 'recording') return;
-    mediaRecorder.stop();
-    isRecording = false;
-    micBtn.classList.remove('recording');
-    micBtn.classList.add('transcribing');
-    micBtn.innerHTML = ICON_SPIN_HTML;
-    micBtn.disabled = true;
-  }
-
-  function resetMic() {
-    micBtn.classList.remove('recording', 'transcribing');
-    micBtn.innerHTML = ICON_MIC_HTML;
-    micBtn.disabled = false;
-    micBtn.setAttribute('aria-label', 'Voice input');
-  }
-
-  async function transcribeAndSend() {
-    // Release the mic regardless of outcome
-    if (micStream) {
-      try { micStream.getTracks().forEach(t => t.stop()); } catch {}
-      micStream = null;
-    }
-
-    if (!audioChunks.length) { resetMic(); return; }
-    const mime = (mediaRecorder && mediaRecorder.mimeType) || 'audio/webm';
-    const blob = new Blob(audioChunks, { type: mime });
-
-    if (blob.size < 800) {
-      resetMic();
-      addMsg('error', 'No audio captured. Try again.');
-      return;
-    }
-
-    try {
-      const resp = await fetch('/transcribe', {
-        method: 'POST',
-        headers: { 'Content-Type': mime },
-        body: blob
-      });
-      if (!resp.ok) {
-        let detail = '';
-        try { detail = (await resp.text()).slice(0, 200); } catch {}
-        throw new Error('HTTP ' + resp.status + (detail ? ' — ' + detail : ''));
+    if (state === 'idle') {
+      if (!navigator.mediaDevices || typeof MediaRecorder === 'undefined') {
+        addMsg('error', 'Voice input not supported in this browser.');
+        return;
       }
-      const data = await resp.json();
-      const text = (data.text || '').trim();
-      resetMic();
-      if (!text) { addMsg('error', 'Empty transcription.'); return; }
-      input.value = text;
-      send();
-    } catch (err) {
-      resetMic();
-      addMsg('error', 'Transcription failed: ' + err.message);
+      try {
+        micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        audioChunks = [];
+        const mime = pickMime();
+        try {
+          mediaRecorder = new MediaRecorder(micStream, mime ? { mimeType: mime } : undefined);
+        } catch {
+          mediaRecorder = new MediaRecorder(micStream);
+        }
+        mediaRecorder.ondataavailable = (e) => {
+          if (e.data && e.data.size > 0) audioChunks.push(e.data);
+        };
+        mediaRecorder.onstop = async () => {
+          if (micStream) {
+            micStream.getTracks().forEach(t => t.stop());
+            micStream = null;
+          }
+          setMicState('processing');
+          try {
+            const recMime = (mediaRecorder && mediaRecorder.mimeType) || 'audio/webm';
+            const blob = new Blob(audioChunks, { type: recMime });
+            if (blob.size < 800) {
+              addMsg('error', 'No audio captured. Try again.');
+              setMicState('idle');
+              return;
+            }
+            const resp = await fetch('/transcribe', {
+              method: 'POST',
+              headers: { 'Content-Type': recMime },
+              body: blob
+            });
+            if (!resp.ok) {
+              let detail = '';
+              try { detail = (await resp.text()).slice(0, 200); } catch {}
+              throw new Error('HTTP ' + resp.status + (detail ? ' — ' + detail : ''));
+            }
+            const data = await resp.json();
+            const text = (data.text || '').trim();
+            if (text) {
+              input.value = text;
+              input.style.height = 'auto';
+              send();
+            } else {
+              addMsg('error', 'No speech detected.');
+            }
+          } catch (err) {
+            addMsg('error', 'Voice input failed: ' + err.message);
+          } finally {
+            setMicState('idle');
+          }
+        };
+        mediaRecorder.start();
+        setMicState('recording');
+      } catch (err) {
+        addMsg('error', 'Mic access denied: ' + err.message);
+        setMicState('idle');
+      }
+    } else if (state === 'recording') {
+      if (mediaRecorder && mediaRecorder.state === 'recording') {
+        mediaRecorder.stop();
+      }
     }
-  }
+    // 'processing' — button disabled, no-op
+  });
 </script>
 </body>
 </html>`;
