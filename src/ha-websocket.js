@@ -239,6 +239,112 @@ export class HAWebSocket {
     return lines.join("\n");
   }
 
+  /**
+   * Pattern-match imperative cover commands and execute deterministically,
+   * skipping the LLM entirely. Returns a reply object on match, null on miss.
+   *
+   * Critical safety properties:
+   * - Always uses explicit cover.open_cover or cover.close_cover, NEVER toggle.
+   * - Checks current state before actuating; no-op if already in target state.
+   * - Falls through (returns null) on any error, so the LLM path can recover.
+   *
+   * Match is intentionally loose — verbs and target phrases must both be
+   * present. The user can phrase it casually and the fast path still fires.
+   */
+  async _tryDeterministicFastPath(message) {
+    if (!message || typeof message !== "string") return null;
+    const text = message.toLowerCase().trim();
+
+    // Verb classification — must be exclusively open OR exclusively close
+    const isOpen = /\b(open|raise|lift)\b/.test(text);
+    const isClose = /\b(close|shut|lower|drop)\b/.test(text);
+    if (!isOpen && !isClose) return null;
+    if (isOpen && isClose) return null; // ambiguous → kick to LLM
+
+    // Target classification — order is critical:
+    // 1. Left basement first (requires explicit "left")
+    // 2. Right basement / general basement
+    // 3. Main garage (general "garage" is the fallback)
+    let entityId = null;
+    let label = null;
+
+    if (/\bleft\b.*\bbasement\b/.test(text) || /\bleft\b.*\bbay\b/.test(text)) {
+      entityId = "cover.ratgdo_left_basement_door";
+      label = "left basement bay door";
+    }
+    else if (
+      /\bbasement bay\b/.test(text) ||
+      /\bbasement garage\b/.test(text) ||
+      /\bright basement\b/.test(text) ||
+      /\bbasement door\b/.test(text) ||
+      /\bbasement\b/.test(text)
+    ) {
+      entityId = "cover.ratgdo32_b1e618_door";
+      label = "basement bay door";
+    }
+    else if (
+      /\bmain garage\b/.test(text) ||
+      /\bgarage door\b/.test(text) ||
+      /\bgarage bay\b/.test(text) ||
+      /\bgarage\b/.test(text)
+    ) {
+      entityId = "cover.ratgdo32_2b8ecc_door";
+      label = "main garage bay door";
+    }
+
+    if (!entityId) return null;
+
+    // No-op guard: read current state and bail if already in target state.
+    // This prevents "close the garage" from firing when it's already closed.
+    const cached = this.stateCache.get(entityId);
+    const currentState = cached?.state;
+
+    if (isOpen && (currentState === "open" || currentState === "opening")) {
+      return {
+        reply: `${label} is already ${currentState}.`,
+        actions_taken: [],
+        fast_path: true
+      };
+    }
+    if (isClose && (currentState === "closed" || currentState === "closing")) {
+      return {
+        reply: `${label} is already ${currentState}.`,
+        actions_taken: [],
+        fast_path: true
+      };
+    }
+
+    // Fire the service call. EXPLICIT open_cover or close_cover. NEVER toggle.
+    const service = isOpen ? "open_cover" : "close_cover";
+    const verb = isOpen ? "opening" : "closing";
+    try {
+      await this.sendCommand({
+        type: "call_service",
+        domain: "cover",
+        service,
+        service_data: { entity_id: entityId },
+        target: {}
+      });
+      this.logAI("action", `Called cover.${service} (fast path)`, {
+        entity_id: entityId,
+        source: "fast_path"
+      });
+      return {
+        reply: `${label} is ${verb}.`,
+        actions_taken: ["call_service"],
+        fast_path: true
+      };
+    } catch (err) {
+      // On failure, fall through to LLM path
+      this.logAI("error", `Fast path failed for ${entityId}: ${err.message}`, {
+        entity_id: entityId,
+        service,
+        error: err.message
+      });
+      return null;
+    }
+  }
+
   constructor(state, env) {
     this.state = state;
     this.env = env;
@@ -3534,6 +3640,54 @@ Evaluate these events against the timeline above. Take action only if warranted.
   // Returns { reply, actions_taken, error? } — mirrors legacy chat contract.
   // ========================================================================
   async chatWithAgentNative(message, from = "default", onEvent = null) {
+    // FAST PATH: deterministic cover commands skip the LLM entirely.
+    // Sub-500ms response for "open the garage", "close the basement bay", etc.
+    // Always uses explicit open_cover or close_cover, never toggle.
+    const fastResult = await this._tryDeterministicFastPath(message);
+    if (fastResult) {
+      const fpChannelKey = sanitizeChannelKey(from);
+      const fpHistoryKey = `chat_history:${fpChannelKey}`;
+      this.logAI("chat_user", `${from}: ${message}`, { from, message, channel: fpChannelKey });
+      this.logAI("chat_reply", fastResult.reply, {
+        from,
+        full_reply: fastResult.reply,
+        channel: fpChannelKey,
+        fast_path: true
+      });
+      this.logAI("chat", `done | exec=${fastResult.actions_taken.length} fast_path=true`, {
+        actions_executed: fastResult.actions_taken.length,
+        from,
+        channel: fpChannelKey,
+        fast_path: true
+      });
+      // Persist to chat_history so subsequent turns have context.
+      // Replicates the same MAX_TURNS / HISTORY_BYTE_CAP trimming as the LLM path.
+      try {
+        const fpHistory = await this.state.storage.get(fpHistoryKey) || [];
+        const fpNext = [
+          ...fpHistory,
+          { role: "user", content: `[${from}]: ${message}` },
+          { role: "assistant", content: fastResult.reply }
+        ];
+        const MAX_TURNS = 10;
+        const fpUserIdxs = [];
+        for (let i = 0; i < fpNext.length; i++) {
+          if (fpNext[i].role === "user") fpUserIdxs.push(i);
+        }
+        if (fpUserIdxs.length > MAX_TURNS) {
+          fpNext.splice(0, fpUserIdxs[fpUserIdxs.length - MAX_TURNS]);
+        }
+        const HISTORY_BYTE_CAP = 110000;
+        while (fpNext.length > 2 && JSON.stringify(fpNext).length > HISTORY_BYTE_CAP) {
+          fpNext.shift();
+        }
+        await this.state.storage.put(fpHistoryKey, fpNext);
+      } catch (_) {}
+      await this.persistLog();
+      if (onEvent) onEvent({ type: "reply", text: fastResult.reply });
+      return fastResult;
+    }
+
     const now = new Date();
     const now_str = now.toLocaleString("en-US", { timeZone: "America/Chicago" });
     const channelKey = sanitizeChannelKey(from);
