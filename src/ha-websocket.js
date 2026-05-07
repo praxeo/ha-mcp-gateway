@@ -261,6 +261,15 @@ export class HAWebSocket {
     if (!isOpen && !isClose) return null;
     if (isOpen && isClose) return null; // ambiguous → kick to LLM
 
+    // Question detection — "did you close...?" / "is the garage open?" are
+    // queries about state, not commands. Trailing "?" or sentence-initial
+    // state verb (did/do/does/is/are/was/were/have/has/had) → fall through
+    // to LLM. Polite imperatives ("could you open...") still fast-path
+    // because could/would/can/will aren't in the blocklist.
+    if (text.endsWith("?") || /^(did|do|does|is|are|was|were|have|has|had)\b/.test(text)) {
+      return null;
+    }
+
     // Disqualifier: tokens signaling a non-cover entity (basement deadbolt,
     // side doors, vents, locks). Gates only the bare /\bbasement\b/ and
     // /\bgarage\b/ fallbacks — explicit phrases like /\bbasement door\b/
