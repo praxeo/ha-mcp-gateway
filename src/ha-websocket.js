@@ -117,6 +117,45 @@ export class HAWebSocket {
     } catch { return iso; }
   }
 
+  /**
+   * Walk any tool-result object and reformat ISO 8601 timestamps to Central time.
+   * MiniMax copies timestamps verbatim from tool results into replies mid-loop;
+   * this prevents UTC/Z-suffix leakage by reformatting before injection.
+   */
+  _reformatToolResultTimestamps(obj) {
+    const ISO_REGEX = /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})/g;
+
+    const formatOne = (iso) => {
+      try {
+        const d = new Date(iso);
+        if (isNaN(d.getTime())) return iso;
+        return d.toLocaleString("en-US", {
+          timeZone: "America/Chicago",
+          month: "short",
+          day: "numeric",
+          hour: "numeric",
+          minute: "2-digit",
+          hour12: true
+        });
+      } catch {
+        return iso;
+      }
+    };
+
+    const walk = (node) => {
+      if (typeof node === "string") return node.replace(ISO_REGEX, formatOne);
+      if (Array.isArray(node)) return node.map(walk);
+      if (node && typeof node === "object") {
+        const out = {};
+        for (const [k, v] of Object.entries(node)) out[k] = walk(v);
+        return out;
+      }
+      return node;
+    };
+
+    return walk(obj);
+  }
+
   constructor(state, env) {
     this.state = state;
     this.env = env;
@@ -2639,6 +2678,46 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
           }
         }
 
+        case "get_automation_config": {
+          const rawId = args.entity_id || args.automation_id;
+          if (!rawId || typeof rawId !== "string") {
+            return { error: "Missing automation identifier. Provide entity_id (e.g. automation.example) or automation_id." };
+          }
+
+          let id = rawId;
+          if (id.startsWith("automation.")) {
+            const match = this.stateCache.get(id);
+            if (match?.attributes?.id) {
+              id = match.attributes.id;
+            } else {
+              return {
+                error: "Could not resolve internal automation config ID for " + rawId,
+                hint: "If the automation is unavailable or restored, attributes.id may not be populated. Ask John for the numeric ID."
+              };
+            }
+          }
+
+          try {
+            const haUrl = this.env.HA_URL.replace(/\/$/, "");
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), 15000);
+            const resp = await fetch(
+              haUrl + "/api/config/automation/config/" + encodeURIComponent(id),
+              {
+                headers: { Authorization: "Bearer " + this.env.HA_TOKEN },
+                signal: controller.signal
+              }
+            );
+            clearTimeout(timeout);
+            if (!resp.ok) {
+              return { error: "HA automation config " + resp.status + ": " + (await resp.text()).substring(0, 200) };
+            }
+            return await resp.json();
+          } catch (err) {
+            return { error: "Automation config fetch failed: " + err.message };
+          }
+        }
+
         default:
           return { error: "Unknown native tool: " + name };
       }
@@ -2822,10 +2901,13 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
           }
         }
         safeEmit({ type: "tool_result", name, ok: !result?.error });
+        // BEFORE pushing the tool message, reformat any ISO timestamps to Central.
+        // This is the deterministic fix for UTC leakage from get_logbook, get_state, etc.
+        const reformatted = this._reformatToolResultTimestamps(result);
         messages.push({
           role: "tool",
           tool_call_id: tc.id,
-          content: typeof result === "string" ? result : JSON.stringify(result)
+          content: typeof reformatted === "string" ? reformatted : JSON.stringify(reformatted)
         });
       }
     }
@@ -3062,7 +3144,8 @@ TOOLS — attached to this request. Invoke them directly. The turn you emit NO t
 - get_state — single entity's full state when the snapshot below lacks detail.
 - get_logbook — historical entries. ALWAYS pass tz_offset="-05:00" for Central time.
 - render_template — Jinja2 in HA context (area_name, device_attr, expand, state_attr).
-- vector_search — semantic search across entities, automations, scripts, scenes, areas, services, your memories, your observations. Use when something isn't in the snapshot below.
+- vector_search — semantic search over the unified knowledge index (entities, automations, scripts, scenes, areas, devices, HA services, your memories, your observations). The pre-injected context below is a small top-K slice (10 entities) — vector_search covers the FULL knowledge base. CALL IT AGGRESSIVELY when the user references something not in the snapshot, when entity names are ambiguous, when you're unsure if a device exists, or when a question spans entities you can't see in context. Default to searching rather than guessing. Restrict scope with the kinds array (e.g., kinds=["service"] to discover an HA service, kinds=["memory","observation"] to find prior notes on a topic, kinds=["entity"], domain="light", area="kitchen" to narrow by metadata).
+- get_automation_config — read the full config body of an automation (triggers, conditions, actions, mode). Use for automation debugging. Prefer entity_id like 'automation.front_porch_lights'. Do not use render_template as a substitute.
 
 COMMITMENT RULE: If your reply says you did something ("opening the garage", "turning off the lights"), you MUST have invoked the corresponding tool. Saying you did something you didn't is a lie.
 
@@ -3071,8 +3154,16 @@ QUICK FACTS:
 - climate.t6_pro_z_wave_programmable_thermostat = basement
 - Smoke/CO detectors are NOT in HA — don't reference their state.
 - Automation editing via call_service returns 405 on this instance — tell John to edit in HA UI (Settings → Automations).
-- Timestamps in your replies MUST be Central, "H:MM AM/PM" or "MMM D, H:MM AM/PM". Never UTC, ISO 8601, or Z-suffix — even if get_logbook returns those.
+- All timestamps in your replies MUST be Central, in "H:MM AM/PM" or "MMM D, H:MM AM/PM" format. Tool results are pre-reformatted to Central before they reach you — copy them as-is. Never emit ISO 8601, "Z" suffix, "+00:00", or "UTC" in any reply, even if you think you saw one in a tool result. If you ever see one, that's a bug — paraphrase, don't quote.
+- You are the chat agent, not the autonomous monitor. Do not save memories or observations from chat. Ask before unlocking doors, opening garage doors, disabling alarms, or changing security-sensitive settings.
+- For automation debugging, call get_automation_config when the user references a specific automation or asks why one did or did not run. Logbook tells you whether it fired; config tells you what it was supposed to do.
 ${climatePreamble ? "\n" + climatePreamble + "\n" : ""}
+RETRIEVAL DISCIPLINE:
+- The pre-injected entity context is intentionally small. Do not assume an entity doesn't exist just because it's not listed below.
+- If the user asks about an entity, room, or device you cannot see in the snapshot, your first move is vector_search — not "I don't see that" and not a guess at the entity_id.
+- If you're about to answer "I don't have that entity" or "I can't find X," stop and call vector_search first. Only after a vector_search returns nothing relevant should you tell the user it doesn't exist.
+- When two entities have similar friendly names (common with the basement bay doors, the front door sensors, the iPhone trackers), use vector_search with metadata filters (domain, area) to disambiguate before acting.
+
 UNIFIED TIMELINE — recent events (chat, state changes, your past actions). Already pre-formatted in Central time:
 
 ${timeline || "Timeline is empty."}
@@ -3142,7 +3233,8 @@ TOOLS — they're attached to this request. Invoke them directly. No JSON-with-a
 - get_state — look up a single entity's full state when the pre-injected context block doesn't have the detail you need.
 - get_logbook — pull logbook entries for an entity or time window. Useful for debugging ("did the automation fire?", "who closed the garage?").
 - render_template — run a Jinja2 template in HA's context. Use for cross-entity queries or HA helpers (area_name, device_attr, expand, state_attr) that the context block can't answer.
-- vector_search — semantic search over the unified knowledge index (entities, automations, scripts, scenes, areas, devices, HA services, your memories, your observations). Use when something isn't in the pre-injected context — vector_search covers the FULL set, not just the top-K shown below. Restrict scope with the kinds array (e.g., kinds=["service"] to discover an HA service, kinds=["memory","observation"] to find prior notes on a topic).
+- vector_search — semantic search over the unified knowledge index (entities, automations, scripts, scenes, areas, devices, HA services, your memories, your observations). The pre-injected context below is a small top-K slice (10 entities) — vector_search covers the FULL knowledge base. CALL IT AGGRESSIVELY when the user references something not in the snapshot, when entity names are ambiguous, when you're unsure if a device exists, or when a question spans entities you can't see in context. Default to searching rather than guessing. Restrict scope with the kinds array (e.g., kinds=["service"] to discover an HA service, kinds=["memory","observation"] to find prior notes on a topic, kinds=["entity"], domain="light", area="kitchen" to narrow by metadata).
+- get_automation_config — read the full config body of an automation (triggers, conditions, actions, mode). Use for automation debugging. Prefer entity_id like 'automation.front_porch_lights'. Do not use render_template as a substitute.
 
 COMMITMENT RULE: If your final reply says you did something ("opening the garage", "turning off the lights"), you MUST have invoked the corresponding tool. Saying you did something you didn't do is a lie and unacceptable. Your timeline is the record.
 
@@ -3178,7 +3270,14 @@ OPERATIONAL REMINDERS:
 7. Save memories sparingly and only for confirmed facts. Hypotheses go to save_observation.
 8. Don't notify for the same thing twice in one session unless the state materially changed.
 9. Observer-mode suggestions are NOT alerts — deliver them in a chat reply or via save_observation. Never wake anyone at 2 AM to propose an automation.
-10. TIMESTAMP FORMAT — All timestamps in your replies MUST be Central time formatted as "H:MM AM/PM" or "MMM D, H:MM AM/PM" (e.g. "10:47 PM", "May 4, 11:32 AM"). Never emit UTC, ISO 8601, or "Z"-suffix timestamps in replies — even if you see them in tool results like get_logbook output. The TIMELINE block above is already pre-formatted for you in Central time; copy that style.`;
+10. TIMESTAMP FORMAT — All timestamps in your replies MUST be Central, in "H:MM AM/PM" or "MMM D, H:MM AM/PM" format. Tool results are pre-reformatted to Central before they reach you — copy them as-is. Never emit ISO 8601, "Z" suffix, "+00:00", or "UTC" in any reply, even if you think you saw one in a tool result. If you ever see one, that's a bug — paraphrase, don't quote.
+11. For automation debugging, call get_automation_config when the user references a specific automation or asks why one did or did not run. Logbook tells you whether it fired; config tells you what it was supposed to do.
+
+RETRIEVAL DISCIPLINE:
+- The pre-injected entity context is intentionally small. Do not assume an entity doesn't exist just because it's not listed below.
+- If the user asks about an entity, room, or device you cannot see in the snapshot, your first move is vector_search — not "I don't see that" and not a guess at the entity_id.
+- If you're about to answer "I don't have that entity" or "I can't find X," stop and call vector_search first. Only after a vector_search returns nothing relevant should you tell the user it doesn't exist.
+- When two entities have similar friendly names (common with the basement bay doors, the front door sensors, the iPhone trackers), use vector_search with metadata filters (domain, area) to disambiguate before acting.`;
   }
 
   // ========================================================================

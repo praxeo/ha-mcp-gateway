@@ -265,6 +265,34 @@ const READ_TOOLS = [
         required: ["query"]
       }
     }
+  },
+  {
+    type: "function",
+    function: {
+      name: "get_automation_config",
+      description:
+        "Get the full Home Assistant configuration body for a specific automation, " +
+        "including triggers, conditions, actions, mode, alias, and description. Use this " +
+        "for automation debugging when the user asks why an automation did or did not run, " +
+        "what an automation does, or whether an automation's YAML/config is correct. " +
+        "Prefer entity_id like 'automation.front_porch_lights'. Do not rely on " +
+        "render_template or automation state attributes for full automation debugging — " +
+        "those do not expose the trigger/condition/action body.",
+      parameters: {
+        type: "object",
+        properties: {
+          entity_id: {
+            type: "string",
+            description: "Automation entity ID, e.g. 'automation.front_porch_lights'. Preferred."
+          },
+          automation_id: {
+            type: "string",
+            description: "Home Assistant internal automation config ID. Optional fallback if entity_id is not available."
+          }
+        },
+        required: []
+      }
+    }
   }
 ];
 
@@ -291,5 +319,6 @@ export const CHAT_ALLOWED_TOOL_NAMES = new Set([
   "get_state",
   "get_logbook",
   "render_template",
-  "vector_search"
+  "vector_search",
+  "get_automation_config"
 ]);

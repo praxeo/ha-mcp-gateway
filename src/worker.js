@@ -220,8 +220,14 @@ var TOOLS = [
   },
   {
     name: "get_automation_config",
-    description: "Get the full configuration of a specific automation.",
-    inputSchema: { type: "object", properties: { automation_id: { type: "string" } }, required: ["automation_id"] }
+    description: "Get the full configuration of a specific automation. Accepts entity_id (e.g. automation.front_porch_lights) or automation_id (HA internal config ID).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        entity_id: { type: "string", description: "Automation entity ID, e.g. automation.front_porch_lights" },
+        automation_id: { type: "string", description: "Home Assistant internal automation config ID" }
+      }
+    }
   },
   {
     name: "create_automation",
@@ -610,11 +616,6 @@ var TOOLS = [
       },
       required: ["text"]
     }
-  },
-  {
-    name: "ai_observations",
-    description: "View the AI agent's saved observations.",
-    inputSchema: { type: "object", properties: {} }
   },
   {
     name: "ai_send_notification",
@@ -1181,11 +1182,11 @@ const CHAT_HTML = `<!DOCTYPE html>
       <div class="quick-actions">
         <button class="quick-btn" onclick="sendQuick('What is the status of the house?')">House status</button>
         <button class="quick-btn" onclick="sendQuick('Any alerts?')">Alerts</button>
-        <button class="quick-btn" onclick="sendQuick('Toggle the garage bay door')">Toggle garage bay</button>
-        <button class="quick-btn" onclick="sendQuick('Toggle the basement bay door')">Toggle basement bay</button>
+        <button class="quick-btn" onclick="sendQuick('What is the garage bay door status?')">Garage status</button>
+        <button class="quick-btn" onclick="sendQuick('What is the basement bay door status?')">Basement status</button>
         <button class="quick-btn" onclick="sendQuick('Set the temperature to 72')">Set temperature</button>
         <button class="quick-btn" onclick="sendQuick('Lock all the doors')">Lock doors</button>
-        <button class="quick-btn" onclick="sendQuick('Unlock the front door')">Unlock front door</button>
+        <button class="quick-btn" onclick="sendQuick('Is the front door locked?')">Front lock status</button>
       </div>
     </div>
   </div>
@@ -2044,12 +2045,14 @@ async function handleTool(env, name, args) {
       return result;
     }
     case "get_automation_config": {
-      let id = args.automation_id;
+      const rawId = args.entity_id || args.automation_id;
+      if (!rawId) return { error: "Missing entity_id or automation_id" };
+      let id = rawId;
       if (id.startsWith("automation.")) {
         const states = await getStates(env, false);
         const match = states.find((s) => s.entity_id === id);
         if (match && match.attributes && match.attributes.id) id = match.attributes.id;
-        else return { error: "Could not find internal ID for " + args.automation_id };
+        else return { error: "Could not find internal ID for " + rawId };
       }
       return await haRequest(env, "GET", "/api/config/automation/config/" + id);
     }
