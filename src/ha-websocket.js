@@ -261,6 +261,13 @@ export class HAWebSocket {
     if (!isOpen && !isClose) return null;
     if (isOpen && isClose) return null; // ambiguous → kick to LLM
 
+    // Disqualifier: tokens signaling a non-cover entity (basement deadbolt,
+    // side doors, vents, locks). Gates only the bare /\bbasement\b/ and
+    // /\bgarage\b/ fallbacks — explicit phrases like /\bbasement door\b/
+    // already require adjacency and stay safe without this check.
+    const NON_COVER_QUALIFIER = /\b(exterior|interior|front|back|rear|side|patio|sliding|french|storm|screen|porch|walkout|cellar|deadbolt|latch|lock|window|vent|hatch|gate|light|fan|switch)\b/;
+    const hasDisqualifier = NON_COVER_QUALIFIER.test(text);
+
     // Target classification — order is critical:
     // 1. Left basement first (requires explicit "left")
     // 2. Right basement / general basement
@@ -277,7 +284,7 @@ export class HAWebSocket {
       /\bbasement garage\b/.test(text) ||
       /\bright basement\b/.test(text) ||
       /\bbasement door\b/.test(text) ||
-      /\bbasement\b/.test(text)
+      (/\bbasement\b/.test(text) && !hasDisqualifier)
     ) {
       entityId = "cover.ratgdo32_b1e618_door";
       label = "basement bay door";
@@ -286,7 +293,7 @@ export class HAWebSocket {
       /\bmain garage\b/.test(text) ||
       /\bgarage door\b/.test(text) ||
       /\bgarage bay\b/.test(text) ||
-      /\bgarage\b/.test(text)
+      (/\bgarage\b/.test(text) && !hasDisqualifier)
     ) {
       entityId = "cover.ratgdo32_2b8ecc_door";
       label = "main garage bay door";
