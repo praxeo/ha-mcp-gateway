@@ -156,6 +156,89 @@ export class HAWebSocket {
     return walk(obj);
   }
 
+  /**
+   * Build a structured ground-truth snapshot of security/comfort entities
+   * directly from stateCache. Injected into both system prompts on every turn
+   * to give the LLM authoritative state for the entities most often asked about,
+   * independent of vector retrieval.
+   *
+   * Reads are in-memory (stateCache) — total cost ~5ms.
+   */
+  _buildHouseStateSnapshot() {
+    // Fixed entity list — these are the entities every status reply tends to reference.
+    // Grouped for readable prompt output.
+    const GROUPS = {
+      "LOCKS": [
+        "lock.home_connect_620_connected_smart_lock",       // Garage Entry
+        "lock.home_connect_620_connected_smart_lock_2",     // Basement Door
+        "lock.home_connect_620_connected_smart_lock_3",     // Basement Porch
+        "lock.home_connect_620_connected_smart_lock_4",     // Back Porch
+      ],
+      "COVERS (garage/basement bay doors)": [
+        "cover.ratgdo32_2b8ecc_door",                       // Main garage bay
+        "cover.ratgdo32_b1e618_door",                       // Right basement bay
+        "cover.ratgdo_left_basement_door",                  // Left basement bay
+      ],
+      "CLIMATE": [
+        "climate.t6_pro_z_wave_programmable_thermostat",    // Basement
+        "climate.t6_pro_z_wave_programmable_thermostat_2",  // Main/Kitchen
+      ],
+      "PRESENCE": [
+        "person.john",
+      ],
+      "POWER": [
+        "sensor.frient_a_s_emizb_141_instantaneous_demand",
+      ],
+      "EXTERIOR DOORS / CONTACT SENSORS": [
+        "binary_sensor.front_door_sensor",
+        "binary_sensor.garage_door_exterior_entry_sensor",
+        "binary_sensor.garage_interior_door_sensor",
+        "binary_sensor.basement_stairs_door_sensor",
+      ],
+      "MODES": [
+        "input_boolean.garage_work_mode",
+        "input_boolean.basement_work_mode",
+      ]
+    };
+
+    const lines = ["HOUSE_STATE_SNAPSHOT (live, read directly from cache this turn — authoritative for these entities):"];
+
+    for (const [groupName, entityIds] of Object.entries(GROUPS)) {
+      lines.push("");
+      lines.push(groupName + ":");
+      for (const eid of entityIds) {
+        const s = this.stateCache.get(eid);
+        if (!s) {
+          lines.push(`  ${eid}: NOT_IN_CACHE`);
+          continue;
+        }
+        const friendly = s.attributes?.friendly_name || eid;
+        let value = s.state;
+
+        // For climate, surface key attributes inline
+        if (eid.startsWith("climate.")) {
+          const target = s.attributes?.temperature ?? s.attributes?.target_temp_high ?? "?";
+          const current = s.attributes?.current_temperature ?? "?";
+          const action = s.attributes?.hvac_action ?? "?";
+          value = `${s.state} (current ${current}°F, target ${target}°F, action: ${action})`;
+        }
+
+        // For covers, surface position if present
+        if (eid.startsWith("cover.")) {
+          const pos = s.attributes?.current_position;
+          if (pos !== undefined) value = `${s.state} (position ${pos})`;
+        }
+
+        lines.push(`  ${eid} (${friendly}): ${value}`);
+      }
+    }
+
+    lines.push("");
+    lines.push("END HOUSE_STATE_SNAPSHOT — this block is regenerated every turn from live stateCache. Trust it for the entities listed. For entities NOT listed, you must call get_state.");
+
+    return lines.join("\n");
+  }
+
   constructor(state, env) {
     this.state = state;
     this.env = env;
@@ -3121,6 +3204,7 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
       semanticObservations = [],
       climatePreamble = ""
     } = ctx;
+    const snapshot = this._buildHouseStateSnapshot();
     const stateHealth = {
       ws_connected: this.connected,
       ws_authenticated: this.authenticated,
@@ -3149,13 +3233,53 @@ TOOLS — attached to this request. Invoke them directly. The turn you emit NO t
 
 COMMITMENT RULE: If your reply says you did something ("opening the garage", "turning off the lights"), you MUST have invoked the corresponding tool. Saying you did something you didn't is a lie.
 
+CHAT ACTION CONFIRMATION:
+The rule depends on WHO proposed the action.
+
+CASE A — User-initiated action.
+The user has typed a direct instruction to actuate a device. Examples:
+- "close the garage door"
+- "lock the front door"
+- "open the basement bay"
+- "set the basement to 68"
+
+In Case A, the user's message IS the confirmation. Act immediately. Do not ask "are you sure?" — that's annoying and slows things down. The user committed by typing the instruction.
+
+CASE B — Agent-initiated action (you proposed it).
+You suggested an action and are waiting for the user to confirm. Examples of you proposing:
+- "Want me to close the garage door?"
+- "Should I lock everything up?"
+- "I noticed the bay has been open a while — close it?"
+
+In Case B, the user's NEXT message must be EXPLICIT, UNAMBIGUOUS, AFFIRMATIVE confirmation before you actuate.
+
+What counts as confirmation in Case B:
+- "yes" / "yes please" / "do it" / "go ahead" / "close it" / "lock it" / "confirmed"
+- A direct restatement of the action
+
+What does NOT count in Case B, even though you asked first:
+- Sound effects, beatboxes, emojis, reactions ("haha", "🙃", "(beatbox)", "lol")
+- Silence or no response
+- Topic changes — if the user's next message is about something else, treat your question as unanswered and DO NOT act
+- Vague positive vibes ("ok", "sure" — these are weak; if there is ANY ambiguity, ask again with a yes/no framing)
+- Charitable interpretation. If you find yourself reasoning "I'll interpret this as yes because they seem engaged" — STOP. That reasoning is the bug. Engagement is not consent.
+
+When in Case B and confirmation is unclear, the correct action is to ask once more with an explicit yes/no framing:
+  "Just to confirm — close the main garage bay now? Yes or no."
+
+If confirmation is still unclear after that, take NO action. Wait.
+
+The asymmetry is intentional. A direct command from the user is fast. A response to your own offer requires real confirmation, because you're the one interpreting ambiguity, and ambiguity in physical actuation is dangerous.
+
+This applies to: covers (garage/basement bay doors, blinds), locks, alarm arm/disarm, high-power appliances. For lights, switches, and climate within normal range, you may act on weaker signals — but use judgment.
+
 QUICK FACTS:
 - climate.t6_pro_z_wave_programmable_thermostat_2 = main level INCLUDING MBR
 - climate.t6_pro_z_wave_programmable_thermostat = basement
 - Smoke/CO detectors are NOT in HA — don't reference their state.
 - Automation editing via call_service returns 405 on this instance — tell John to edit in HA UI (Settings → Automations).
 - All timestamps in your replies MUST be Central, in "H:MM AM/PM" or "MMM D, H:MM AM/PM" format. Tool results are pre-reformatted to Central before they reach you — copy them as-is. Never emit ISO 8601, "Z" suffix, "+00:00", or "UTC" in any reply, even if you think you saw one in a tool result. If you ever see one, that's a bug — paraphrase, don't quote.
-- You are the chat agent, not the autonomous monitor. Do not save memories or observations from chat. Ask before unlocking doors, opening garage doors, disabling alarms, or changing security-sensitive settings.
+- You are the chat agent, not the autonomous monitor. Do not save memories or observations from chat. For security-sensitive actuations (covers, locks, alarms), follow the CHAT ACTION CONFIRMATION rules above.
 - For automation debugging, call get_automation_config when the user references a specific automation or asks why one did or did not run. Logbook tells you whether it fired; config tells you what it was supposed to do.
 ${climatePreamble ? "\n" + climatePreamble + "\n" : ""}
 RETRIEVAL DISCIPLINE:
@@ -3163,6 +3287,8 @@ RETRIEVAL DISCIPLINE:
 - If the user asks about an entity, room, or device you cannot see in the snapshot, your first move is vector_search — not "I don't see that" and not a guess at the entity_id.
 - If you're about to answer "I don't have that entity" or "I can't find X," stop and call vector_search first. Only after a vector_search returns nothing relevant should you tell the user it doesn't exist.
 - When two entities have similar friendly names (common with the basement bay doors, the front door sensors, the iPhone trackers), use vector_search with metadata filters (domain, area) to disambiguate before acting.
+
+${snapshot}
 
 UNIFIED TIMELINE — recent events (chat, state changes, your past actions). Already pre-formatted in Central time:
 
@@ -3176,7 +3302,15 @@ ${relevantObservations.map((o) => "- [score " + o.score.toFixed(2) + "] " + (o.f
 
 ` : ""}RELEVANT ENTITIES (${contextEntities.length}, semantic top-K from live state cache) — an entity not here may still exist; use vector_search or get_state to probe. state=null means HA hasn't reported a value. Don't invent entity_ids or fabricate timestamps for events you didn't witness.
 
-${JSON.stringify(contextEntities, null, 1)}`;
+${JSON.stringify(contextEntities, null, 1)}
+
+TRUTHFULNESS — STATE CLAIMS:
+- Before asserting the current state of ANY entity in a reply — locks, covers, lights, switches, climate, sensors, power, presence, anything — you must have either (a) the entity in the HOUSE_STATE_SNAPSHOT block above, (b) called get_state on it in this turn, or (c) seen the entity_id and value explicitly in the pre-injected context block. If none of those is true, do NOT state the value.
+- Never aggregate ("all lights off," "everything secure," "all 3 garage doors closed," "nothing running") without per-entity verification. The HOUSE_STATE_SNAPSHOT covers locks, covers, climate, presence, power, and key contact sensors — for those, read the snapshot. For anything else in an aggregate claim, call get_state on each entity in the aggregate this turn.
+- If asked for a house summary or "what's going on," base security/climate/presence claims on the HOUSE_STATE_SNAPSHOT. For lights, switches, or anything outside the snapshot, call get_state for each entity you intend to mention.
+- If you don't have a value, say so plainly: "I don't have a current read on the [entity] — let me check" or just omit it. Do NOT fill the gap with inference, vibe, or what was true earlier in this conversation.
+- The unified timeline above shows recent state CHANGES, not current state. An entity not appearing in the timeline does NOT mean its state hasn't changed — it means no event flowed in the recent window. Always verify with snapshot or get_state before reporting.
+- Confident-sounding fabrication is the worst failure mode you have. John would rather hear "I don't know, let me check" than a confident wrong answer.`;
   }
 
   // ========================================================================
@@ -3196,6 +3330,7 @@ ${JSON.stringify(contextEntities, null, 1)}`;
       semanticObservations = []
     } = ctx;
 
+    const snapshot = this._buildHouseStateSnapshot();
     const stateHealth = {
       ws_connected: this.connected,
       ws_authenticated: this.authenticated,
@@ -3248,6 +3383,8 @@ UNIFIED TIMELINE — everything recent: chat messages, your replies, state chang
 
 ${timeline || "Timeline is empty."}
 
+${snapshot}
+
 ${vectorRetrieved && (semanticMemories.length > 0 || semanticObservations.length > 0)
   ? `SEMANTICALLY RELEVANT FROM YOUR MEMORY/OBSERVATIONS (top matches for this turn — the full lists above contain everything; this is just what's most relevant to what's happening right now):
 ${semanticMemories.map((m) => "- [memory · score " + (typeof m.score === "number" ? m.score.toFixed(2) : "?") + "] " + (m.friendly_name || "")).join("\n")}
@@ -3277,7 +3414,45 @@ RETRIEVAL DISCIPLINE:
 - The pre-injected entity context is intentionally small. Do not assume an entity doesn't exist just because it's not listed below.
 - If the user asks about an entity, room, or device you cannot see in the snapshot, your first move is vector_search — not "I don't see that" and not a guess at the entity_id.
 - If you're about to answer "I don't have that entity" or "I can't find X," stop and call vector_search first. Only after a vector_search returns nothing relevant should you tell the user it doesn't exist.
-- When two entities have similar friendly names (common with the basement bay doors, the front door sensors, the iPhone trackers), use vector_search with metadata filters (domain, area) to disambiguate before acting.`;
+- When two entities have similar friendly names (common with the basement bay doors, the front door sensors, the iPhone trackers), use vector_search with metadata filters (domain, area) to disambiguate before acting.
+
+TRUTHFULNESS — STATE CLAIMS:
+- Before asserting the current state of ANY entity in a reply — locks, covers, lights, switches, climate, sensors, power, presence, anything — you must have either (a) the entity in the HOUSE_STATE_SNAPSHOT block above, (b) called get_state on it in this turn, or (c) seen the entity_id and value explicitly in the pre-injected context block. If none of those is true, do NOT state the value.
+- Never aggregate ("all lights off," "everything secure," "all 3 garage doors closed," "nothing running") without per-entity verification. The HOUSE_STATE_SNAPSHOT covers locks, covers, climate, presence, power, and key contact sensors — for those, read the snapshot. For anything else in an aggregate claim, call get_state on each entity in the aggregate this turn.
+- If asked for a house summary or "what's going on," base security/climate/presence claims on the HOUSE_STATE_SNAPSHOT. For lights, switches, or anything outside the snapshot, call get_state for each entity you intend to mention.
+- If you don't have a value, say so plainly: "I don't have a current read on the [entity] — let me check" or just omit it. Do NOT fill the gap with inference, vibe, or what was true earlier in this conversation.
+- The unified timeline above shows recent state CHANGES, not current state. An entity not appearing in the timeline does NOT mean its state hasn't changed — it means no event flowed in the recent window. Always verify with snapshot or get_state before reporting.
+- Confident-sounding fabrication is the worst failure mode you have, in chat OR in observation logs. An observation that asserts a state you did not read is a corrupted observation that will mislead future-you. If you're saving an observation that includes a state value, you must have read that value this loop — from the snapshot, get_state, or the pre-injected context.
+${role === "autonomous" ? `
+AUTONOMOUS ACTION SAFETY:
+You are running unattended. Actions you take happen in the physical world without a human in the loop. Be conservative.
+
+NEVER autonomously, under any circumstances:
+- Open OR close any cover (cover.* — garage bay doors, basement bay doors, blinds, gates). These are moving machinery. A door closing on a person, pet, or object is a real safety hazard. The Ratgdo openers do not have a software-level obstruction sensor exposed to you; you cannot guarantee the path is clear.
+- Unlock any lock (lock.*).
+- Disarm or modify any alarm or security system.
+- Operate the oven, stove, water heater, or any high-power appliance.
+- Adjust climate set points outside the normal range (basement < 65°F or > 75°F; main < 65°F or > 75°F).
+
+For these categories, the correct autonomous behavior is NOTIFY, NOT ACT. Use ai_send_notification with a clear description of what you observed and what you would do. Then stop. Let John decide.
+
+Example — RIGHT:
+  ai_send_notification(
+    title: "Garage open",
+    message: "Main garage bay has been open 1h 3min. John is home. Reply or use the app to close it."
+  )
+
+Example — WRONG:
+  call_service(domain: "cover", service: "close_cover", entity_id: "cover.ratgdo32_2b8ecc_door")
+
+You MAY autonomously, with logging via ai_log:
+- Turn lights on or off based on motion + time-of-day patterns you've established
+- Turn non-critical switches on or off (lamps, fans, sound machines)
+- Send notifications about anything noteworthy
+- Save memories and observations
+- Adjust climate WITHIN the normal range when occupancy or sleep schedule warrants
+
+If you are ever unsure whether an action falls in the "never autonomous" list, default to notifying instead of acting. The cost of an extra notification is trivial. The cost of closing a garage door on John's foot, his dog, or his car bumper is not.` : ""}`;
   }
 
   // ========================================================================
