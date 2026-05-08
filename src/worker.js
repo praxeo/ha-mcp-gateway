@@ -1712,6 +1712,78 @@ async function doFetch(env, path, body) {
   }
   return null;
 }
+
+// Render a bugs[] array as Markdown ready to prepend to BUGS.md.
+// Newest first (the storage order is append, so reverse). Each entry is an
+// H2 with id + Central timestamp + short title, followed by metadata,
+// the user's words as a blockquote, captured entity states, and a recent
+// timeline slice. The format is designed for visual scanning and direct
+// paste into BUGS.md.
+function formatBugsAsMarkdown(bugs) {
+  if (!Array.isArray(bugs) || bugs.length === 0) {
+    return "<!-- no new bugs -->\n";
+  }
+  const lines = [];
+  // Newest first
+  const ordered = [...bugs].reverse();
+  for (const b of ordered) {
+    const desc = (b.description || "").trim();
+    const title = desc.length > 80 ? desc.substring(0, 77) + "…" : desc;
+    const ts = b.timestamp_central || b.timestamp_iso || "";
+    const sev = b.severity || "low";
+    const channel = b.channel || "default";
+    const entityIds = (b.entities || []).join(", ") || "(none)";
+
+    lines.push(`## #${b.id} — ${ts} — ${title || "(no description)"}`);
+    lines.push("");
+    lines.push(`**Severity:** ${sev}  •  **Source:** chat (${channel})  •  **Entities:** ${entityIds}`);
+    lines.push("");
+    if (desc) {
+      // Quote the user's words / model framing as the primary record
+      lines.push(`> ${desc.replace(/\n/g, "\n> ")}`);
+      lines.push("");
+    }
+
+    const states = b.entity_states || {};
+    const stateKeys = Object.keys(states);
+    if (stateKeys.length > 0) {
+      lines.push("**Captured state at report:**");
+      for (const eid of stateKeys) {
+        const s = states[eid];
+        if (!s) {
+          lines.push(`- \`${eid}\`: NOT_IN_CACHE`);
+        } else {
+          let extra = "";
+          if (s.attributes && s.attributes.current_position !== undefined) {
+            extra = ` (position ${s.attributes.current_position})`;
+          } else if (s.attributes && s.attributes.brightness !== undefined) {
+            extra = ` (brightness ${s.attributes.brightness})`;
+          } else if (s.attributes && s.attributes.current_temperature !== undefined) {
+            extra = ` (current ${s.attributes.current_temperature}°)`;
+          }
+          lines.push(`- \`${eid}\`: ${s.state}${extra}`);
+        }
+      }
+      lines.push("");
+    }
+
+    const log = Array.isArray(b.last_log_entries) ? b.last_log_entries : [];
+    if (log.length > 0) {
+      lines.push(`**Recent timeline (last ${log.length} ai_log entries):**`);
+      for (const e of log) {
+        const t = e.timestamp ? e.timestamp.replace("T", " ").substring(0, 19) : "";
+        const tag = e.type || "?";
+        const msg = (e.message || "").replace(/\n/g, " ").substring(0, 200);
+        lines.push(`- ${t} [${tag}] ${msg}`);
+      }
+      lines.push("");
+    }
+
+    lines.push("---");
+    lines.push("");
+  }
+  return lines.join("\n");
+}
 async function callServiceWS(env, domain, service, data, target) {
   const doResult = await doFetch(env, "/call_service", {
     domain,
@@ -3272,6 +3344,42 @@ var worker_default = {
     // behavior:
     //   ?force=1                    re-embed everything regardless of hash
     //   ?kinds=entity,automation    comma-separated subset (default: all)
+    if (url.pathname === "/admin/bugs") {
+      if (request.method !== "GET") {
+        return new Response("Method not allowed", { status: 405 });
+      }
+      const data = await doFetch(env, "/bugs");
+      if (!data) {
+        return new Response(JSON.stringify({ error: "DO not responding" }), {
+          status: 503,
+          headers: { ...corsHeaders, "Content-Type": "application/json" }
+        });
+      }
+      const format = url.searchParams.get("format");
+      if (format === "markdown") {
+        return new Response(formatBugsAsMarkdown(data.bugs || []), {
+          headers: { ...corsHeaders, "Content-Type": "text/markdown; charset=utf-8" }
+        });
+      }
+      return new Response(JSON.stringify(data), {
+        headers: { ...corsHeaders, "Content-Type": "application/json" }
+      });
+    }
+    if (url.pathname === "/admin/bugs/clear") {
+      if (request.method !== "POST") {
+        return new Response("Method not allowed", { status: 405 });
+      }
+      const result = await doFetch(env, "/bugs_clear", {});
+      if (!result) {
+        return new Response(JSON.stringify({ error: "DO not responding" }), {
+          status: 503,
+          headers: { ...corsHeaders, "Content-Type": "application/json" }
+        });
+      }
+      return new Response(JSON.stringify(result), {
+        headers: { ...corsHeaders, "Content-Type": "application/json" }
+      });
+    }
     if (url.pathname === "/admin/rebuild-knowledge") {
       if (request.method !== "POST") {
         return new Response("Method not allowed", { status: 405 });

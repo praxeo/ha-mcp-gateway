@@ -293,6 +293,46 @@ const READ_TOOLS = [
         required: []
       }
     }
+  },
+  {
+    type: "function",
+    function: {
+      name: "report_bug",
+      description:
+        "Capture a user-flagged issue to the debug log for review at the next iteration " +
+        "session. Call this when the user is explicitly asking you to record / save / log / " +
+        "report / note something as a bug, problem, broken behavior, or debug entry. The " +
+        "trigger is the combination of a recording verb (save, log, report, record, note, " +
+        "capture, remember-as) plus an issue noun (bug, debug, problem, broken, issue). " +
+        "Examples: \"that's a bug\", \"save to debug log\", \"save as bug report\", \"log " +
+        "this as broken\", \"report this as a bug\", \"make a note of this — it's broken\". " +
+        "Do NOT call for general venting (\"this is annoying\"), corrections (\"no, " +
+        "actually...\"), questions (\"why is X on?\"), preference setting (\"save 60% as " +
+        "my preference\"), or normal task flow. If the user's intent is unclear, ask " +
+        "\"Want me to log that as a bug?\" and only call on explicit confirmation. After " +
+        "calling, reply briefly that it's logged. Do NOT attempt to fix the bug — fixes " +
+        "happen in code on the next iteration.",
+      parameters: {
+        type: "object",
+        properties: {
+          description: {
+            type: "string",
+            description: "What the bug is, in the user's words plus minimal model framing if needed for clarity. One or two sentences."
+          },
+          entities: {
+            type: "array",
+            items: { type: "string" },
+            description: "Optional list of entity_ids involved in the bug. Include any the user named or that vector_search/get_state has surfaced as relevant."
+          },
+          severity: {
+            type: "string",
+            enum: ["low", "medium", "high"],
+            description: "User-stated severity if given; otherwise default to 'low'. Use 'high' only when the user explicitly indicates urgency or a safety concern."
+          }
+        },
+        required: ["description"]
+      }
+    }
   }
 ];
 
@@ -313,6 +353,7 @@ export const NATIVE_ACTION_TOOL_NAMES = new Set(
 // save_memory and save_observation are intentionally excluded — confirmed
 // facts and patterns get picked up by the autonomous heartbeat from the
 // unified timeline. Removing the temptation makes chat replies tighter.
+// report_bug is chat-only — autonomous has no user to flag bugs.
 export const CHAT_ALLOWED_TOOL_NAMES = new Set([
   "call_service",
   "ai_send_notification",
@@ -320,5 +361,6 @@ export const CHAT_ALLOWED_TOOL_NAMES = new Set([
   "get_logbook",
   "render_template",
   "vector_search",
-  "get_automation_config"
+  "get_automation_config",
+  "report_bug"
 ]);

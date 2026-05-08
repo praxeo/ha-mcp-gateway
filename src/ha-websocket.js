@@ -943,6 +943,16 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
           return new Response(JSON.stringify({ cleared: true }), { headers });
         }
 
+        case "/bugs": {
+          const bugs = await this.state.storage.get("bugs") || [];
+          return new Response(JSON.stringify({ count: bugs.length, bugs }), { headers });
+        }
+
+        case "/bugs_clear": {
+          await this.state.storage.put("bugs", []);
+          return new Response(JSON.stringify({ cleared: true }), { headers });
+        }
+
         case "/ai_trigger": {
           if (this.recentEvents.length === 0) {
             return new Response(JSON.stringify({ message: "No pending events to evaluate" }), { headers });
@@ -2743,9 +2753,72 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
         }
         break;
       }
+      case "report_bug": {
+        const description = typeof action.description === "string" ? action.description.trim() : "";
+        if (!description) {
+          this.logAI("bug_skipped", "report_bug called with empty description", action, source);
+          return { ok: false, error: "description is required" };
+        }
+        const id = fnv1aHex(description + ":" + Date.now().toString()).slice(0, 8);
+        const now = new Date();
+        const ts_iso = now.toISOString();
+        const ts_central = now.toLocaleString("en-US", { timeZone: "America/Chicago" });
+
+        // Pull recent context server-side — the model can't fake what gets attached.
+        const channelKey = sanitizeChannelKey(action.from || "default");
+        const history = await this.state.storage.get(`chat_history:${channelKey}`) || [];
+        const last_chat_turns = history.slice(-4);
+
+        const last_log_entries = (this.aiLog || []).slice(-10);
+
+        const entities = Array.isArray(action.entities) ? action.entities : [];
+        const entity_states = {};
+        for (const eid of entities) {
+          if (typeof eid !== "string" || !eid) continue;
+          const s = this.stateCache.get(eid);
+          entity_states[eid] = s
+            ? { state: s.state, attributes: s.attributes }
+            : null;
+        }
+
+        const severity = ["low", "medium", "high"].includes(action.severity) ? action.severity : "low";
+
+        const entry = {
+          id,
+          timestamp_iso: ts_iso,
+          timestamp_central: ts_central,
+          source: "chat",
+          channel: channelKey,
+          severity,
+          description,
+          entities,
+          entity_states,
+          last_chat_turns,
+          last_log_entries
+        };
+
+        const bugs = await this.state.storage.get("bugs") || [];
+        bugs.push(entry);
+        // FIFO 200 — generous cap; expected write volume is low.
+        const trimmed = bugs.length > 200 ? bugs.slice(-200) : bugs;
+        await this.state.storage.put("bugs", trimmed);
+
+        this.logAI(
+          "bug_reported",
+          `#${id} ${description.substring(0, 80)}`,
+          { id, severity, entities, channel: channelKey },
+          source
+        );
+
+        return {
+          ok: true,
+          id,
+          summary: `Logged bug #${id}. Captured ${Object.keys(entity_states).length} entity state(s) + last ${last_log_entries.length} log entries.`
+        };
+      }
       default:
         this.logAI("unknown_action", "Unknown action type: " + action.type, action, source);
-        throw new Error("Unknown action type: '" + (action.type || "undefined") + "' — expected call_service, send_notification, save_memory, or save_observation");
+        throw new Error("Unknown action type: '" + (action.type || "undefined") + "' — expected call_service, send_notification, save_memory, save_observation, or report_bug");
     }
   }
 
@@ -2798,6 +2871,18 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
             replaces: args.replaces
           }, "native_loop");
           return { saved: true };
+
+        case "report_bug":
+          // Chat-only meta-tool: writes to the bugs bucket, not home state.
+          // Reads `this._activeChatFrom` (set at top of chatWithAgentNative)
+          // so the handler can attach the right per-channel chat history.
+          return await this.executeAIAction({
+            type: "report_bug",
+            description: args.description,
+            entities: args.entities || [],
+            severity: args.severity || "low",
+            from: this._activeChatFrom || "default"
+          }, "native_loop");
 
         // ----- Read tools (no action log; not counted in actions_taken) -----
         case "get_state": {
@@ -3352,8 +3437,29 @@ TOOLS — attached to this request. Invoke them directly. The turn you emit NO t
 - render_template — Jinja2 in HA context (area_name, device_attr, expand, state_attr).
 - vector_search — semantic search over the unified knowledge index (entities, automations, scripts, scenes, areas, devices, HA services, your memories, your observations). The pre-injected context below is a small top-K slice (10 entities) — vector_search covers the FULL knowledge base. CALL IT AGGRESSIVELY when the user references something not in the snapshot, when entity names are ambiguous, when you're unsure if a device exists, or when a question spans entities you can't see in context. Default to searching rather than guessing. Restrict scope with the kinds array (e.g., kinds=["service"] to discover an HA service, kinds=["memory","observation"] to find prior notes on a topic, kinds=["entity"], domain="light", area="kitchen" to narrow by metadata).
 - get_automation_config — read the full config body of an automation (triggers, conditions, actions, mode). Use for automation debugging. Prefer entity_id like 'automation.front_porch_lights'. Do not use render_template as a substitute.
+- report_bug — capture a user-flagged issue to the debug log for review at the next iteration session. See BUG REPORTS section below for trigger rules.
 
 COMMITMENT RULE: If your reply says you did something ("opening the garage", "turning off the lights"), you MUST have invoked the corresponding tool. Saying you did something you didn't is a lie.
+
+BUG REPORTS:
+When the user is explicitly asking you to record / save / log / report something as an issue, bug, broken behavior, or debug entry, call report_bug with their description plus any entity_ids involved. The trigger is a recording verb (save, log, report, record, note, capture, remember-as) combined with an issue noun (bug, debug, problem, broken, issue). All of these fire:
+  - "that's a bug"
+  - "report this as a bug"
+  - "save to debug log"
+  - "save as bug report"
+  - "log this as broken"
+  - "make a note — this is broken"
+
+After calling, reply briefly: "Logged bug #<id> — <short summary>." Do NOT attempt to fix the bug, run remediation, or modify automations. Capture is the goal; fixes happen in code on the next iteration.
+
+Do NOT call report_bug for:
+- General venting ("this is annoying", "ugh") — no recording verb, no specific issue framing
+- Corrections about facts ("no, the basement is the lower one") — that's a correction, out of scope here
+- Questions ("why is the porch on?") — answer the question
+- Preferences ("save 60% as my preference") — recording verb but no issue framing; out of scope
+- Normal task flow
+
+If the user describes a problem but doesn't explicitly ask you to log it, ask once: "Want me to log that as a bug?" Do not call report_bug until they confirm. Don't infer aggressively.
 
 CHAT ACTION CONFIRMATION:
 The rule depends on WHO proposed the action.
@@ -3631,7 +3737,9 @@ Evaluate these events against the timeline above. Take action only if warranted.
       ],
       {
         maxIterations: 8,
-        allowedTools: NATIVE_AGENT_TOOLS,
+        // report_bug is chat-only — there's no user to flag bugs in the
+        // autonomous heartbeat. Filter it out so MiniMax doesn't see it.
+        allowedTools: NATIVE_AGENT_TOOLS.filter(t => t.function.name !== "report_bug"),
         hallucinationGuard: false,
         maxTokens: 8192
       }
@@ -3708,6 +3816,10 @@ Evaluate these events against the timeline above. Take action only if warranted.
     const now_str = now.toLocaleString("en-US", { timeZone: "America/Chicago" });
     const channelKey = sanitizeChannelKey(from);
     const historyKey = `chat_history:${channelKey}`;
+
+    // Stash the active chat sender so executeNativeTool/report_bug can attach
+    // the correct per-channel chat history. Cleared in the finally below.
+    this._activeChatFrom = from;
 
     const conversationHistory = await this.state.storage.get(historyKey) || [];
     this.logAI("chat_user", `${from}: ${message}`, { from, message, channel: channelKey });
@@ -3809,6 +3921,10 @@ Evaluate these events against the timeline above. Take action only if warranted.
     } catch (err) {
       this.logAI("chat_error", err.message, { from, channel: channelKey }, "native_loop");
       return { error: "AI failed: " + err.message };
+    } finally {
+      // Clear the per-call stash so report_bug from a stale loop never
+      // attaches the wrong channel.
+      this._activeChatFrom = null;
     }
   }
 
