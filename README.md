@@ -4,7 +4,10 @@ A Cloudflare Worker + Durable Object that bridges Home Assistant to LLMs. It
 holds a persistent WebSocket to HA, exposes ~70 typed tools as an MCP server
 for Claude Desktop, and runs an autonomous home agent ("MiniMax") that owns
 chat and a 30-second autonomous heartbeat. State for nine entity-kinds is
-embedded into a Cloudflare Vectorize index for semantic retrieval.
+embedded into a Cloudflare Vectorize index for semantic retrieval. Chat and
+the autonomous monitor run on split system prompts with profile-scoped tool
+sets; deterministic cover commands short-circuit the LLM via a sub-500ms
+fast path.
 
 This document is the load-bearing reference for picking up the codebase
 cold — whether that's a future iteration session or another agent. It
@@ -19,17 +22,23 @@ loop, agent state, bindings, and operational gotchas.
 User (web / WhatsApp / Claude Desktop)
         │
         ▼
-Cloudflare Worker (worker.js)         ◀── /mcp, /chat, /twilio, /admin/*, /health, /refresh
-   │  routing, MCP handler, multi-kind backfill, daily cron
+Cloudflare Worker (worker.js)         ◀── /mcp, /chat, /twilio, /transcribe,
+   │                                       /admin/bugs, /admin/bugs/clear,
+   │                                       /admin/rebuild-knowledge,
+   │                                       /health, /refresh
+   │  routing, MCP handler, CHAT_HTML, ElevenLabs STT proxy,
+   │  multi-kind backfill, daily cron, bug-log markdown export
    ▼
 Durable Object: HAWebSocket (ha-websocket.js)
    │  singleton "ha-websocket-singleton" — owns the persistent WS
-   │  in-memory stateCache, recent-events queue, native tool loop,
-   │  autonomous heartbeat, write-through embeds
+   │  in-memory stateCache, recent-events queue, cover fast path,
+   │  HOUSE_STATE_SNAPSHOT builder, native tool loop, autonomous
+   │  heartbeat, write-through embeds, per-channel chat_history
    ├──► Home Assistant WebSocket (port 8123, JWT auth)
    ├──► Cloudflare Vectorize "ha-knowledge"  (env.KNOWLEDGE)
    ├──► Cloudflare Workers AI @cf/baai/bge-large-en-v1.5  (env.AI)
-   └──► MiniMax M2.7-highspeed at api.minimax.io  (OpenAI-compatible)
+   ├──► MiniMax M2.7-highspeed at api.minimax.io  (OpenAI-compatible)
+   └──► ElevenLabs Scribe at api.elevenlabs.io       (speech-to-text)
 ```
 
 Layer-by-layer:
@@ -39,8 +48,9 @@ Layer-by-layer:
 3. **HA Green** — a Nabu Casa appliance running HA OS on the local LAN. Cloud-relayed via Nabu Casa for remote access.
 4. **ha-mcp-gateway (this repo)** — Worker + DO. Translates natural language into HA service calls. Auth: Cloudflare Access JWT for browser users; long-lived HA token in worker secret.
 5. **Vectorize knowledge index (`ha-knowledge`)** — see [Knowledge index](#knowledge-index-ha-knowledge) below.
-6. **MiniMax M2.7-highspeed** — chat completions + native tool calls. The DO runs the tool loop, not MiniMax.
-7. **Frontends** — Claude Desktop (MCP), `/chat` HTML UI served by the Worker (SSE-streaming), Twilio (WhatsApp).
+6. **MiniMax M2.7-highspeed** — chat completions + native tool calls. The DO runs the tool loop, not MiniMax. 45s timeout per call with `AbortError` handling.
+7. **ElevenLabs Scribe** — `scribe_v1` speech-to-text. Worker proxies the chat UI's audio blobs through `/transcribe` and returns `{ text, language_code }`.
+8. **Frontends** — Claude Desktop (MCP), `/chat` HTML UI served by the Worker (SSE-streaming, hero mic button, collapsible reasoning panel, retry/copy/clear), Twilio (WhatsApp).
 
 ---
 
@@ -48,9 +58,9 @@ Layer-by-layer:
 
 | File | Role |
 |---|---|
-| `src/worker.js` | Cloudflare Worker entry. Owns the MCP handler (`TOOLS` list + `handleTool` dispatch), HTTP routes (`/chat`, `/twilio`, `/admin/rebuild-knowledge`, `/health`, `/refresh`, `/mcp`), KV cache helpers (states/registries), the multi-kind `backfillKnowledge`, and the `scheduled()` cron handler with daily resync. |
-| `src/ha-websocket.js` | Durable Object class. Holds the persistent HA WebSocket, in-memory `stateCache`, recent-events queue. System prompts (`getAgentContext`, `getNativeAgentSystemPrompt`). Two execution paths: `chatWithAgentNative` (user-driven, SSE) and `runAIAgentNative` (heartbeat). The native tool loop (`runNativeToolLoop`), the action executor (`executeAIAction`), the read-tool dispatcher (`executeNativeTool`), the multi-kind retriever (`retrieveKnowledge`), and write-through embed/upsert helpers. |
-| `src/agent-tools.js` | OpenAI-format tool schemas passed to MiniMax: 4 action tools (`call_service`, `ai_send_notification`, `save_memory`, `save_observation`) + 4 read tools (`get_state`, `get_logbook`, `render_template`, `vector_search`). |
+| `src/worker.js` | Cloudflare Worker entry. Owns the MCP handler (`TOOLS` list + `handleTool` dispatch), HTTP routes (`/chat`, `/twilio`, `/transcribe`, `/admin/rebuild-knowledge`, `/admin/bugs`, `/admin/bugs/clear`, `/health`, `/refresh`, `/mcp`), the embedded `CHAT_HTML` UI (mic, reasoning panel, retry/copy/clear, iOS Safari "Load failed" auto-retry), the ElevenLabs STT proxy, the `formatBugsAsMarkdown` helper, KV cache helpers (states/registries), the multi-kind `backfillKnowledge`, and the `scheduled()` cron handler with daily resync. |
+| `src/ha-websocket.js` | Durable Object class. Holds the persistent HA WebSocket, in-memory `stateCache`, recent-events queue. **Two system prompts**: `getChatSystemPrompt` (chat profile, with CHAT ACTION CONFIRMATION) and `getNativeAgentSystemPrompt(role, ctx)` (autonomous + shared, with AUTONOMOUS ACTION SAFETY). Both inject a live `_buildHouseStateSnapshot()` block. Two execution paths: `chatWithAgentNative` (user-driven, SSE) and `runAIAgentNative` (heartbeat). Cover-command fast path (`_tryDeterministicFastPath`) short-circuits the LLM. The native tool loop (`runNativeToolLoop`), action executor (`executeAIAction`), tool dispatcher (`executeNativeTool`), multi-kind retriever (`retrieveKnowledge`), write-through embed/upsert helpers, per-channel `chat_history:${channelKey}`. |
+| `src/agent-tools.js` | OpenAI-format tool schemas passed to MiniMax. 4 action tools (`call_service`, `ai_send_notification`, `save_memory`, `save_observation`) + 5 read tools (`get_state`, `get_logbook`, `render_template`, `vector_search`, `get_automation_config`) + 1 chat-only meta tool (`report_bug` — captures user-flagged issues to DO `bugs` storage). Exports `NATIVE_AGENT_TOOLS`, `NATIVE_TOOL_NAMES`, `NATIVE_ACTION_TOOL_NAMES`, and `CHAT_ALLOWED_TOOL_NAMES` (chat profile excludes `save_memory` + `save_observation`; autonomous excludes `report_bug`). |
 | `src/vectorize-schema.js` | Canonical metadata schema, `vectorIdFor(kind, refId)`, FNV-1a hash, per-kind embed-text builders, `isNoisyEntity` / `isNoisyService` / `entityCategoryFor` helpers, `buildMetadata` (string-coerces `is_noisy`). Imported by both worker.js and ha-websocket.js. |
 | `wrangler.toml` | Bindings (HA_WS, HA_CACHE, KNOWLEDGE, AI), build command (esbuild bundles `src/worker.js` → `dist/worker.js`), cron triggers (`* * * * *` cache prewarm, `30 8 * * *` daily knowledge resync). |
 | `dist/worker.js` | esbuild output. **Build artifact — never edit.** |
@@ -136,37 +146,156 @@ Metadata indexes are immutable — declare all six at creation time.
 
 ---
 
+## HOUSE_STATE_SNAPSHOT
+
+`_buildHouseStateSnapshot()` ([ha-websocket.js:204](src/ha-websocket.js))
+emits a small text block injected into both system prompts every turn,
+read directly from the in-memory `stateCache`. It groups a curated set of
+entity IDs (locks, garage/basement bay covers, the two thermostats with
+inline `current/target/hvac_action`, presence trackers, whole-home power,
+key contact sensors, and a few mode booleans) and prints
+`<entity_id> (<friendly_name>): <state>` with cover position rendered
+inline when present.
+
+Why it exists:
+
+- **Authoritative for the listed entities.** The prompt tells MiniMax
+  the snapshot is regenerated every turn from live cache and to trust it.
+  This is what makes the TRUTHFULNESS rule enforceable — the agent has a
+  ground-truth read on the security/climate/presence surface without
+  needing a tool call.
+- **Aggregation guard.** Aggregate claims like "everything secure" or
+  "all garage doors closed" are explicitly forbidden unless every
+  asserted entity is in the snapshot or the agent called `get_state` on
+  it this turn.
+- **Fast-path enables.** The cover fast path uses the same `stateCache`
+  for its no-op guard — if the target is already in the requested state,
+  it replies "already closed" without firing a service call.
+
+Anything not in the snapshot is fair game for `get_state` /
+`vector_search`; the prompt explicitly says so.
+
+---
+
 ## Native tool loop
 
 MiniMax is given OpenAI-format tool schemas (`NATIVE_AGENT_TOOLS` in
 `agent-tools.js`). The DO drives the loop: send messages, read
 `tool_calls`, dispatch via `executeNativeTool`, push tool results back,
-repeat until MiniMax emits no `tool_calls`.
+repeat until MiniMax emits no `tool_calls`. Each MiniMax call has a 45s
+timeout with `AbortError` handling.
 
 Caps:
 
-- **Chat path** (`chatWithAgentNative`): `maxIterations: 12`. Synthesis
-  fallback on overflow — pushes a "stop using tools, compose now" user
-  message and re-calls MiniMax with `tools: []` so the model produces
-  prose from work-so-far instead of a tool trace.
-- **Autonomous path** (`runAIAgentNative`): `maxIterations: 8`.
+- **Chat path** (`chatWithAgentNative`): `maxIterations: 6`,
+  `maxTokens: 4096`, `hallucinationGuard: true`. The chat profile filters
+  `NATIVE_AGENT_TOOLS` through `CHAT_ALLOWED_TOOL_NAMES` (8 tools —
+  `save_memory` and `save_observation` are excluded; the autonomous
+  monitor picks those up from the timeline). Synthesis fallback on
+  overflow — pushes a "stop using tools, compose now" user message and
+  re-calls MiniMax with `tools: []` so the model produces prose from
+  work-so-far instead of a tool trace.
+- **Autonomous path** (`runAIAgentNative`): `maxIterations: 8`,
+  `maxTokens: 8192`, `hallucinationGuard: false`, tool set is
+  `NATIVE_AGENT_TOOLS` minus `report_bug` (no user to flag bugs in the
+  unattended path) — 9 tools.
 
-Tool surface:
+Tool surface (10 total):
 
-| Tool | Side effect | Notes |
-|---|---|---|
-| `call_service` | yes | Any HA service. Post-action verify `get_state` for `climate` / `lock` / `cover`. |
-| `ai_send_notification` | yes | `notify.notify` call + writes a `notification` entry to `ai_log`. |
-| `save_memory` | yes | Append to `ai_memory` (100 FIFO). Embed + upsert. Evicted entries get vector-deleted. |
-| `save_observation` | yes | Append to `ai_observations` (500 FIFO). Embed + upsert. `replaces` prefix-deletes existing entries (and their vectors). |
-| `get_state` | no | stateCache hit; force_refresh fetches via WS. |
-| `get_logbook` | no | HA `/api/logbook`. Tool description requires explicit TZ offset (`-05:00` for CDT). |
-| `render_template` | no | HA `/api/template`. Jinja2 evaluation. |
-| `vector_search` | no | DO `/vector_search` → `retrieveKnowledge`. Multi-kind metadata-filtered semantic search. |
+| Tool | Side effect | Chat? | Auto? | Notes |
+|---|---|---|---|---|
+| `call_service` | yes | ✓ | ✓ | Any HA service. Post-action verify `get_state` for `climate` / `lock` / `cover`. |
+| `ai_send_notification` | yes | ✓ | ✓ | `notify.notify` call + writes a `notification` entry to `ai_log`. |
+| `save_memory` | yes | ✗ | ✓ | Append to `ai_memory` (100 FIFO). Embed + upsert. Evicted entries get vector-deleted. |
+| `save_observation` | yes | ✗ | ✓ | Append to `ai_observations` (500 FIFO). Embed + upsert. `replaces` prefix-deletes existing entries (and their vectors). |
+| `get_state` | no | ✓ | ✓ | stateCache hit; force_refresh fetches via WS. |
+| `get_logbook` | no | ✓ | ✓ | HA `/api/logbook`. Tool description requires explicit TZ offset (`-05:00` for CDT). |
+| `render_template` | no | ✓ | ✓ | HA `/api/template`. Jinja2 evaluation. |
+| `vector_search` | no | ✓ | ✓ | DO `/vector_search` → `retrieveKnowledge`. Multi-kind metadata-filtered semantic search. |
+| `get_automation_config` | no | ✓ | ✓ | HA `/api/config/automation/config/{id}`. Returns trigger/condition/action body for automation debugging. `render_template` cannot substitute. |
+| `report_bug` | log-only | ✓ | ✗ | User-flagged issue capture. Writes a structured entry (description + last 4 chat turns + last 10 `ai_log` entries + current state of cited entities) to DO `bugs` storage (FIFO 200). Surfaced via `/admin/bugs`. See [BUGS.md](BUGS.md) and the BUG REPORTS prompt section. |
 
 Action tools are dispatched through `executeAIAction` with
 `source="native_loop"` so the unified `ai_log` records who did what
-(`legacy_json` / `native_loop` / `tool_call`).
+(`legacy_json` / `native_loop` / `tool_call` / `fast_path`).
+
+Tool messages persisted into `chat_history` are truncated at 4 KB
+(`TOOL_CONTENT_CAP`) so that long `vector_search` / `render_template`
+results don't bloat the byte budget across turns.
+
+### System prompt structure
+
+The chat and autonomous monitor have diverged. Both prompts inject
+`getAgentContext()` (architecture self-knowledge), the
+HOUSE_STATE_SNAPSHOT, gateway health, the unified timeline, semantic top-K
+memories/observations, and the relevant-entity slice. Differences:
+
+| Section                       | Chat       | Autonomous |
+|-------------------------------|------------|------------|
+| ARCHITECTURE / GATEWAY HEALTH | ✓          | ✓          |
+| HOUSE_STATE_SNAPSHOT          | ✓          | ✓          |
+| Tool list (in prompt)         | 8 tools    | 9 tools    |
+| MODE block                    | implicit   | role=`autonomous` or `chat` |
+| YOUR MEMORY / OBSERVATIONS    | ✗ (chat doesn't write) | ✓ |
+| OPERATIONAL REMINDERS         | QUICK FACTS only | full 11-item list |
+| RETRIEVAL DISCIPLINE          | ✓          | ✓          |
+| TRUTHFULNESS — STATE CLAIMS   | ✓          | ✓          |
+| BUG REPORTS                   | ✓          | ✗          |
+| CHAT ACTION CONFIRMATION      | ✓          | ✗          |
+| AUTONOMOUS ACTION SAFETY      | ✗          | ✓ (role=autonomous only) |
+
+`CHAT ACTION CONFIRMATION` enforces a Case-A / Case-B asymmetry: a
+direct user instruction acts immediately; an agent-proposed action
+requires explicit affirmative confirmation (no charitable interpretation
+of "ok"/"sure"/emoji/silence) before it actuates a cover, lock, alarm,
+or high-power appliance.
+
+`AUTONOMOUS ACTION SAFETY` lists hard-NEVER actions for the unattended
+heartbeat path: covers (open OR close), locks (unlock), alarm modify,
+oven/stove/water-heater operation, and out-of-range climate setpoints.
+For these, the agent must `ai_send_notification` and stop.
+
+`BUG REPORTS` (chat-only) tells the model when to call `report_bug`:
+explicit recording-verb + issue-noun phrases ("that's a bug", "save to
+debug log", "log this as broken", etc.). Negative cases — venting,
+corrections, questions, preferences — explicitly do not fire. If
+intent is ambiguous, the model asks "Want me to log that as a bug?"
+and only fires on explicit confirmation. After a successful call the
+reply is brief: "Logged bug #&lt;id&gt; — &lt;summary&gt;." No fix attempts;
+fixes happen in code on the next iteration.
+
+`TRUTHFULNESS — STATE CLAIMS` (both prompts) forbids state assertions or
+aggregations the agent hasn't verified this turn from the snapshot,
+`get_state`, or pre-injected context. Anchors the no-fabrication rule.
+
+### Cover-command fast path
+
+`_tryDeterministicFastPath(message)` runs at the top of
+`chatWithAgentNative`. It short-circuits to a direct `cover.open_cover`
+or `cover.close_cover` service call when:
+
+1. The text contains an open-verb (`open|raise|lift`) XOR a close-verb
+   (`close|shut|lower|drop`) — never both.
+2. The text is not a question — bails on trailing `?` or sentence-initial
+   `did|do|does|is|are|was|were|have|has|had`.
+3. A target entity matches: explicit phrases (`left basement`, `basement
+   bay`, `right basement`, `basement door`, `main garage`, `garage door`,
+   `garage bay`) always match; the bare-noun fallbacks (`basement`,
+   `garage`) match only when the disqualifier regex
+   (`exterior|interior|front|back|rear|side|patio|sliding|french|storm|
+   screen|porch|walkout|cellar|deadbolt|latch|lock|window|vent|hatch|
+   gate|light|fan|switch`) does NOT fire.
+4. The cover is not already in the target state (`open` no-ops if
+   `open|opening`, `close` no-ops if `closed|closing`).
+
+On a match: explicit `open_cover` / `close_cover` (NEVER `toggle`),
+`ai_log` entry tagged `source: "fast_path"`, reply persisted to
+`chat_history`, SSE `reply` event emitted. Returns
+`{ reply, actions_taken, fast_path: true }`. On any error, falls through
+to the LLM path.
+
+Sub-500ms typical. Search `ai_log` for `fast_path=true` to count
+hit-rate.
 
 ---
 
@@ -177,7 +306,7 @@ Action tools are dispatched through `executeAIAction` with
 | `ai_memory` | DO storage | 100 FIFO | Confirmed long-term facts. Embedded into KNOWLEDGE on write. |
 | `ai_observations` | DO storage | 500 FIFO | Hypotheses-in-progress, prefixed with `[topic-tag]`. Embedded into KNOWLEDGE on write. `replaces` prefix-supersede. |
 | `ai_log` | DO storage `ai_log` (last 150 compacted) + in-memory ring (1000) | 1000 in-memory / 150 persisted | Unified timeline: `chat_user`, `chat_reply`, `action`, `action_verified`, `notification`, `decision`, `state_change`, `memory_saved`, `observation_saved`, `vector_*`, errors. Source-tagged. |
-| `chat_history` | DO storage | 10 user turns / 110 KB byte cap | OpenAI-format messages including `tool_calls` and `tool` results — preserves full tool-calling trace across turns. |
+| `chat_history:${channelKey}` | DO storage | 10 user turns / 110 KB byte cap per channel | OpenAI-format messages including `tool_calls` and `tool` results — preserves full tool-calling trace across turns. Per-channel: web / Twilio / each Twilio number gets its own slot via `sanitizeChannelKey(from)`. Tool-message `content` is truncated at 4 KB (`TOOL_CONTENT_CAP`) before persisting. |
 | `state_cache_snapshot` | DO storage | 127 KB cap | Hibernation snapshot for cold-start. Filtered to a domain allowlist (`SNAPSHOT_DOMAIN_ALLOWLIST`) + sensor whitelist + battery threshold. Logs `snapshot_oversize` and attempts the put even at over-cap (silent skip is worse than a put-exception we already catch). |
 
 Timeline timestamps are reformatted to **Central time** at prompt-injection
@@ -210,6 +339,7 @@ ISO 8601 for parseability.
 | `USE_VECTOR_ENTITY_RETRIEVAL` | `"true"` flips context build to vector retrieval. Falls back to flat-list `_buildFlatContextEntities` on failure. |
 | `MCP_AUTH_TOKEN` | (optional) Bearer for `/mcp` route. Cloudflare Access sits in front anyway. |
 | `CLIMATE_PREAMBLE_ENABLED` | (optional) Set to `"false"` to disable the climate-preamble injection on HVAC-related prompts. |
+| `ELEVENLABS_API_KEY` | (optional) `xi-api-key` for the `/transcribe` ElevenLabs Scribe STT proxy. Without it the chat UI's mic button returns an error; chat still works typed. |
 
 Cron triggers:
 
@@ -232,17 +362,39 @@ The `scheduled()` handler dispatches on `event.cron`.
 POST /chat (text/event-stream)
   → DO /ai_chat_stream
     → chatWithAgentNative
-       1. Load ai_memory, ai_observations, chat_history
-       2. _buildNativeContextEntities(message)
-            ├ retrieveKnowledge kinds=["entity"], k=15
+       0. SSE `started` event (iOS Safari heartbeat before model latency)
+       1. _tryDeterministicFastPath(message)  ── hit? log, persist
+          history, emit `reply`, return. No LLM call.
+       2. Load chat_history:${channelKey}
+       3. _buildNativeContextEntities(message, { entityTopK: 10 })
+            ├ retrieveKnowledge kinds=["entity"], k=10
             ├ retrieveKnowledge kinds=["memory"], k=5
             └ retrieveKnowledge kinds=["observation"], k=5
-       3. _buildClimatePreambleIfNeeded(message)
-       4. getNativeAgentSystemPrompt("chat", ctx)
-       5. runNativeToolLoop(messages, { maxIterations: 12, onEvent })
-            loop: callMiniMaxWithTools → dispatch tool_calls → push results
-       6. Save preserved tool-calling trace to chat_history (capped)
-       7. SSE events: thinking | tool_call | tool_result | reply | error
+       4. _buildClimatePreambleIfNeeded(message)
+       5. getChatSystemPrompt(ctx)         ── chat profile prompt
+       6. runNativeToolLoop(messages, {
+            maxIterations: 6,
+            allowedTools: NATIVE_AGENT_TOOLS.filter(CHAT_ALLOWED_TOOL_NAMES),
+            hallucinationGuard: true,
+            maxTokens: 4096,
+            onEvent
+          })
+            loop: callMiniMaxWithTools (45s timeout) → emit `reasoning`
+            from `reasoning_content` → dispatch tool_calls → push results
+       7. Save preserved tool-calling trace to chat_history:${channelKey}
+          (10 turns / 110 KB / 4 KB tool-content cap)
+       8. SSE events: started | thinking | reasoning | tool_call |
+          tool_result | reply | error
+```
+
+### Speech-to-text (`/transcribe`)
+
+```
+Browser (chat UI mic button) ──multipart audio──► /transcribe
+  → Worker forwards to api.elevenlabs.io/v1/speech-to-text
+    with model=scribe_v1, xi-api-key=env.ELEVENLABS_API_KEY
+  → returns { text, language_code }
+  → UI populates the input box and auto-sends
 ```
 
 ### Autonomous heartbeat (every alarm tick when events queued)
@@ -254,7 +406,12 @@ DO alarm() every 60s
        1. Load ai_memory, ai_observations
        2. _buildNativeContextEntities(eventQuery)
        3. getNativeAgentSystemPrompt("autonomous", ctx)
-       4. runNativeToolLoop(messages, { maxIterations: 8 })
+       4. runNativeToolLoop(messages, {
+            maxIterations: 8,
+            allowedTools: NATIVE_AGENT_TOOLS,        // full 9-tool set
+            hallucinationGuard: false,
+            maxTokens: 8192
+          })
        5. logAI("decision", ...)
 ```
 
@@ -266,6 +423,31 @@ DO alarm() every 60s
 HA event entity_registry_updated  → handleEntityRegistryUpdated  → reembedRefs({ kind: "entity", ... })
 HA event device_registry_updated  → handleDeviceRegistryUpdated  → reembedRefs({ kind: "device", ... }) AND ({ kind: "entity", refIds: [device's entities] })
 ```
+
+---
+
+## Chat UI surface
+
+`CHAT_HTML` is a single embedded HTML/CSS/JS template in
+[src/worker.js:666–1665](src/worker.js) served at `/chat`. Key
+client-side features:
+
+- **Hero mic button + auto-send.** 3-state machine
+  (idle / recording / processing). Records audio, POSTs to
+  `/transcribe`, populates the input box, and auto-submits the
+  transcribed text.
+- **Collapsible reasoning panel.** A `<details>` element above each
+  assistant bubble surfaces the `reasoning` SSE stream
+  (MiniMax `reasoning_content`). Collapsed by default.
+- **Per-message buttons.** Copy (toggles to "copied" briefly), retry
+  (visible only on error bubbles, re-sends the last user message),
+  clear (wipes the chat, restores welcome screen).
+- **iOS Safari "Load failed" auto-retry.** The chat fetcher catches
+  the iOS-specific `Load failed` error and silently retries the request
+  once before bubbling the error up.
+- **SSE event handling.** Listens for `started` (heartbeat),
+  `reasoning` (panel update), `thinking` / `tool_call` / `tool_result`
+  (live trace), `reply` (final), `error`.
 
 ---
 
@@ -331,37 +513,150 @@ counters in default queries.
   storage hard limit is 128 KiB. If you grow past 1500+ entities the
   snapshot will need a tighter allowlist or chunking.
 - **Iteration ceiling synthesis.** Watch `ai_log` for
-  `iteration_ceiling_synthesize` — should be rare. Frequent occurrence
-  means questions are routinely needing more than 12 tool calls and the
-  ceiling should bump again, OR specific tools are returning verbose
-  results that bloat per-iteration cost.
+  `iteration_ceiling_synthesize` — should be rare. Caps are now
+  chat=6, autonomous=8. Frequent chat-path occurrence means questions
+  are routinely needing more than 6 tool calls (consider bumping or
+  splitting), OR specific tools are returning verbose results that
+  bloat per-iteration cost.
+- **Fast-path observability.** Cover-command fast path tags
+  `ai_log` entries with `source: "fast_path"` and includes
+  `fast_path: true` on the chat-summary entry. To audit hit-rate, grep
+  for `fast_path=true` in chat completions vs total chats. To audit
+  for false positives (fast-path firing on a question or non-cover
+  intent), look for fast-path action entries that the user followed
+  with "no, I meant…" or "stop." If observed, tighten the disqualifier
+  regex in `_tryDeterministicFastPath`.
 - **Time-format leak.** Timeline timestamps are pre-formatted Central in
   the prompt. If user-facing replies still show UTC/Z-suffix it means
   MiniMax is copying timestamps from a tool result mid-loop (most
   likely `get_logbook`, which returns ISO+UTC). Rule 10 in OPERATIONAL
   REMINDERS forbids this; if it slips through, consider reformatting
   `get_logbook` results before pushing them back as tool messages.
+- **MiniMax timeout.** Each call has a 45s `AbortController` timeout.
+  Errors land in `ai_log` as `minimax_timeout`. Persistent timeouts
+  usually mean api.minimax.io is degraded — the legacy JSON-action
+  path is retained for rollback if needed (see
+  `USE_NATIVE_TOOL_LOOP="true"`).
+- **ElevenLabs cost.** Scribe is billed per audio minute. The mic
+  button records on hold/click only; runaway recordings can rack up
+  cost. There's no rate limit in the proxy today — relevant if usage
+  scales beyond the household.
 
 ---
 
 ## Recent significant changes
 
+Newest first. `git log --oneline` walks back further; anything older than
+9acf9bc is foundational and unlikely to need re-reading.
+
+- **(unreleased)** — `report_bug` native tool (chat-only) +
+  `/admin/bugs` GET / `/admin/bugs/clear` POST + `BUGS.md` workflow.
+  Natural-language bug capture: when the user explicitly tags an issue
+  ("that's a bug", "save to debug log"), MiniMax writes a structured
+  entry to DO `bugs` storage with auto-attached context (last 4 chat
+  turns, last 10 ai_log entries, cited entity states). Iteration ritual
+  pulls as Markdown, prepends to BUGS.md, clears the bucket.
+- **9842540** — fast-path bails on questions ("did you close the
+  basement?"). Trailing `?` and sentence-initial state verbs return null.
+- **9707c0f** — fast-path bare-noun (`basement` / `garage`) fallbacks
+  gated by a non-cover disqualifier (locks, vents, windows, side doors).
+- **73fbb91** — deterministic fast path for cover commands. Sub-500ms.
+  Always explicit `open_cover`/`close_cover`, never `toggle`. No-op guard
+  via `stateCache`. Falls through to LLM on any error.
+- **953aab6** — HOUSE_STATE_SNAPSHOT injection in both prompts +
+  TRUTHFULNESS / AUTONOMOUS ACTION SAFETY / CHAT ACTION CONFIRMATION
+  prompt sections. The snapshot is the ground-truth read on
+  security/climate/presence; TRUTHFULNESS forbids unverified state
+  claims; AUTONOMOUS ACTION SAFETY hard-bans covers/locks/alarms in the
+  unattended path.
+- **6a14a90** — `get_automation_config` native tool, UTC-timestamp
+  paraphrasing rule, vector_search retrieval discipline.
+- **f352e7f** — mic-label overflow CSS fix.
+- **1c272d4** — collapsible `<details>` reasoning panel + hero mic
+  button with auto-send.
+- **3a18a20** — fix: read reasoning from `reasoning_content` field, not
+  content tags.
+- **58861da** — render reasoning traces in chat UI.
+- **b75932c** — surface MiniMax `reasoning_content` as SSE
+  `reasoning` events.
+- **b2771f0** — fix: dispatch native tools through `executeNativeTool`
+  (Patch 2.4 regression).
+- **f07c88d** — `started` SSE event + iOS Safari "Load failed"
+  auto-retry.
+- **37e0a01** — chat/monitor system-prompt split + 45s MiniMax timeout
+  + SSE transport hardening.
+- **b4b2f08** — `CHAT_ALLOWED_TOOL_NAMES` export (chat profile excludes
+  `save_memory`, `save_observation`).
+- **d9e7c13** — clear / retry / copy buttons in chat UI.
+- **f095d78** — ElevenLabs Scribe STT integration + `/transcribe`
+  worker route + `ELEVENLABS_API_KEY` secret.
 - **9acf9bc** — multi-kind knowledge index (`ha-knowledge`) replacing
   entity-only `ha-entities`. `vector_search` MCP/native tool. Synthesis
   fallback on iteration ceiling. Time-format reformat-at-injection.
-  Snapshot serializer fix + cap bump. `get_logbook` description
-  hardened to require TZ offset. Legacy `VECTORIZE` binding,
-  `/admin/backfill-vectors` alias, `retrieveRelevantEntities` shim
-  removed. (1886 insertions / 263 deletions.)
+  `get_logbook` description hardened to require TZ offset. Legacy
+  `VECTORIZE` binding and `retrieveRelevantEntities` shim removed.
 - **32d45d9** — snapshot trim to agent-relevant domains.
 - **f4a4db0** — climate preamble for HVAC-related prompts.
 - **39dcf08** — ARCHITECTURE self-knowledge in MiniMax system prompt.
-- **f758509** — state freshness + gateway health surfaced to agent.
-- **a37b63e** — DO storage `state_cache_snapshot` for cold-start.
-- **da4a14f** — ping/pong watchdog + `statesReady` flag.
 
-`git log --oneline` walks back further. Anything older than these is
-foundational and unlikely to need re-reading.
+---
+
+## Iterating
+
+Bugs caught during use are captured in chat by saying things like
+"that's a bug" / "save to debug log" / "log this as broken." The chat
+agent calls the `report_bug` native tool, which writes a structured
+entry to DO `bugs` storage (FIFO 200) — description + last 4 chat
+turns + last 10 `ai_log` entries + current state of any cited entities.
+The bucket is server-side only; runtime never modifies code.
+
+At iteration time, fold the captured bugs into [BUGS.md](BUGS.md) and
+clear the bucket:
+
+```powershell
+# Pull as Markdown ready to prepend
+& "C:\Program Files (x86)\cloudflared\cloudflared.exe" access curl `
+  "https://ha-mcp-gateway.obert-john.workers.dev/admin/bugs?format=markdown" `
+  > "$env:TEMP\new-bugs.md"
+
+# Manually prepend $env:TEMP\new-bugs.md to BUGS.md (above the marker
+# comment), commit as `chore: import N bugs from runtime`.
+
+# Then clear the bucket so the next pull doesn't re-import.
+& "C:\Program Files (x86)\cloudflared\cloudflared.exe" access curl `
+  "https://ha-mcp-gateway.obert-john.workers.dev/admin/bugs/clear" -X POST
+```
+
+Triage one bug at a time. Most fixes are code changes (system-prompt
+edits, fast-path regex tweaks, automation YAML in HA, `QUICK FACTS`
+additions). After fixing, strike through the bug heading in BUGS.md
+(`## ~~#abc12345 — …~~`) and add `Fixed: <commit-sha>` under the body
+— don't delete entries, the history is the audit trail.
+
+The endpoints:
+
+- `GET /admin/bugs` — JSON dump of the bucket. `?format=markdown`
+  emits ready-to-prepend Markdown (newest first).
+- `POST /admin/bugs/clear` — empties the bucket. Idempotent. Run
+  AFTER you've imported entries to BUGS.md.
+
+DO-internal routes (called by the worker, not directly):
+`/bugs` (read), `/bugs_clear` (empty).
+
+`report_bug` itself:
+
+- **Trigger**: explicit recording verb (save, log, report, record,
+  note, capture, remember-as) + issue noun (bug, debug, problem,
+  broken, issue). Ambiguous cases prompt "Want me to log that as a
+  bug?"
+- **Auto-attached context**: `id` (FNV1a hex of description+timestamp,
+  8 chars), `timestamp_iso` + `timestamp_central`, `channel` (per-Twilio
+  number / web), `severity`, `description`, `entities`, `entity_states`
+  (cached), `last_chat_turns` (4), `last_log_entries` (10).
+- **Storage**: DO `bugs` key, FIFO 200.
+- **Logging**: `ai_log` entry `bug_reported` with id + truncated
+  description + severity + entities. Source `native_loop`.
+- **Profile**: chat-only — filtered out of autonomous's `allowedTools`.
 
 ---
 
@@ -369,19 +664,29 @@ foundational and unlikely to need re-reading.
 
 If iterating from here, the highest-leverage open items:
 
-1. **Chat/monitor split.** The current monolithic prompt+tools is what
-   makes the model occasionally flaky on direct questions. A split would
-   give the chat path a terse prompt, narrower tool list (no
-   memory/observation writes), and per-channel history; the autonomous
-   monitor keeps the heavier prompt for pattern inference. Plan this
-   from a fresh file when ready.
-2. **Tool-result reformatting.** `get_logbook` returns ISO+UTC strings
-   that MiniMax sometimes copies into replies. Reformat the `tool`
-   message content before pushing it back into the loop.
-3. **Per-channel chat history.** `chat_history` is a single shared list
-   across web / Twilio / Claude Desktop. Each `from` should arguably
-   have its own slot — trivially partitioned.
-4. **Service-Auth bypass for ops endpoints.** `/admin/rebuild-knowledge`
+1. **Tool-result reformatting.** `get_logbook` returns ISO+UTC strings
+   that MiniMax sometimes copies into replies despite Rule 10.
+   Reformat the `tool` message `content` to Central before pushing it
+   back into the loop — closes the leak at the source rather than
+   relying on the prompt rule.
+2. **Service-Auth bypass for ops endpoints.** `/admin/rebuild-knowledge`
    is gated by Cloudflare Access browser auth today. A service token
    with Access policy bypass for `/admin/*` would let ops scripts run
    without `cloudflared`.
+3. **Fast-path generalization.** The deterministic short-circuit is
+   currently cover-only. Lights and locks have similar shapes ("turn
+   off the kitchen lights", "lock the front door") and would benefit
+   from the same sub-500ms path — but each new domain needs its own
+   no-op guard, disqualifier list, and question-bail tests, so do them
+   one domain at a time with telemetry.
+4. **HOUSE_STATE_SNAPSHOT bytecount.** Today the snapshot is small
+   enough to inline, but every entity added to a `GROUPS` list pays
+   prompt-token rent every turn on both paths. If it grows beyond
+   ~60 lines, consider per-room trim driven by query intent.
+5. **Reasoning-trace persistence.** `reasoning_content` is currently
+   surface-only — emitted to SSE, displayed in the panel, then dropped.
+   Persisting it to `chat_history` would let the agent see its own
+   prior reasoning across turns; cost is byte-budget pressure.
+6. **ElevenLabs cost guardrails.** No rate limit on `/transcribe`
+   today. If usage scales beyond the household, add a per-channel
+   monthly budget cap or move to a self-hosted Whisper.
