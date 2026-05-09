@@ -720,12 +720,11 @@ const CHAT_HTML = `<!DOCTYPE html>
     flex-shrink: 0;
   }
 
-  .header-icon {
+  .header-icon-img {
     width: 36px; height: 36px;
-    background: var(--accent-dim);
-    border-radius: 10px;
-    display: flex; align-items: center; justify-content: center;
-    font-size: 18px;
+    border-radius: 8px;
+    object-fit: contain;
+    flex-shrink: 0;
   }
 
   .header-info h1 {
@@ -781,7 +780,23 @@ const CHAT_HTML = `<!DOCTYPE html>
     gap: 12px;
     scroll-behavior: smooth;
     -webkit-overflow-scrolling: touch;
+    position: relative;
   }
+
+  .messages::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background-image: url("https://brands.home-assistant.io/_/homeassistant/icon.png");
+    background-repeat: no-repeat;
+    background-position: center;
+    background-size: min(50%, 360px) auto;
+    opacity: 0.08;
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  .messages > * { position: relative; z-index: 1; }
 
   .messages::-webkit-scrollbar { width: 4px; }
   .messages::-webkit-scrollbar-track { background: transparent; }
@@ -931,21 +946,30 @@ const CHAT_HTML = `<!DOCTYPE html>
     gap: 5px;
   }
 
-  .typing.active { display: flex; }
+  .typing.active { display: flex; align-items: center; }
 
-  .typing span {
-    width: 6px; height: 6px;
-    background: var(--text-dim);
-    border-radius: 50%;
-    animation: bounce 1.2s infinite;
+  .minimax-mark {
+    width: 56px;
+    height: 32px;
+    display: block;
   }
 
-  .typing span:nth-child(2) { animation-delay: 0.15s; }
-  .typing span:nth-child(3) { animation-delay: 0.3s; }
+  .mm-bar {
+    transform-origin: center;
+    transform-box: fill-box;
+    animation: mmwave 1.1s ease-in-out infinite;
+  }
 
-  @keyframes bounce {
-    0%, 60%, 100% { transform: translateY(0); }
-    30% { transform: translateY(-6px); }
+  .mm-bar:nth-child(1) { animation-delay: 0s; }
+  .mm-bar:nth-child(2) { animation-delay: 0.08s; }
+  .mm-bar:nth-child(3) { animation-delay: 0.16s; }
+  .mm-bar:nth-child(4) { animation-delay: 0.24s; }
+  .mm-bar:nth-child(5) { animation-delay: 0.32s; }
+  .mm-bar:nth-child(6) { animation-delay: 0.40s; }
+
+  @keyframes mmwave {
+    0%, 100% { transform: scaleY(0.45); }
+    50%      { transform: scaleY(1);    }
   }
 
   /* ── Input ── */
@@ -1073,8 +1097,11 @@ const CHAT_HTML = `<!DOCTYPE html>
     padding: 40px 20px;
   }
 
-  .welcome-icon {
-    font-size: 40px;
+  .welcome-icon-img {
+    width: 64px;
+    height: 64px;
+    border-radius: 14px;
+    object-fit: contain;
     margin-bottom: 4px;
   }
 
@@ -1156,12 +1183,110 @@ const CHAT_HTML = `<!DOCTYPE html>
     padding: 6px 0 8px;
     opacity: 0.8;
   }
+
+  /* ── Input hint ── */
+  .input-hint {
+    font-size: 10px;
+    color: var(--text-dim);
+    text-align: center;
+    letter-spacing: 0.02em;
+  }
+
+  /* ── Bug-report composer ── */
+  .bug-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.6);
+    z-index: 100;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+    backdrop-filter: blur(2px);
+  }
+
+  .bug-overlay.active { display: flex; }
+
+  .bug-composer {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 20px;
+    width: 100%;
+    max-width: 480px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+  }
+
+  .bug-title { font-size: 16px; font-weight: 600; color: var(--text); }
+  .bug-sub   { font-size: 12px; color: var(--text-dim); line-height: 1.5; }
+
+  #bugInput {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--text);
+    padding: 10px 12px;
+    font-family: 'DM Sans', sans-serif;
+    font-size: 14px;
+    line-height: 1.45;
+    resize: vertical;
+    min-height: 90px;
+    outline: none;
+  }
+
+  #bugInput:focus     { border-color: var(--accent); }
+  #bugInput::placeholder { color: var(--text-dim); }
+
+  .bug-row {
+    display: flex;
+    gap: 8px;
+    justify-content: flex-end;
+  }
+
+  .bug-btn {
+    border-radius: 8px;
+    padding: 8px 14px;
+    font-family: inherit;
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    border: 1px solid var(--border);
+    transition: all 0.15s;
+  }
+
+  .bug-btn-secondary {
+    background: transparent;
+    color: var(--text-dim);
+  }
+
+  .bug-btn-secondary:hover {
+    color: var(--text);
+    border-color: var(--text-dim);
+  }
+
+  .bug-btn-primary {
+    background: var(--accent);
+    color: white;
+    border-color: var(--accent);
+  }
+
+  .bug-btn-primary:hover { filter: brightness(1.1); }
+
+  .bug-hint {
+    font-size: 11px;
+    color: var(--text-dim);
+    text-align: right;
+    margin-top: -4px;
+  }
 </style>
 </head>
 <body>
 <div class="app">
   <div class="header">
-    <div class="header-icon">🏠</div>
+    <img class="header-icon-img" src="https://brands.home-assistant.io/_/homeassistant/icon.png" alt="Home Assistant" />
     <div class="header-info">
       <h1>HA Agent</h1>
       <div class="header-status">
@@ -1170,29 +1295,44 @@ const CHAT_HTML = `<!DOCTYPE html>
       </div>
     </div>
     <div class="header-actions">
+      <button class="header-btn" onclick="openBugComposer()" title="Report a bug">🐛 Bug</button>
       <button class="header-btn" onclick="clearChat()">Clear</button>
     </div>
   </div>
 
   <div class="messages" id="messages">
     <div class="welcome" id="welcome">
-      <div class="welcome-icon">🏠</div>
+      <img class="welcome-icon-img" src="https://brands.home-assistant.io/_/homeassistant/icon.png" alt="" />
       <h2>HA Agent</h2>
       <p>Chat with your smart home. Ask about status, control devices, or just say hello.</p>
       <div class="quick-actions">
         <button class="quick-btn" onclick="sendQuick('What is the status of the house?')">House status</button>
-        <button class="quick-btn" onclick="sendQuick('Any alerts?')">Alerts</button>
-        <button class="quick-btn" onclick="sendQuick('What is the garage bay door status?')">Garage status</button>
-        <button class="quick-btn" onclick="sendQuick('What is the basement bay door status?')">Basement status</button>
-        <button class="quick-btn" onclick="sendQuick('Set the temperature to 72')">Set temperature</button>
-        <button class="quick-btn" onclick="sendQuick('Lock all the doors')">Lock doors</button>
-        <button class="quick-btn" onclick="sendQuick('Is the front door locked?')">Front lock status</button>
+        <button class="quick-btn" onclick="sendQuick('Open the main garage door')">Open main garage</button>
+        <button class="quick-btn" onclick="sendQuick('Close the main garage door')">Close main garage</button>
+        <button class="quick-btn" onclick="sendQuick('Open the basement bay door')">Open basement</button>
+        <button class="quick-btn" onclick="sendQuick('Close the basement bay door')">Close basement</button>
+        <button class="quick-btn" onclick="sendQuick(&quot;What's the climate? Inside temp, AC status, outside temp, today's high and low&quot;)">Climate</button>
       </div>
     </div>
   </div>
 
   <div class="typing" id="typing">
-    <span></span><span></span><span></span>
+    <svg class="minimax-mark" viewBox="0 0 64 40" aria-hidden="true">
+      <defs>
+        <linearGradient id="mmGrad" x1="0" x2="1" y1="0" y2="0">
+          <stop offset="0%" stop-color="#FF4D7E"/>
+          <stop offset="100%" stop-color="#FF6A2E"/>
+        </linearGradient>
+      </defs>
+      <g fill="url(#mmGrad)">
+        <rect class="mm-bar" x="2"  y="14" width="6" height="14" rx="3"/>
+        <rect class="mm-bar" x="12" y="6"  width="6" height="28" rx="3"/>
+        <rect class="mm-bar" x="22" y="2"  width="6" height="36" rx="3"/>
+        <rect class="mm-bar" x="32" y="10" width="6" height="22" rx="3"/>
+        <rect class="mm-bar" x="42" y="4"  width="6" height="32" rx="3"/>
+        <rect class="mm-bar" x="52" y="12" width="6" height="18" rx="3"/>
+      </g>
+    </svg>
   </div>
 
   <div class="input-area">
@@ -1214,6 +1354,20 @@ const CHAT_HTML = `<!DOCTYPE html>
         <span class="mic-label">Tap to speak</span>
       </button>
     </div>
+    <div class="input-hint">Enter to send · Shift+Enter for newline · 🎙 voice</div>
+  </div>
+</div>
+
+<div class="bug-overlay" id="bugOverlay" onclick="closeBugComposer(event)">
+  <div class="bug-composer" onclick="event.stopPropagation()">
+    <div class="bug-title">Report a bug</div>
+    <div class="bug-sub">Describe what went wrong. The agent logs your description plus the last few turns and the state of any cited entities.</div>
+    <textarea id="bugInput" placeholder="The agent did X but it should have done Y…" rows="4"></textarea>
+    <div class="bug-row">
+      <button class="bug-btn bug-btn-secondary" onclick="closeBugComposer()">Cancel</button>
+      <button class="bug-btn bug-btn-primary" onclick="submitBug()">Submit</button>
+    </div>
+    <div class="bug-hint">Esc to cancel · Cmd/Ctrl+Enter to submit</div>
   </div>
 </div>
 
@@ -1314,6 +1468,67 @@ const CHAT_HTML = `<!DOCTYPE html>
     return btn;
   }
 
+  function makeReportBtn(errorText) {
+    const btn = document.createElement('button');
+    btn.className = 'bubble-btn';
+    btn.type = 'button';
+    btn.innerHTML = '<span>🐛 report</span>';
+    btn.onclick = () => {
+      const ctx = [];
+      if (lastUserMessage) ctx.push('I sent: "' + lastUserMessage + '"');
+      if (errorText)       ctx.push('Got error: ' + errorText);
+      ctx.push('');
+      ctx.push('What went wrong: ');
+      openBugComposer(ctx.join('\\n'));
+    };
+    return btn;
+  }
+
+  // ── Bug-report composer ──
+  function openBugComposer(prefill) {
+    const overlay = document.getElementById('bugOverlay');
+    const input   = document.getElementById('bugInput');
+    if (typeof prefill === 'string') input.value = prefill;
+    overlay.classList.add('active');
+    setTimeout(() => {
+      input.focus();
+      // Cursor at end
+      const len = input.value.length;
+      input.setSelectionRange(len, len);
+    }, 30);
+  }
+
+  function closeBugComposer(e) {
+    // If invoked as a click handler on the overlay, ignore clicks bubbled from the composer.
+    if (e && e.type === 'click' && e.target !== e.currentTarget) return;
+    document.getElementById('bugOverlay').classList.remove('active');
+    document.getElementById('bugInput').value = '';
+  }
+
+  function submitBug() {
+    const bugInput = document.getElementById('bugInput');
+    const text = bugInput.value.trim();
+    if (!text) return;
+    closeBugComposer();
+    const message = 'Log as bug: ' + text;
+    const mainInput = document.getElementById('input');
+    mainInput.value = message;
+    send();
+  }
+
+  // Keyboard shortcuts inside the composer
+  document.addEventListener('keydown', (e) => {
+    const overlay = document.getElementById('bugOverlay');
+    if (!overlay || !overlay.classList.contains('active')) return;
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      closeBugComposer();
+    } else if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+      e.preventDefault();
+      submitBug();
+    }
+  });
+
   function addMsg(role, text, actions) {
     if (welcome) welcome.style.display = 'none';
 
@@ -1354,6 +1569,7 @@ const CHAT_HTML = `<!DOCTYPE html>
       acts.className = 'msg-actions';
       acts.style.opacity = '1'; // always visible on errors
       if (lastUserMessage) acts.appendChild(makeRetryBtn());
+      acts.appendChild(makeReportBtn(text));
       acts.appendChild(makeCopyBtn(text));
       div.appendChild(acts);
     } else if (role === 'user') {
