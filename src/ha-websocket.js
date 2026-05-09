@@ -24,7 +24,7 @@ function sanitizeChannelKey(from) {
   return cleaned.substring(0, 64) || "default";
 }
 
-export class HAWebSocket {
+export class HAWebSocketV2 {
   // Static config for prioritized entity context building
   static BURST_EXEMPT_DOMAINS = new Set(["climate", "lock", "cover", "alarm_control_panel"]);
   static CONTEXT_DOMAIN_PRIORITY = [
@@ -612,7 +612,7 @@ The update_automation tool currently returns 405 on this instance. Until that's 
 
   static climateTriggerMatches(text) {
     if (!text || typeof text !== "string") return false;
-    return HAWebSocket.CLIMATE_TRIGGER_RE.test(text);
+    return HAWebSocketV2.CLIMATE_TRIGGER_RE.test(text);
   }
 
   static _seasonDominant(monthIdx) {
@@ -710,7 +710,7 @@ The update_automation tool currently returns 405 on this instance. Until that's 
 
   async _buildClimatePreambleIfNeeded(triggerText, source = "chat") {
     if (this.env.CLIMATE_PREAMBLE_ENABLED === "false") return null;
-    if (!HAWebSocket.climateTriggerMatches(triggerText)) return null;
+    if (!HAWebSocketV2.climateTriggerMatches(triggerText)) return null;
     if (!this.connected || !this.authenticated) return null;
 
     const ok = await this._fetchClimateData();
@@ -722,13 +722,13 @@ The update_automation tool currently returns 405 on this instance. Until that's 
     const nowStr = nowDate.toLocaleString("en-US", { timeZone: "America/Chicago", timeZoneName: "short" });
     const monthFmt = new Intl.DateTimeFormat("en-US", { timeZone: "America/Chicago", month: "numeric" });
     const monthIdx = parseInt(monthFmt.format(nowDate), 10) - 1;
-    const seasonStr = HAWebSocket._seasonDominant(monthIdx);
+    const seasonStr = HAWebSocketV2._seasonDominant(monthIdx);
 
     const tempStr = (w.temperature !== null && w.temperature !== undefined) ? `${w.temperature}°F` : "n/a";
     const condStr = w.state || "unknown";
 
-    const hl = HAWebSocket._forecastHighLow(w.forecast);
-    const trend = HAWebSocket._forecastTrend(w.forecast);
+    const hl = HAWebSocketV2._forecastHighLow(w.forecast);
+    const trend = HAWebSocketV2._forecastTrend(w.forecast);
     const forecastLine = hl
       ? `Forecast next 12h: high ${hl.high}°F, low ${hl.low}°F, trend ${trend || "stable"}`
       : `Forecast next 12h: unavailable (no forecast attribute)`;
@@ -767,8 +767,8 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
 
     if (!this._logInitialized) {
       this.aiLog = await this.loadLogFromStorage();
-      if (this.aiLog.length > HAWebSocket.LOG_IN_MEMORY_CAP) {
-        this.aiLog = this.aiLog.slice(-HAWebSocket.LOG_IN_MEMORY_CAP);
+      if (this.aiLog.length > HAWebSocketV2.LOG_IN_MEMORY_CAP) {
+        this.aiLog = this.aiLog.slice(-HAWebSocketV2.LOG_IN_MEMORY_CAP);
       }
       this._logInitialized = true;
     }
@@ -990,9 +990,77 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
             kinds: body.kinds,
             domain: body.domain,
             area: body.area,
+            topic_tag: body.topic_tag || null,
+            min_score: typeof body.min_score === "number" ? body.min_score : null,
             includeNoisy: !!body.include_noisy
           });
           return new Response(JSON.stringify({ matches, count: matches.length }), { headers });
+        }
+
+        case "/index_stats_update": {
+          const body = await request.json();
+          const prev = await this.state.storage.get("index_stats_v1") || { runs: [] };
+          const runs = Array.isArray(prev.runs) ? prev.runs : [];
+          runs.push({
+            ts: body.ts || new Date().toISOString(),
+            force: !!body.force,
+            kinds_run: Array.isArray(body.kinds_run) ? body.kinds_run : [],
+            summary: body.summary || {}
+          });
+          while (runs.length > 20) runs.shift();
+          const next = { runs, latest: runs[runs.length - 1] || null };
+          await this.state.storage.put("index_stats_v1", next);
+          return new Response(JSON.stringify({ stored: true, runs: runs.length }), { headers });
+        }
+
+        case "/index_stats_read": {
+          const stats = await this.state.storage.get("index_stats_v1") || { runs: [], latest: null };
+          return new Response(JSON.stringify(stats), { headers });
+        }
+
+        case "/last_indexed_ids_write": {
+          // DO storage value cap is 128 KiB per key. A full force rebuild
+          // produces ~3500 vector ids at ~67 bytes each (≈235 KiB stringified)
+          // which won't fit in one key. Shard across multiple keys.
+          const body = await request.json();
+          const ids = Array.isArray(body.ids) ? body.ids : [];
+          const SHARD_SIZE = 1500; // ≈100 KiB worst case
+          const shardCount = ids.length === 0 ? 0 : Math.ceil(ids.length / SHARD_SIZE);
+          const prevMeta = await this.state.storage.get("last_indexed_ids_v1_meta") || { shards: 0 };
+          // Drop any stale shards from a prior larger run.
+          const deletes = [];
+          for (let i = 0; i < (prevMeta.shards || 0); i++) {
+            deletes.push("last_indexed_ids_v1_shard_" + i);
+          }
+          if (deletes.length > 0) await this.state.storage.delete(deletes);
+          const writes = {
+            last_indexed_ids_v1_meta: {
+              shards: shardCount,
+              count: ids.length,
+              ts: new Date().toISOString()
+            }
+          };
+          for (let i = 0; i < shardCount; i++) {
+            writes["last_indexed_ids_v1_shard_" + i] = ids.slice(i * SHARD_SIZE, (i + 1) * SHARD_SIZE);
+          }
+          await this.state.storage.put(writes);
+          return new Response(JSON.stringify({ stored: true, shards: shardCount, count: ids.length }), { headers });
+        }
+
+        case "/last_indexed_ids_read": {
+          const meta = await this.state.storage.get("last_indexed_ids_v1_meta") || { shards: 0, count: 0, ts: null };
+          if (!meta.shards) {
+            return new Response(JSON.stringify({ ids: [], ts: meta.ts || null }), { headers });
+          }
+          const keys = [];
+          for (let i = 0; i < meta.shards; i++) keys.push("last_indexed_ids_v1_shard_" + i);
+          const map = await this.state.storage.get(keys);
+          const ids = [];
+          for (let i = 0; i < meta.shards; i++) {
+            const shard = map.get("last_indexed_ids_v1_shard_" + i);
+            if (Array.isArray(shard)) ids.push(...shard);
+          }
+          return new Response(JSON.stringify({ ids, ts: meta.ts || null }), { headers });
         }
 
         case "/ai_log_append": {
@@ -1239,7 +1307,7 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
 
   checkBurst(entityId, event) {
     const domain = entityId.split(".")[0];
-    if (HAWebSocket.BURST_EXEMPT_DOMAINS.has(domain)) return event;
+    if (HAWebSocketV2.BURST_EXEMPT_DOMAINS.has(domain)) return event;
 
     const now = Date.now();
     const tracker = this.eventBurstTracker.get(entityId);
@@ -1374,25 +1442,25 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
     const out = [];
     for (const [id, s] of this.stateCache) {
       const domain = id.split(".")[0];
-      if (!HAWebSocket.SNAPSHOT_DOMAIN_ALLOWLIST.has(domain)) continue;
+      if (!HAWebSocketV2.SNAPSHOT_DOMAIN_ALLOWLIST.has(domain)) continue;
       if (s.state === "unavailable" || s.state === "unknown") continue;
       if (domain === "switch" && isNoisySwitch(id)) continue;
 
       const attrs = s.attributes || {};
       if (domain === "sensor") {
         const deviceClass = attrs.device_class || "";
-        if (HAWebSocket.SENSOR_WHITELIST.has(deviceClass)) {
+        if (HAWebSocketV2.SENSOR_WHITELIST.has(deviceClass)) {
           // keep
         } else if (deviceClass === "battery") {
           const pct = parseFloat(s.state);
-          if (isNaN(pct) || pct > HAWebSocket.BATTERY_LOW_THRESHOLD) continue;
+          if (isNaN(pct) || pct > HAWebSocketV2.BATTERY_LOW_THRESHOLD) continue;
         } else {
           continue;
         }
       }
 
       const filteredAttrs = {};
-      for (const k of HAWebSocket.SNAPSHOT_ATTR_ALLOWLIST) {
+      for (const k of HAWebSocketV2.SNAPSHOT_ATTR_ALLOWLIST) {
         if (attrs[k] !== undefined) {
           filteredAttrs[k] = attrs[k];
         }
@@ -1781,7 +1849,8 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
         kind: "memory", ref_id, friendly_name,
         domain: "memory", area: "",
         entity_category: "primary", is_noisy: false,
-        topic_tag: "", hash
+        topic_tag: "", hash,
+        created_at: new Date().toISOString()
       })
     };
   }
@@ -1800,7 +1869,8 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
         kind: "observation", ref_id, friendly_name,
         domain: "observation", area: "",
         entity_category: "primary", is_noisy: false,
-        topic_tag, hash
+        topic_tag, hash,
+        created_at: new Date().toISOString()
       })
     };
   }
@@ -1839,7 +1909,7 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
   // multi-kind queries; if the SDK rejects it for any reason, we fall back
   // to one query per kind and merge by score.
   // ========================================================================
-  async retrieveKnowledge({ query, k = 15, kinds = null, domain = null, area = null, includeNoisy = false } = {}) {
+  async retrieveKnowledge({ query, k = 15, kinds = null, domain = null, area = null, topic_tag = null, min_score = null, includeNoisy = false } = {}) {
     const start = Date.now();
     let safeKinds = null;
     if (Array.isArray(kinds) && kinds.length > 0) safeKinds = kinds;
@@ -1885,8 +1955,29 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
 
     const baseFilter = {};
     if (domain) baseFilter.domain = domain;
-    if (area) baseFilter.area = area;
+    // Area metadata is stored lowercase (see buildMetadata). Match-side
+    // normalization makes 'Master Bedroom' / 'master bedroom' / 'MBR' all
+    // resolve consistently against the index.
+    if (area) baseFilter.area = String(area).toLowerCase().trim();
+    // Topic tags are stored with surrounding brackets (extractTopicTag
+    // captures the literal "[...]" form). Vectorize filter is exact-match,
+    // so add brackets if the caller passed the bare form.
+    if (topic_tag) {
+      let t = String(topic_tag).trim();
+      if (!t.startsWith("[")) t = "[" + t;
+      if (!t.endsWith("]")) t = t + "]";
+      baseFilter.topic_tag = t;
+    }
     if (!includeNoisy) baseFilter.is_noisy = "false";
+
+    // Over-fetch slightly so dedup + score floor + decay still leave room
+    // for `k` real results. 2x with a 50 cap keeps Vectorize bills tame.
+    // When client-side topic_tag filtering is active (Vectorize-side filter
+    // is broken — see BUGS.md), bump to the cap so we don't miss matches
+    // that aren't in the top-2k semantic neighborhood.
+    const fetchK = topic_tag
+      ? 50
+      : Math.min(50, Math.max(k, k * 2));
 
     const buildFilter = (kindArr) => {
       const f = { ...baseFilter };
@@ -1896,7 +1987,7 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
     };
 
     const callQuery = async (filter) => {
-      const opts = { topK: k, returnMetadata: true };
+      const opts = { topK: fetchK, returnMetadata: true };
       if (Object.keys(filter).length > 0) opts.filter = filter;
       return await this.env.KNOWLEDGE.query(queryVector, opts);
     };
@@ -1917,7 +2008,7 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
             if (sub && Array.isArray(sub.matches)) merged.push(...sub.matches);
           }
           merged.sort((a, b) => (b.score || 0) - (a.score || 0));
-          queryRes = { matches: merged.slice(0, k) };
+          queryRes = { matches: merged.slice(0, fetchK) };
           this.logAI("vector_query", "fell back to per-kind merge ($in not supported)", {
             kinds: safeKinds, query_length: text.length
           }, "vector_query");
@@ -1936,10 +2027,18 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
     }
 
     const matches = (queryRes && Array.isArray(queryRes.matches)) ? queryRes.matches : [];
+    // Client-side topic_tag filter — Vectorize-side filtering is silently
+    // ignored on this index (see BUGS.md #vec-topic-tag-filter). Until that's
+    // fixed at the platform level by recreating the metadata index, we
+    // post-filter on the metadata returned with each match. Normalize by
+    // stripping surrounding brackets so 'foo' and '[foo]' both match.
+    const normalizeTag = (t) => String(t || "").trim().replace(/^\[|\]$/g, "").toLowerCase();
+    const wantTopicTag = topic_tag ? normalizeTag(topic_tag) : null;
     const out = [];
     for (const m of matches) {
       const md = m && m.metadata;
       if (!md || !md.kind || !md.ref_id) continue;
+      if (wantTopicTag && normalizeTag(md.topic_tag) !== wantTopicTag) continue;
       out.push({
         kind: md.kind,
         ref_id: md.ref_id,
@@ -1950,19 +2049,72 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
         entity_category: md.entity_category || "primary",
         is_noisy: md.is_noisy === "true",
         topic_tag: md.topic_tag || "",
+        created_at: md.created_at || "",
         score: typeof m.score === "number" ? m.score : null
       });
     }
 
-    this.logAI("vector_query", `returned ${out.length} matches for "${text.slice(0, 80)}"`, {
+    // Dedup by (kind, friendly_name) — keep highest score. Catches the
+    // multi-ref_id-per-document case (legacy slug + canonical numeric id)
+    // even after backfill cleanup, as a defensive layer.
+    const seen = new Map();
+    for (const r of out) {
+      const dkey = r.kind + ":" + (r.friendly_name || "").toLowerCase();
+      if (!dkey || !r.friendly_name) { seen.set(Symbol(), r); continue; }
+      const prev = seen.get(dkey);
+      if (!prev || (r.score || 0) > (prev.score || 0)) seen.set(dkey, r);
+    }
+    let final = Array.from(seen.values());
+
+    // Time-decay: older observations rank lower. Scoring is multiplicative
+    // and floored at 0.3 so very old observations still surface if they're
+    // the only relevant hit. 0.005/day → ~14% decay over 30 days.
+    const now = Date.now();
+    for (const r of final) {
+      if (r.kind === "observation" && r.created_at) {
+        const ts = Date.parse(r.created_at);
+        if (!isNaN(ts)) {
+          const days = (now - ts) / 86400000;
+          const decay = Math.max(0.3, 1 - 0.005 * Math.min(days, 60));
+          r.score = (r.score || 0) * decay;
+        }
+      }
+    }
+
+    // State-aware boost: entities currently active or recently changed get
+    // +0.05. Cap at 1.0 so it doesn't wreck downstream consumers expecting
+    // cosine bounds. stateCache may not exist on every DO — guard.
+    if (this.stateCache && typeof this.stateCache.get === "function") {
+      for (const r of final) {
+        if (r.kind !== "entity") continue;
+        const s = this.stateCache.get(r.ref_id);
+        if (!s) continue;
+        const lastChangedTs = s.last_changed ? Date.parse(s.last_changed) : 0;
+        const recent = lastChangedTs && (now - lastChangedTs) < 86400000;
+        const live = s.state && !["unavailable", "unknown", "off"].includes(s.state);
+        if (recent || live) r.score = Math.min(1, (r.score || 0) + 0.05);
+      }
+    }
+
+    // Min-score floor — defaults to 0.50 (empirically the noise floor for
+    // bge-large-en-v1.5 on this corpus). Caller can tighten with min_score.
+    const effectiveFloor = typeof min_score === "number" ? min_score : 0.50;
+    final = final.filter((r) => typeof r.score !== "number" || r.score >= effectiveFloor);
+
+    final.sort((a, b) => (b.score || 0) - (a.score || 0));
+    final = final.slice(0, k);
+
+    this.logAI("vector_query", `returned ${final.length} matches for "${text.slice(0, 80)}"`, {
       query_length: text.length,
-      count: out.length,
+      count: final.length,
+      raw_count: out.length,
       top_k: k,
       kinds: safeKinds,
-      domain, area, include_noisy: !!includeNoisy,
+      domain, area, topic_tag, min_score: effectiveFloor,
+      include_noisy: !!includeNoisy,
       duration_ms: Date.now() - start
     }, "vector_query");
-    return out;
+    return final;
   }
 
   // ========================================================================
@@ -2020,9 +2172,9 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
     try {
       const head = await this.state.storage.get("ai_log_head") || { current: 0 };
       const chunks = [];
-      const start = Math.max(0, head.current - (HAWebSocket.LOG_CHUNKS_MAX - 1));
+      const start = Math.max(0, head.current - (HAWebSocketV2.LOG_CHUNKS_MAX - 1));
       for (let gen = start; gen <= head.current; gen++) {
-        const slot = gen % HAWebSocket.LOG_CHUNKS_MAX;
+        const slot = gen % HAWebSocketV2.LOG_CHUNKS_MAX;
         const storedGen = await this.state.storage.get("ai_log_chunk_gen_" + slot);
         if (storedGen !== gen) continue;
         const chunk = await this.state.storage.get("ai_log_chunk_" + slot);
@@ -2063,7 +2215,7 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
 
   async clearPersistedLog() {
     await this.state.storage.delete("ai_log").catch(() => {});
-    for (let i = 0; i < HAWebSocket.LOG_CHUNKS_MAX; i++) {
+    for (let i = 0; i < HAWebSocketV2.LOG_CHUNKS_MAX; i++) {
       await this.state.storage.delete("ai_log_chunk_" + i).catch(() => {});
       await this.state.storage.delete("ai_log_chunk_gen_" + i).catch(() => {});
     }
@@ -2083,8 +2235,8 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
     const entry = { type, message, data, timestamp: new Date().toISOString() };
     if (source) entry.source = source;
     this.aiLog.push(entry);
-    if (this.aiLog.length > HAWebSocket.LOG_IN_MEMORY_CAP) {
-      this.aiLog.splice(0, this.aiLog.length - HAWebSocket.LOG_IN_MEMORY_CAP);
+    if (this.aiLog.length > HAWebSocketV2.LOG_IN_MEMORY_CAP) {
+      this.aiLog.splice(0, this.aiLog.length - HAWebSocketV2.LOG_IN_MEMORY_CAP);
     }
     console.log("AI LOG [" + type + (source ? "/" + source : "") + "]:", message);
     this.persistLog().catch((err) => console.error("logAI persist:", err.message));
@@ -2122,7 +2274,7 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
       const recentActions = persistentLog
         .filter(e => ["chat_user", "chat_reply", "action", "action_verified", "notification", "decision", "state_change", "memory_saved", "observation_saved"].includes(e.type))
         .slice(-150)
-        .map(e => `[${HAWebSocket._formatTimelineTimestamp(e.timestamp)}] ${e.type}: ${e.message}`)
+        .map(e => `[${HAWebSocketV2._formatTimelineTimestamp(e.timestamp)}] ${e.type}: ${e.message}`)
         .join("\n");
 
       const byDomain = new Map();
@@ -2132,7 +2284,7 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
         const deviceClass = attr.device_class || "";
         if (domain === "switch" && isNoisySwitch(id)) continue;
         if (state.state === "unavailable" || state.state === "unknown") continue;
-        if (HAWebSocket.CONTEXT_DOMAIN_PRIORITY.includes(domain)) {
+        if (HAWebSocketV2.CONTEXT_DOMAIN_PRIORITY.includes(domain)) {
           const entry = { entity_id: id, friendly_name: attr.friendly_name || id, state: state.state };
           if (domain === "climate") {
             entry.setpoint = attr.temperature ?? null;
@@ -2148,11 +2300,11 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
           byDomain.get(domain).push(entry);
         } else if (domain === "sensor") {
           let include = false;
-          if (HAWebSocket.SENSOR_WHITELIST.has(deviceClass)) {
+          if (HAWebSocketV2.SENSOR_WHITELIST.has(deviceClass)) {
             include = true;
           } else if (deviceClass === "battery") {
             const pct = parseFloat(state.state);
-            include = !isNaN(pct) && pct <= HAWebSocket.BATTERY_LOW_THRESHOLD;
+            include = !isNaN(pct) && pct <= HAWebSocketV2.BATTERY_LOW_THRESHOLD;
           }
           if (include) {
             const entry = { entity_id: id, friendly_name: attr.friendly_name || id, state: state.state, device_class: deviceClass };
@@ -2163,16 +2315,16 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
       }
       const contextEntities = [];
       let sensorCount = 0;
-      for (const domain of [...HAWebSocket.CONTEXT_DOMAIN_PRIORITY, "sensor"]) {
+      for (const domain of [...HAWebSocketV2.CONTEXT_DOMAIN_PRIORITY, "sensor"]) {
         for (const entry of (byDomain.get(domain) || [])) {
-          if (contextEntities.length >= HAWebSocket.MAX_CONTEXT_ENTITIES) break;
+          if (contextEntities.length >= HAWebSocketV2.MAX_CONTEXT_ENTITIES) break;
           if (domain === "sensor") {
-            if (sensorCount >= HAWebSocket.MAX_SENSOR_CONTEXT) break;
+            if (sensorCount >= HAWebSocketV2.MAX_SENSOR_CONTEXT) break;
             sensorCount++;
           }
           contextEntities.push(entry);
         }
-        if (contextEntities.length >= HAWebSocket.MAX_CONTEXT_ENTITIES) break;
+        if (contextEntities.length >= HAWebSocketV2.MAX_CONTEXT_ENTITIES) break;
       }
 
       const systemPrompt = `${this.getAgentContext()}
@@ -2247,7 +2399,7 @@ Analyze these events AND the unified timeline above. Decide what actions to take
       let responseText = response.choices?.[0]?.message?.content || response.response || "";
       if (!responseText) {
         const rawReasoning = response.choices?.[0]?.message?.reasoning || "";
-        const jsonFallback = HAWebSocket.extractFirstJSON(rawReasoning);
+        const jsonFallback = HAWebSocketV2.extractFirstJSON(rawReasoning);
         if (jsonFallback) {
           console.log("AI Agent: content null, salvaging JSON from reasoning field");
           responseText = jsonFallback;
@@ -2261,7 +2413,7 @@ Analyze these events AND the unified timeline above. Decide what actions to take
 
       let aiDecision;
       try {
-        const jsonMatch = HAWebSocket.extractFirstJSON(responseText);
+        const jsonMatch = HAWebSocketV2.extractFirstJSON(responseText);
         if (jsonMatch) {
           aiDecision = JSON.parse(jsonMatch);
         } else {
@@ -2318,7 +2470,7 @@ Analyze these events AND the unified timeline above. Decide what actions to take
     const timeline = persistentLog
       .filter((e) => ["chat_user", "chat_reply", "action", "action_verified", "notification", "decision", "state_change", "memory_saved", "observation_saved"].includes(e.type))
       .slice(-150)
-      .map((e) => `[${HAWebSocket._formatTimelineTimestamp(e.timestamp)}] ${e.type}: ${e.message}`)
+      .map((e) => `[${HAWebSocketV2._formatTimelineTimestamp(e.timestamp)}] ${e.type}: ${e.message}`)
       .join("\n");
 
     // ---- Entity context snapshot ----
@@ -2330,7 +2482,7 @@ Analyze these events AND the unified timeline above. Decide what actions to take
       if (domain === "switch" && isNoisySwitch(id)) continue;
       if (state.state === "unavailable" || state.state === "unknown") continue;
 
-      if (HAWebSocket.CONTEXT_DOMAIN_PRIORITY.includes(domain)) {
+      if (HAWebSocketV2.CONTEXT_DOMAIN_PRIORITY.includes(domain)) {
         const entry = { entity_id: id, friendly_name: attr.friendly_name || id, state: state.state };
         if (domain === "climate") {
           entry.setpoint = attr.temperature ?? null;
@@ -2352,11 +2504,11 @@ Analyze these events AND the unified timeline above. Decide what actions to take
         byDomain.get(domain).push(entry);
       } else if (domain === "sensor") {
         let include = false;
-        if (HAWebSocket.SENSOR_WHITELIST.has(deviceClass)) {
+        if (HAWebSocketV2.SENSOR_WHITELIST.has(deviceClass)) {
           include = true;
         } else if (deviceClass === "battery") {
           const pct = parseFloat(state.state);
-          include = !isNaN(pct) && pct <= HAWebSocket.BATTERY_LOW_THRESHOLD;
+          include = !isNaN(pct) && pct <= HAWebSocketV2.BATTERY_LOW_THRESHOLD;
         }
         if (include) {
           const entry = { entity_id: id, friendly_name: attr.friendly_name || id, state: state.state, device_class: deviceClass, unit: attr.unit_of_measurement || null };
@@ -2368,16 +2520,16 @@ Analyze these events AND the unified timeline above. Decide what actions to take
 
     const contextEntities = [];
     let sensorCount = 0;
-    for (const domain of [...HAWebSocket.CONTEXT_DOMAIN_PRIORITY, "sensor"]) {
+    for (const domain of [...HAWebSocketV2.CONTEXT_DOMAIN_PRIORITY, "sensor"]) {
       for (const entry of (byDomain.get(domain) || [])) {
-        if (contextEntities.length >= HAWebSocket.MAX_CONTEXT_ENTITIES) break;
+        if (contextEntities.length >= HAWebSocketV2.MAX_CONTEXT_ENTITIES) break;
         if (domain === "sensor") {
-          if (sensorCount >= HAWebSocket.MAX_SENSOR_CONTEXT) break;
+          if (sensorCount >= HAWebSocketV2.MAX_SENSOR_CONTEXT) break;
           sensorCount++;
         }
         contextEntities.push(entry);
       }
-      if (contextEntities.length >= HAWebSocket.MAX_CONTEXT_ENTITIES) break;
+      if (contextEntities.length >= HAWebSocketV2.MAX_CONTEXT_ENTITIES) break;
     }
 
     // ---- System prompt ----
@@ -2460,11 +2612,11 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
       let responseText = response.choices?.[0]?.message?.content || response.response || "";
       if (!responseText) {
         const rawReasoning = response.choices?.[0]?.message?.reasoning || "";
-        const jsonFallback = HAWebSocket.extractFirstJSON(rawReasoning);
+        const jsonFallback = HAWebSocketV2.extractFirstJSON(rawReasoning);
         if (jsonFallback) responseText = jsonFallback;
       }
       let parsed = null;
-      const jsonMatch = HAWebSocket.extractFirstJSON(responseText);
+      const jsonMatch = HAWebSocketV2.extractFirstJSON(responseText);
       if (jsonMatch) {
         try {
           parsed = JSON.parse(jsonMatch);
@@ -2681,9 +2833,26 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
         const memory = await this.state.storage.get("ai_memory") || [];
         memory.push(action.memory);
         // Capture FIFO-evicted entries so we can clean up their vectors.
+        // Memories prefixed with "PINNED:" are exempt from eviction —
+        // architectural facts, presence rules, naming conventions, etc.
+        // shouldn't be lost to rapid-fire arrival/departure churn.
         let evicted = [];
         if (memory.length > 100) {
-          evicted = memory.splice(0, memory.length - 100);
+          const overage = memory.length - 100;
+          const evictIndices = [];
+          for (let i = 0; i < memory.length && evictIndices.length < overage; i++) {
+            if (typeof memory[i] === "string" && memory[i].startsWith("PINNED:")) continue;
+            evictIndices.push(i);
+          }
+          // If everything is pinned (>100 pinned memories), grow the list —
+          // don't silently drop pinned content.
+          if (evictIndices.length === overage) {
+            const evictSet = new Set(evictIndices);
+            evicted = memory.filter((_, i) => evictSet.has(i));
+            const remaining = memory.filter((_, i) => !evictSet.has(i));
+            memory.length = 0;
+            memory.push(...remaining);
+          }
         }
         await this.state.storage.put("ai_memory", memory);
         this.logAI("memory_saved", action.memory, {}, source);
@@ -2937,6 +3106,8 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
             kinds: Array.isArray(args.kinds) ? args.kinds : (typeof args.kinds === "string" ? [args.kinds] : null),
             domain: args.domain || null,
             area: args.area || null,
+            topic_tag: args.topic_tag || null,
+            min_score: typeof args.min_score === "number" ? args.min_score : null,
             includeNoisy: !!args.include_noisy
           });
           return { matches, count: matches.length };
@@ -3266,10 +3437,21 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
 
     if (useVector && typeof query === "string" && query.trim().length > 0) {
       try {
-        const [entityMatches, memoryMatches, observationMatches] = await Promise.all([
+        // Cross-kind retrieval: in addition to entities/memories/observations,
+        // pull a few automations/devices/services so action queries ("turn on
+        // the dock light", "lock the front door") have the relevant
+        // automation + device pre-injected and the agent doesn't need a
+        // separate vector_search round-trip.
+        const [
+          entityMatches, memoryMatches, observationMatches,
+          automationMatches, deviceMatches, serviceMatches
+        ] = await Promise.all([
           this.retrieveKnowledge({ query, k: entityTopK, kinds: ["entity"], includeNoisy: false }),
           this.retrieveKnowledge({ query, k: 5, kinds: ["memory"], includeNoisy: false }),
-          this.retrieveKnowledge({ query, k: 5, kinds: ["observation"], includeNoisy: false })
+          this.retrieveKnowledge({ query, k: 5, kinds: ["observation"], includeNoisy: false }),
+          this.retrieveKnowledge({ query, k: 3, kinds: ["automation"], includeNoisy: false }),
+          this.retrieveKnowledge({ query, k: 2, kinds: ["device"], includeNoisy: false }),
+          this.retrieveKnowledge({ query, k: 2, kinds: ["service"], includeNoisy: false })
         ]);
         if (Array.isArray(entityMatches) && entityMatches.length > 0) {
           const enriched = entityMatches.map((m) => {
@@ -3310,6 +3492,9 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
             entities: enriched,
             memories: Array.isArray(memoryMatches) ? memoryMatches : [],
             observations: Array.isArray(observationMatches) ? observationMatches : [],
+            automations: Array.isArray(automationMatches) ? automationMatches : [],
+            devices: Array.isArray(deviceMatches) ? deviceMatches : [],
+            services: Array.isArray(serviceMatches) ? serviceMatches : [],
             vectorRetrieved: true
           };
         }
@@ -3324,6 +3509,9 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
       entities: this._buildFlatContextEntities(),
       memories: [],
       observations: [],
+      automations: [],
+      devices: [],
+      services: [],
       vectorRetrieved: false
     };
   }
@@ -3337,7 +3525,7 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
       if (domain === "switch" && isNoisySwitch(id)) continue;
       if (state.state === "unavailable" || state.state === "unknown") continue;
 
-      if (HAWebSocket.CONTEXT_DOMAIN_PRIORITY.includes(domain)) {
+      if (HAWebSocketV2.CONTEXT_DOMAIN_PRIORITY.includes(domain)) {
         const entry = { entity_id: id, friendly_name: attr.friendly_name || id, state: state.state };
         if (domain === "climate") {
           entry.setpoint = attr.temperature ?? null;
@@ -3359,11 +3547,11 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
         byDomain.get(domain).push(entry);
       } else if (domain === "sensor") {
         let include = false;
-        if (HAWebSocket.SENSOR_WHITELIST.has(deviceClass)) {
+        if (HAWebSocketV2.SENSOR_WHITELIST.has(deviceClass)) {
           include = true;
         } else if (deviceClass === "battery") {
           const pct = parseFloat(state.state);
-          include = !isNaN(pct) && pct <= HAWebSocket.BATTERY_LOW_THRESHOLD;
+          include = !isNaN(pct) && pct <= HAWebSocketV2.BATTERY_LOW_THRESHOLD;
         }
         if (include) {
           const entry = { entity_id: id, friendly_name: attr.friendly_name || id, state: state.state, device_class: deviceClass, unit: attr.unit_of_measurement || null };
@@ -3375,16 +3563,16 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
 
     const contextEntities = [];
     let sensorCount = 0;
-    for (const domain of [...HAWebSocket.CONTEXT_DOMAIN_PRIORITY, "sensor"]) {
+    for (const domain of [...HAWebSocketV2.CONTEXT_DOMAIN_PRIORITY, "sensor"]) {
       for (const entry of (byDomain.get(domain) || [])) {
-        if (contextEntities.length >= HAWebSocket.MAX_CONTEXT_ENTITIES) break;
+        if (contextEntities.length >= HAWebSocketV2.MAX_CONTEXT_ENTITIES) break;
         if (domain === "sensor") {
-          if (sensorCount >= HAWebSocket.MAX_SENSOR_CONTEXT) break;
+          if (sensorCount >= HAWebSocketV2.MAX_SENSOR_CONTEXT) break;
           sensorCount++;
         }
         contextEntities.push(entry);
       }
-      if (contextEntities.length >= HAWebSocket.MAX_CONTEXT_ENTITIES) break;
+      if (contextEntities.length >= HAWebSocketV2.MAX_CONTEXT_ENTITIES) break;
     }
     return contextEntities;
   }
@@ -3394,7 +3582,7 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
     return this.aiLog
       .filter((e) => relevantTypes.includes(e.type))
       .slice(-150)
-      .map((e) => `[${HAWebSocket._formatTimelineTimestamp(e.timestamp)}] ${e.type}${e.source ? "/" + e.source : ""}: ${e.message}`)
+      .map((e) => `[${HAWebSocketV2._formatTimelineTimestamp(e.timestamp)}] ${e.type}${e.source ? "/" + e.source : ""}: ${e.message}`)
       .join("\n");
   }
 
@@ -3409,6 +3597,9 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
       from = "default",
       semanticMemories = [],
       semanticObservations = [],
+      semanticAutomations = [],
+      semanticDevices = [],
+      semanticServices = [],
       climatePreamble = ""
     } = ctx;
     const snapshot = this._buildHouseStateSnapshot();
@@ -3435,7 +3626,14 @@ TOOLS — attached to this request. Invoke them directly. The turn you emit NO t
 - get_state — single entity's full state when the snapshot below lacks detail.
 - get_logbook — historical entries. ALWAYS pass tz_offset="-05:00" for Central time.
 - render_template — Jinja2 in HA context (area_name, device_attr, expand, state_attr).
-- vector_search — semantic search over the unified knowledge index (entities, automations, scripts, scenes, areas, devices, HA services, your memories, your observations). The pre-injected context below is a small top-K slice (10 entities) — vector_search covers the FULL knowledge base. CALL IT AGGRESSIVELY when the user references something not in the snapshot, when entity names are ambiguous, when you're unsure if a device exists, or when a question spans entities you can't see in context. Default to searching rather than guessing. Restrict scope with the kinds array (e.g., kinds=["service"] to discover an HA service, kinds=["memory","observation"] to find prior notes on a topic, kinds=["entity"], domain="light", area="kitchen" to narrow by metadata).
+- vector_search — semantic search over the unified knowledge index (entities, automations, scripts, scenes, areas, devices, HA services, your memories, your observations). The pre-injected context below is a small top-K slice — vector_search covers the FULL knowledge base. Call it aggressively when something isn't in the snapshot. ALWAYS pass kinds=[…] — never call without it. Notes:
+   * area filter is case-insensitive but must match an HA area name. Master bedroom is "MBR" (NOT "Master Bedroom"). Master bathroom is "Master Bathroom". Run list_areas if uncertain.
+   * For battery / mesh / signal / LQI / RSSI / diagnostic queries pass include_noisy: true. Battery sensors specifically remain visible without that flag (device_class: battery is exempted), but other diagnostics are filtered.
+   * For "who's home" / "where is X" / live-presence queries: ALWAYS get_state on person.john and person.sabrina. Vector retrieval surfaces history, not live state.
+   * domain filter is meaningful only when kinds includes "entity". Other kinds: returns nothing.
+   * topic_tag filter retrieves observations under a specific bracketed prefix (e.g., topic_tag: "lock-jam-pattern").
+   * min_score defaults to 0.50; pass min_score: 0.6 to tighten.
+   * Observations time-decay automatically; active entities get a small live-state boost.
 - get_automation_config — read the full config body of an automation (triggers, conditions, actions, mode). Use for automation debugging. Prefer entity_id like 'automation.front_porch_lights'. Do not use render_template as a substitute.
 - report_bug — capture a user-flagged issue to the debug log for review at the next iteration session. See BUG REPORTS section below for trigger rules.
 
@@ -3528,6 +3726,15 @@ ${relevantMemories.map((m) => "- [score " + m.score.toFixed(2) + "] " + (m.frien
 ` : ""}${relevantObservations.length > 0 ? `RELEVANT OBSERVATIONS (semantic top-matches for this turn):
 ${relevantObservations.map((o) => "- [score " + o.score.toFixed(2) + "] " + (o.friendly_name || "")).join("\n")}
 
+` : ""}${semanticAutomations.length > 0 ? `RELEVANT AUTOMATIONS (semantic top-matches — use as candidates for action queries):
+${semanticAutomations.map((a) => "- [score " + (typeof a.score === "number" ? a.score.toFixed(2) : "?") + "] " + (a.friendly_name || a.ref_id || "")).join("\n")}
+
+` : ""}${semanticDevices.length > 0 ? `RELEVANT DEVICES (semantic top-matches):
+${semanticDevices.map((d) => "- [score " + (typeof d.score === "number" ? d.score.toFixed(2) : "?") + "] " + (d.friendly_name || d.ref_id || "")).join("\n")}
+
+` : ""}${semanticServices.length > 0 ? `RELEVANT HA SERVICES (semantic top-matches — call_service candidates):
+${semanticServices.map((s) => "- [score " + (typeof s.score === "number" ? s.score.toFixed(2) : "?") + "] " + (s.friendly_name || s.ref_id || "")).join("\n")}
+
 ` : ""}RELEVANT ENTITIES (${contextEntities.length}, semantic top-K from live state cache) — an entity not here may still exist; use vector_search or get_state to probe. state=null means HA hasn't reported a value. Don't invent entity_ids or fabricate timestamps for events you didn't witness.
 
 ${JSON.stringify(contextEntities, null, 1)}
@@ -3555,7 +3762,10 @@ TRUTHFULNESS — STATE CLAIMS:
       from = "default",
       vectorRetrieved = false,
       semanticMemories = [],
-      semanticObservations = []
+      semanticObservations = [],
+      semanticAutomations = [],
+      semanticDevices = [],
+      semanticServices = []
     } = ctx;
 
     const snapshot = this._buildHouseStateSnapshot();
@@ -3596,7 +3806,14 @@ TOOLS — they're attached to this request. Invoke them directly. No JSON-with-a
 - get_state — look up a single entity's full state when the pre-injected context block doesn't have the detail you need.
 - get_logbook — pull logbook entries for an entity or time window. Useful for debugging ("did the automation fire?", "who closed the garage?").
 - render_template — run a Jinja2 template in HA's context. Use for cross-entity queries or HA helpers (area_name, device_attr, expand, state_attr) that the context block can't answer.
-- vector_search — semantic search over the unified knowledge index (entities, automations, scripts, scenes, areas, devices, HA services, your memories, your observations). The pre-injected context below is a small top-K slice (10 entities) — vector_search covers the FULL knowledge base. CALL IT AGGRESSIVELY when the user references something not in the snapshot, when entity names are ambiguous, when you're unsure if a device exists, or when a question spans entities you can't see in context. Default to searching rather than guessing. Restrict scope with the kinds array (e.g., kinds=["service"] to discover an HA service, kinds=["memory","observation"] to find prior notes on a topic, kinds=["entity"], domain="light", area="kitchen" to narrow by metadata).
+- vector_search — semantic search over the unified knowledge index. The pre-injected context is a small top-K slice — vector_search covers the FULL set. Call aggressively. ALWAYS pass kinds=[…]. Notes:
+   * area filter is case-insensitive but must match an HA area name. Master bedroom is "MBR" (NOT "Master Bedroom"). Master bathroom is "Master Bathroom".
+   * For battery / mesh / signal / LQI / RSSI / diagnostic queries, pass include_noisy: true. Battery sensors specifically remain visible without it (device_class: battery is exempted).
+   * For "who's home" / "where is X" / live-presence queries, ALWAYS get_state on person.john and person.sabrina. Vector retrieval surfaces history, not live state.
+   * domain filter is meaningful only when kinds includes "entity".
+   * topic_tag retrieves observations under a specific bracketed prefix.
+   * min_score defaults to 0.50; pass 0.6 to tighten.
+   * Observations time-decay; active entities get a small live-state boost.
 - get_automation_config — read the full config body of an automation (triggers, conditions, actions, mode). Use for automation debugging. Prefer entity_id like 'automation.front_porch_lights'. Do not use render_template as a substitute.
 
 COMMITMENT RULE: If your final reply says you did something ("opening the garage", "turning off the lights"), you MUST have invoked the corresponding tool. Saying you did something you didn't do is a lie and unacceptable. Your timeline is the record.
@@ -3619,7 +3836,16 @@ ${semanticMemories.map((m) => "- [memory · score " + (typeof m.score === "numbe
 ${semanticObservations.map((o) => "- [observation · score " + (typeof o.score === "number" ? o.score.toFixed(2) : "?") + "] " + (o.friendly_name || "")).join("\n")}
 
 `
-  : ""}${vectorRetrieved
+  : ""}${vectorRetrieved && semanticAutomations.length > 0 ? `RELEVANT AUTOMATIONS (semantic top-matches — candidate triggers for action queries):
+${semanticAutomations.map((a) => "- [score " + (typeof a.score === "number" ? a.score.toFixed(2) : "?") + "] " + (a.friendly_name || a.ref_id || "")).join("\n")}
+
+` : ""}${vectorRetrieved && semanticDevices.length > 0 ? `RELEVANT DEVICES (semantic top-matches):
+${semanticDevices.map((d) => "- [score " + (typeof d.score === "number" ? d.score.toFixed(2) : "?") + "] " + (d.friendly_name || d.ref_id || "")).join("\n")}
+
+` : ""}${vectorRetrieved && semanticServices.length > 0 ? `RELEVANT HA SERVICES (semantic top-matches — call_service candidates):
+${semanticServices.map((s) => "- [score " + (typeof s.score === "number" ? s.score.toFixed(2) : "?") + "] " + (s.friendly_name || s.ref_id || "")).join("\n")}
+
+` : ""}${vectorRetrieved
   ? `RELEVANT ENTITIES (${contextEntities.length}, semantic-search top-k for this turn) — these were selected by similarity to the current query/events from the FULL set of HA entities, so an entity not in this block may still exist; use get_state to probe specific entity_ids you suspect, or use vector_search with kinds=["entity"] for a wider sweep. Each entry includes the live state from the WebSocket-maintained cache (state=null means HA hasn't reported a value). Higher score = more relevant. Don't invent entity_ids or timestamps for events you didn't witness.`
   : `CURRENT STATE OF ENTITIES (${contextEntities.length}) — your live, authoritative snapshot from a maintained WebSocket to HA. If an entity is here, its state is current. Do not say "I don't have visibility" or reason about refresh lag — that's a layer beneath you that you can't see. If an entity is NOT here, say so honestly or use get_state to probe. Never invent entity IDs or fabricate timestamps for events you didn't witness.`}
 
@@ -3701,6 +3927,9 @@ If you are ever unsure whether an action falls in the "never autonomous" list, d
       entities: contextEntities,
       memories: semanticMemories,
       observations: semanticObservations,
+      automations: semanticAutomations,
+      devices: semanticDevices,
+      services: semanticServices,
       vectorRetrieved
     } = await this._buildNativeContextEntities(eventQuery);
     const timeline = this._buildNativeTimeline();
@@ -3712,7 +3941,10 @@ If you are ever unsure whether an action falls in the "never autonomous" list, d
       contextEntities,
       vectorRetrieved,
       semanticMemories,
-      semanticObservations
+      semanticObservations,
+      semanticAutomations,
+      semanticDevices,
+      semanticServices
     });
 
     const lastObservation = observations.length > 0 ? observations[observations.length - 1] : "";
@@ -3830,7 +4062,10 @@ Evaluate these events against the timeline above. Take action only if warranted.
     const {
       entities: contextEntities,
       memories: semanticMemories,
-      observations: semanticObservations
+      observations: semanticObservations,
+      automations: semanticAutomations,
+      devices: semanticDevices,
+      services: semanticServices
     } = await this._buildNativeContextEntities(message, { entityTopK: 10 });
 
     const climatePreamble = await this._buildClimatePreambleIfNeeded(message, "chat_native");
@@ -3840,6 +4075,9 @@ Evaluate these events against the timeline above. Take action only if warranted.
       contextEntities,
       semanticMemories,
       semanticObservations,
+      semanticAutomations,
+      semanticDevices,
+      semanticServices,
       from,
       climatePreamble: climatePreamble || ""
     });

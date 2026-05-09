@@ -143,7 +143,11 @@ export function isNoisyEntity(entity, state) {
   if (entity.hidden_by) return true;
 
   const cat = entity.entity_category;
-  if (cat === "diagnostic" || cat === "config") return true;
+  if (cat === "config") return true;
+  if (cat === "diagnostic") {
+    const dc = (state && state.attributes && state.attributes.device_class) || "";
+    if (dc !== "battery") return true;
+  }
 
   if (NOISY_DOMAINS.has(domain)) return true;
 
@@ -207,15 +211,18 @@ const cap2k = (s) => (s.length > 2000 ? s.slice(0, 2000) : s);
 
 export function buildEntityEmbedText(d) {
   const aliases = Array.isArray(d.aliases) ? d.aliases.join(", ") : "";
-  const text =
-    trunc(d.friendly_name, 200) +
-    " | " + trunc(d.entity_id, 100) +
-    " | area: " + trunc(d.area, 100) +
-    " | device: " + trunc(d.device_name, 200) +
-    " | domain: " + trunc(d.domain, 50) +
-    " | device_class: " + trunc(d.device_class, 50) +
-    " | aliases: " + trunc(aliases, 300);
-  return cap2k(text);
+  const parts = [
+    trunc(d.friendly_name, 200),
+    trunc(d.entity_id, 100)
+  ];
+  if (d.area) parts.push("in " + trunc(d.area, 100));
+  if (d.device_name) parts.push("device: " + trunc(d.device_name, 200));
+  if (d.manufacturer) parts.push("by " + trunc(d.manufacturer, 100));
+  if (d.model) parts.push("model " + trunc(d.model, 100));
+  if (d.domain) parts.push("domain: " + trunc(d.domain, 50));
+  if (d.device_class) parts.push("class: " + trunc(d.device_class, 50));
+  if (aliases) parts.push("aliases: " + trunc(aliases, 300));
+  return cap2k(parts.join(" | "));
 }
 
 export function buildAutomationEmbedText(d) {
@@ -374,6 +381,7 @@ export function buildMetadata({
   is_noisy = false,
   topic_tag = "",
   hash,
+  created_at = null,
   extra = null
 }) {
   const md = {
@@ -381,12 +389,13 @@ export function buildMetadata({
     ref_id: String(ref_id || ""),
     friendly_name: String(friendly_name || ""),
     domain: String(domain || kind),
-    area: String(area || ""),
+    area: String(area || "").toLowerCase(),
     entity_category: String(entity_category || "primary"),
     is_noisy: is_noisy ? "true" : "false",
     topic_tag: String(topic_tag || ""),
     hash: String(hash || "")
   };
+  if (created_at) md.created_at = String(created_at);
   if (extra && typeof extra === "object") {
     for (const [k, v] of Object.entries(extra)) {
       if (md[k] === undefined && v !== undefined && v !== null) {

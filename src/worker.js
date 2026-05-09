@@ -1,4 +1,4 @@
-import { HAWebSocket } from "./ha-websocket.js";
+import { HAWebSocketV2 } from "./ha-websocket.js";
 import {
   ALL_KINDS,
   fnv1aHex,
@@ -2648,6 +2648,8 @@ async function handleTool(env, name, args) {
         kinds: Array.isArray(args.kinds) ? args.kinds : null,
         domain: args.domain || null,
         area: args.area || null,
+        topic_tag: args.topic_tag || null,
+        min_score: typeof args.min_score === "number" ? args.min_score : null,
         top_k: args.top_k,
         include_noisy: !!args.include_noisy
       };
@@ -2804,13 +2806,29 @@ async function buildEntityDocs(env) {
     for (const s of states) if (s && s.entity_id) stateById.set(s.entity_id, s);
   }
 
+  const deviceMetaById = new Map();
+  if (Array.isArray(deviceRegistry)) {
+    for (const d of deviceRegistry) {
+      if (d && d.id) deviceMetaById.set(d.id, {
+        name: d.name_by_user || d.name || "",
+        manufacturer: d.manufacturer || "",
+        model: d.model || ""
+      });
+    }
+  }
+
   const docs = [];
   for (const e of entityRegistry) {
     const entity_id = e && e.entity_id;
     if (!entity_id) continue;
     const domain = entity_id.split(".")[0] || "";
+    // Skip automation/script/scene entities — they're already covered by their
+    // dedicated kinds. Indexing them here was producing 2-3 vectors per
+    // automation (see /admin/cleanup-stale-vectors for the legacy cleanup).
+    if (domain === "automation" || domain === "script" || domain === "scene") continue;
     const state = stateById.get(entity_id);
     const dev = e.device_id ? deviceById.get(e.device_id) : null;
+    const devMeta = e.device_id ? deviceMetaById.get(e.device_id) : null;
     const areaId = e.area_id || (dev && dev.area_id) || null;
     const area = areaId ? (areaById.get(areaId) || "") : "";
     const friendly_name =
@@ -2819,10 +2837,13 @@ async function buildEntityDocs(env) {
     const device_class =
       (state && state.attributes && state.attributes.device_class) || "";
     const device_name = (dev && dev.name) || "";
+    const manufacturer = (devMeta && devMeta.manufacturer) || "";
+    const model = (devMeta && devMeta.model) || "";
     const aliases = Array.isArray(e.aliases) ? e.aliases : [];
 
     const text = buildEntityEmbedText({
-      friendly_name, entity_id, area, device_name, domain, device_class, aliases
+      friendly_name, entity_id, area, device_name, manufacturer, model,
+      domain, device_class, aliases
     });
     const hash = fnv1aHex(text);
     const ref_id = entity_id;
@@ -3316,12 +3337,48 @@ async function backfillKnowledge(env, { force = false, kinds = null } = {}) {
     for (const d of docs) allDocs.push(d);
   }
 
+  // Friendly-name collision guard. Restricted to kinds where the friendly
+  // name is the canonical identifier and should be unique within HA —
+  // automation aliases, script aliases, scene names, area names. Entities
+  // and devices LEGITIMATELY share friendly_names (e.g., 4 Z-Wave locks all
+  // named "Home Connect 620 Connected Smart Lock" until John overrides them
+  // in HA), so we don't dedup those by friendly_name. For entity/device
+  // kinds, vector_id uniqueness is the guard — different entity_ids produce
+  // different vector_ids and can't collide on upsert.
+  const FRIENDLY_NAME_DEDUP_KINDS = new Set(["automation", "script", "scene", "area"]);
+  const seenFnKeys = new Set();
+  const seenVectorIds = new Set();
+  const collisionsByKind = {};
+  const dedupedDocs = [];
+  for (const d of allDocs) {
+    // vector_id-based dedup runs for ALL kinds — drops accidental duplicates
+    // within a single buildKindDocs call (would overwrite each other on
+    // upsert anyway, but counting them here surfaces the regression).
+    if (seenVectorIds.has(d.vector_id)) {
+      collisionsByKind[d.kind] = (collisionsByKind[d.kind] || 0) + 1;
+      continue;
+    }
+    seenVectorIds.add(d.vector_id);
+    if (FRIENDLY_NAME_DEDUP_KINDS.has(d.kind)) {
+      const fn = (d.metadata && d.metadata.friendly_name) || "";
+      if (fn) {
+        const fnKey = d.kind + ":" + fn.toLowerCase();
+        if (seenFnKeys.has(fnKey)) {
+          collisionsByKind[d.kind] = (collisionsByKind[d.kind] || 0) + 1;
+          continue;
+        }
+        seenFnKeys.add(fnKey);
+      }
+    }
+    dedupedDocs.push(d);
+  }
+
   // Skip-by-hash: look up existing vectors in batches of 20.
   const existingHash = new Map();
-  if (!force && typeof env.KNOWLEDGE.getByIds === "function" && allDocs.length > 0) {
+  if (!force && typeof env.KNOWLEDGE.getByIds === "function" && dedupedDocs.length > 0) {
     const LOOKUP_BATCH = 20;
-    for (let i = 0; i < allDocs.length; i += LOOKUP_BATCH) {
-      const slice = allDocs.slice(i, i + LOOKUP_BATCH).map((d) => d.vector_id);
+    for (let i = 0; i < dedupedDocs.length; i += LOOKUP_BATCH) {
+      const slice = dedupedDocs.slice(i, i + LOOKUP_BATCH).map((d) => d.vector_id);
       try {
         const existing = await env.KNOWLEDGE.getByIds(slice);
         if (Array.isArray(existing)) {
@@ -3339,7 +3396,7 @@ async function backfillKnowledge(env, { force = false, kinds = null } = {}) {
 
   const toEmbed = [];
   let skipped = 0;
-  for (const d of allDocs) {
+  for (const d of dedupedDocs) {
     if (!force && existingHash.get(d.vector_id) === d.hash) skipped++;
     else toEmbed.push(d);
   }
@@ -3397,13 +3454,52 @@ async function backfillKnowledge(env, { force = false, kinds = null } = {}) {
   }
   await flushUpsert();
 
-  return {
+  // Orphan diff: when running with force=1 (full rebuild), compare current ids
+  // against the last-known set in DO storage. Anything stored-but-not-current
+  // is an orphan from a renamed slug, removed entity, etc. — delete it.
+  let orphans_deleted = 0;
+  if (force) {
+    try {
+      const lastIdsResp = await doFetch(env, "/last_indexed_ids_read");
+      const lastIds = (lastIdsResp && Array.isArray(lastIdsResp.ids)) ? lastIdsResp.ids : [];
+      const currentSet = new Set(dedupedDocs.map((d) => d.vector_id));
+      const orphans = lastIds.filter((id) => !currentSet.has(id));
+      if (orphans.length > 0 && typeof env.KNOWLEDGE.deleteByIds === "function") {
+        const DELETE_BATCH = 200;
+        for (let i = 0; i < orphans.length; i += DELETE_BATCH) {
+          await env.KNOWLEDGE.deleteByIds(orphans.slice(i, i + DELETE_BATCH));
+        }
+        orphans_deleted = orphans.length;
+      }
+      // Persist the new id set for next time.
+      await doFetch(env, "/last_indexed_ids_write", { ids: Array.from(currentSet) });
+    } catch (err) {
+      console.warn("orphan diff failed:", err.message);
+    }
+  }
+
+  // Persist per-kind counts + collision/orphan stats so /admin/index-stats can
+  // surface them. Kept lightweight — caller passes the summary object back.
+  const summary = {
     total_docs: allDocs.length,
+    deduped_docs: dedupedDocs.length,
     embedded,
     skipped,
     errors,
+    collisions_by_kind: collisionsByKind,
+    collisions_total: Object.values(collisionsByKind).reduce((s, n) => s + n, 0),
+    orphans_deleted,
     kinds: perKindStats
   };
+  try {
+    await doFetch(env, "/index_stats_update", {
+      ts: new Date().toISOString(),
+      force,
+      kinds_run: targetKinds,
+      summary
+    });
+  } catch {}
+  return summary;
 }
 
 async function handleMCP(request, env) {
@@ -3658,6 +3754,143 @@ var worker_default = {
         headers: { ...corsHeaders, "Content-Type": "application/json" }
       });
     }
+    if (url.pathname === "/admin/index-stats") {
+      if (request.method !== "GET") {
+        return new Response("Method not allowed", { status: 405 });
+      }
+      const stats = await doFetch(env, "/index_stats_read");
+      if (!stats) {
+        return new Response(JSON.stringify({ error: "DO not responding" }), {
+          status: 503,
+          headers: { ...corsHeaders, "Content-Type": "application/json" }
+        });
+      }
+      return new Response(JSON.stringify(stats), {
+        headers: { ...corsHeaders, "Content-Type": "application/json" }
+      });
+    }
+    if (url.pathname === "/admin/reindex-observations") {
+      // One-shot platform-bug workaround: Vectorize's `topic_tag` metadata
+      // index doesn't get populated for existing vectors that are upserted
+      // (only fresh inserts trigger metadata indexing). Sequence:
+      //   1. Pull current observation list from DO
+      //   2. Compute their vector_ids
+      //   3. Delete them from Vectorize (so next upsert is a fresh INSERT)
+      //   4. Force rebuild observation kind only
+      // After this runs once, topic_tag filter should work in Vectorize-side.
+      if (request.method !== "POST") {
+        return new Response("Method not allowed", { status: 405 });
+      }
+      if (!env.AI || !env.KNOWLEDGE) {
+        return new Response(JSON.stringify({ error: "AI or KNOWLEDGE binding not configured" }), {
+          status: 500,
+          headers: { ...corsHeaders, "Content-Type": "application/json" }
+        });
+      }
+      const t0 = Date.now();
+      try {
+        const observations = await doFetch(env, "/ai_observations") || [];
+        const ids = (Array.isArray(observations) ? observations : [])
+          .filter((t) => typeof t === "string" && t.length > 0)
+          .map((t) => vectorIdFor("observation", fnv1aHex(t)));
+        const uniqueIds = Array.from(new Set(ids));
+        let deleted = 0;
+        const deleteErrors = [];
+        if (uniqueIds.length > 0 && typeof env.KNOWLEDGE.deleteByIds === "function") {
+          const DELETE_BATCH = 100;
+          for (let i = 0; i < uniqueIds.length; i += DELETE_BATCH) {
+            try {
+              await env.KNOWLEDGE.deleteByIds(uniqueIds.slice(i, i + DELETE_BATCH));
+              deleted += Math.min(DELETE_BATCH, uniqueIds.length - i);
+            } catch (err) {
+              deleteErrors.push(err && err.message ? err.message : String(err));
+            }
+          }
+        }
+        const summary = await backfillKnowledge(env, { force: true, kinds: ["observation"] });
+        return new Response(JSON.stringify({
+          observations_in_storage: observations.length,
+          ids_to_delete: uniqueIds.length,
+          deleted,
+          delete_errors: deleteErrors,
+          rebuild_summary: summary,
+          duration_ms: Date.now() - t0
+        }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
+      } catch (e) {
+        return new Response(JSON.stringify({ error: e.message, duration_ms: Date.now() - t0 }), {
+          status: 500,
+          headers: { ...corsHeaders, "Content-Type": "application/json" }
+        });
+      }
+    }
+    if (url.pathname === "/admin/cleanup-stale-vectors") {
+      if (request.method !== "POST") {
+        return new Response("Method not allowed", { status: 405 });
+      }
+      if (!env.KNOWLEDGE) {
+        return new Response(JSON.stringify({ error: "KNOWLEDGE binding not configured" }), {
+          status: 500,
+          headers: { ...corsHeaders, "Content-Type": "application/json" }
+        });
+      }
+      const t0 = Date.now();
+      try {
+        const reg = await getEntityRegistry(env, false);
+        const idsToDelete = [];
+        if (Array.isArray(reg)) {
+          for (const e of reg) {
+            const eid = e && e.entity_id;
+            if (!eid) continue;
+            const domain = eid.split(".")[0] || "";
+            if (domain === "automation" || domain === "script" || domain === "scene") {
+              // The duplicate written under kind:entity for this entity_id.
+              idsToDelete.push(vectorIdFor("entity", eid));
+              // Old slug-form ref_id under kind:automation/script/scene
+              // (when buildAutomationDocs/etc fell back to entity_id rather
+              // than the canonical numeric HA-internal id).
+              const slug = eid.slice(domain.length + 1);
+              if (slug) idsToDelete.push(vectorIdFor(domain, slug));
+            }
+          }
+        }
+        // Dedup the candidate list before sending.
+        const unique = Array.from(new Set(idsToDelete));
+        let deleted = 0;
+        const errors = [];
+        const has_deleteByIds = typeof env.KNOWLEDGE.deleteByIds === "function";
+        if (unique.length > 0 && has_deleteByIds) {
+          const DELETE_BATCH = 100;
+          for (let i = 0; i < unique.length; i += DELETE_BATCH) {
+            try {
+              const r = await env.KNOWLEDGE.deleteByIds(unique.slice(i, i + DELETE_BATCH));
+              // Vectorize returns a result object — capture its shape so we
+              // can see if "deleted" matches what we asked. Fall back to
+              // assumed-success (count = batch size) when no count returned.
+              const shaped = r && typeof r === "object" ? r : null;
+              const reported = shaped && (typeof shaped.count === "number" ? shaped.count
+                : typeof shaped.mutationId === "string" ? Math.min(DELETE_BATCH, unique.length - i)
+                : Math.min(DELETE_BATCH, unique.length - i));
+              deleted += reported;
+            } catch (err) {
+              errors.push(err && err.message ? err.message : String(err));
+            }
+          }
+        }
+        return new Response(JSON.stringify({
+          candidates: unique.length,
+          deleted,
+          has_deleteByIds,
+          errors,
+          ids_sample: unique.slice(0, 10),
+          duration_ms: Date.now() - t0
+        }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
+      } catch (e) {
+        return new Response(JSON.stringify({ error: e.message, duration_ms: Date.now() - t0 }), {
+          status: 500,
+          headers: { ...corsHeaders, "Content-Type": "application/json" }
+        });
+      }
+    }
     if (url.pathname === "/admin/rebuild-knowledge") {
       if (request.method !== "POST") {
         return new Response("Method not allowed", { status: 405 });
@@ -3753,9 +3986,11 @@ var worker_default = {
     }
     const t0 = Date.now();
     try {
+      // Dropped "scene" — only one scene exists in this household and the
+      // resync would be wasted work. Add back if scene count grows.
       const summary = await backfillKnowledge(env, {
         force: false,
-        kinds: ["automation", "script", "scene", "area", "device", "service"]
+        kinds: ["automation", "script", "area", "device", "service"]
       });
       console.log(
         "dailyKnowledgeResync: " + JSON.stringify({ ...summary, duration_ms: Date.now() - t0 })
@@ -3766,6 +4001,6 @@ var worker_default = {
   }
 };
 export {
-  HAWebSocket,
+  HAWebSocketV2,
   worker_default as default
 };

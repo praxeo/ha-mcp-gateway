@@ -1,6 +1,6 @@
 name = "ha-mcp-gateway"
 main = "dist/worker.js"
-compatibility_date = "2024-01-01"
+compatibility_date = "2026-05-09"
 workers_dev = true
 ai = { binding = "AI" }
 
@@ -38,12 +38,23 @@ index_name = "ha-knowledge"
 
 [durable_objects]
 bindings = [
-  { name = "HA_WS", class_name = "HAWebSocket" }
+  { name = "HA_WS", class_name = "HAWebSocketV2" }
 ]
 
 [[migrations]]
 tag = "v1"
 new_classes = ["HAWebSocket"]
+
+# v2 forces a clean code refresh by renaming the class. The persistent HA
+# WebSocket prevents the natural "10s idle → reload latest code" hibernation,
+# so DO instances were stuck on stale code across multiple deploys. Renaming
+# the class triggers Cloudflare's migration runtime to instantiate fresh DOs
+# with the latest code while preserving DO storage state.
+[[migrations]]
+tag = "v2"
+renamed_classes = [
+  { from = "HAWebSocket", to = "HAWebSocketV2" }
+]
 
 # Two cron triggers:
 #   "* * * * *"   — minute-level cache prewarm (existing behavior)

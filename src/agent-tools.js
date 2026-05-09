@@ -223,13 +223,17 @@ const READ_TOOLS = [
       description:
         "Semantic search across the unified home knowledge index. Returns ranked matches " +
         "across entities, automations, scripts, scenes, areas, devices, HA services, your " +
-        "own saved memories, and your saved observations. Use this when an entity, " +
-        "automation, or service isn't in the pre-injected context — vector search covers " +
-        "the FULL set, not just the top-context subset. Defaults filter out diagnostic / " +
-        "config / counter entities; pass include_noisy: true to include them. Restrict " +
-        "scope with the `kinds` array when you know what you're looking for (e.g., " +
-        "kinds=['service'] for HA service discovery, kinds=['memory','observation'] to " +
-        "find prior notes on a topic). top_k defaults to 15, max 50.",
+        "saved memories, and your saved observations. ALWAYS pass kinds=[…] — never call " +
+        "without it; mixed-kind queries can be dominated by services or duplicates. The " +
+        "area filter is case-insensitive but must match an HA area name (e.g., 'MBR' for " +
+        "the master bedroom — NOT 'Master Bedroom'). The domain filter is entity-only and " +
+        "returns nothing for non-entity kinds. Pass include_noisy: true for diagnostic / " +
+        "battery / mesh / signal / LQI / RSSI queries; battery sensors specifically remain " +
+        "visible without that flag. Use topic_tag to retrieve observations under a specific " +
+        "[bracket-prefix]. Default min_score floor is 0.50 (empirical noise floor); pass " +
+        "min_score: 0.6 to tighten. Observations time-decay automatically; entities " +
+        "currently active or recently changed get a small live-state boost. top_k defaults " +
+        "to 15, max 50.",
       parameters: {
         type: "object",
         properties: {
@@ -243,15 +247,23 @@ const READ_TOOLS = [
               type: "string",
               enum: ["entity", "automation", "script", "scene", "area", "device", "service", "memory", "observation"]
             },
-            description: "Restrict to these kinds. Omit for all kinds."
+            description: "Restrict to these kinds. ALWAYS provide — omitting can produce service-dominated or duplicate-heavy results."
           },
           domain: {
             type: "string",
-            description: "Entity domain filter (light, switch, sensor, ...). Only meaningful with kind=entity."
+            description: "Entity domain filter (light, switch, sensor, ...). Only meaningful with kinds=['entity']."
           },
           area: {
             type: "string",
-            description: "Area name filter. Case-sensitive — match the canonical area name."
+            description: "Area name filter (case-insensitive). Must match an HA area name — e.g., 'MBR' for master bedroom, 'Master Bathroom' for master bath."
+          },
+          topic_tag: {
+            type: "string",
+            description: "Filter to observations/memories with this exact [bracket-prefix] (e.g., 'lock-jam-pattern', 'basement-bay-afternoon-pattern')."
+          },
+          min_score: {
+            type: "number",
+            description: "Minimum cosine score (0-1). Defaults to 0.50; results below are pruned. Pass 0.6+ to tighten."
           },
           top_k: {
             type: "number",
@@ -259,10 +271,10 @@ const READ_TOOLS = [
           },
           include_noisy: {
             type: "boolean",
-            description: "Include diagnostic/config/counter entities and destructive services. Default false."
+            description: "Include diagnostic/config/counter entities and destructive services. Default false. Set true for battery / mesh / LQI / signal / diagnostic queries."
           }
         },
-        required: ["query"]
+        required: ["query", "kinds"]
       }
     }
   },
