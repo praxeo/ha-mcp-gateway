@@ -1597,7 +1597,13 @@ const CHAT_HTML = `<!DOCTYPE html>
         return;
       }
       try {
-        micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        micStream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            noiseSuppression: true,
+            echoCancellation: true,
+            autoGainControl: true
+          }
+        });
         audioChunks = [];
         const mime = pickMime();
         try {
@@ -3201,7 +3207,11 @@ var worker_default = {
 
         const form = new FormData();
         form.append("file", audioBlob, filename);
-        form.append("model_id", "scribe_v1");
+        form.append("model_id", "scribe_v2");
+        form.append("no_verbatim", "true");
+        form.append("tag_audio_events", "false");
+        form.append("language_code", "eng");
+        form.append("temperature", "0");
 
         const elevResp = await fetch("https://api.elevenlabs.io/v1/speech-to-text", {
           method: "POST",
