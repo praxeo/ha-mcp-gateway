@@ -946,21 +946,30 @@ const CHAT_HTML = `<!DOCTYPE html>
     gap: 5px;
   }
 
-  .typing.active { display: flex; }
+  .typing.active { display: flex; align-items: center; }
 
-  .typing span {
-    width: 6px; height: 6px;
-    background: var(--text-dim);
-    border-radius: 50%;
-    animation: bounce 1.2s infinite;
+  .minimax-mark {
+    width: 56px;
+    height: 32px;
+    display: block;
   }
 
-  .typing span:nth-child(2) { animation-delay: 0.15s; }
-  .typing span:nth-child(3) { animation-delay: 0.3s; }
+  .mm-bar {
+    transform-origin: center;
+    transform-box: fill-box;
+    animation: mmwave 1.1s ease-in-out infinite;
+  }
 
-  @keyframes bounce {
-    0%, 60%, 100% { transform: translateY(0); }
-    30% { transform: translateY(-6px); }
+  .mm-bar:nth-child(1) { animation-delay: 0s; }
+  .mm-bar:nth-child(2) { animation-delay: 0.08s; }
+  .mm-bar:nth-child(3) { animation-delay: 0.16s; }
+  .mm-bar:nth-child(4) { animation-delay: 0.24s; }
+  .mm-bar:nth-child(5) { animation-delay: 0.32s; }
+  .mm-bar:nth-child(6) { animation-delay: 0.40s; }
+
+  @keyframes mmwave {
+    0%, 100% { transform: scaleY(0.45); }
+    50%      { transform: scaleY(1);    }
   }
 
   /* ── Input ── */
@@ -1020,9 +1029,34 @@ const CHAT_HTML = `<!DOCTYPE html>
 
   /* ── Mic button (hero) ── */
   .mic-row {
-    display: flex;
-    justify-content: center;
+    display: grid;
+    grid-template-columns: 1fr auto 1fr;
+    align-items: center;
+    gap: 12px;
   }
+
+  .mic-aux-btn {
+    justify-self: start;
+    background: var(--surface-hover);
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+    border-radius: 10px;
+    padding: 10px 14px;
+    font-size: 12px;
+    font-family: inherit;
+    cursor: pointer;
+    transition: all 0.15s;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  .mic-aux-btn:hover {
+    color: var(--text);
+    border-color: var(--accent);
+  }
+
+  .mic-aux-btn:active { transform: scale(0.97); }
+
+  .mic-aux-spacer { display: block; }
 
   #micBtn {
     display: flex;
@@ -1179,14 +1213,6 @@ const CHAT_HTML = `<!DOCTYPE html>
     opacity: 0.8;
   }
 
-  /* ── Input hint ── */
-  .input-hint {
-    font-size: 10px;
-    color: var(--text-dim);
-    text-align: center;
-    letter-spacing: 0.02em;
-  }
-
   /* ── Bug trigger (above input box) ── */
   .bug-trigger-row {
     display: flex;
@@ -1320,9 +1346,6 @@ const CHAT_HTML = `<!DOCTYPE html>
         <span id="statusText">Connecting...</span>
       </div>
     </div>
-    <div class="header-actions">
-      <button class="header-btn" onclick="clearChat()">Clear</button>
-    </div>
   </div>
 
   <div class="messages" id="messages">
@@ -1342,12 +1365,27 @@ const CHAT_HTML = `<!DOCTYPE html>
   </div>
 
   <div class="typing" id="typing">
-    <span></span><span></span><span></span>
+    <svg class="minimax-mark" viewBox="0 0 64 40" aria-hidden="true">
+      <defs>
+        <linearGradient id="mmGrad" x1="0" x2="1" y1="0" y2="0">
+          <stop offset="0%" stop-color="#FF4D7E"/>
+          <stop offset="100%" stop-color="#FF6A2E"/>
+        </linearGradient>
+      </defs>
+      <g fill="url(#mmGrad)">
+        <rect class="mm-bar" x="2"  y="14" width="6" height="14" rx="3"/>
+        <rect class="mm-bar" x="12" y="6"  width="6" height="28" rx="3"/>
+        <rect class="mm-bar" x="22" y="2"  width="6" height="36" rx="3"/>
+        <rect class="mm-bar" x="32" y="10" width="6" height="22" rx="3"/>
+        <rect class="mm-bar" x="42" y="4"  width="6" height="32" rx="3"/>
+        <rect class="mm-bar" x="52" y="12" width="6" height="18" rx="3"/>
+      </g>
+    </svg>
   </div>
 
   <div class="input-area">
     <div class="bug-trigger-row">
-      <button class="bug-trigger-btn" type="button" onclick="openBugComposer()">🐛 Report a bug</button>
+      <button class="bug-trigger-btn" type="button" onclick="openBugComposer()">Report a bug</button>
     </div>
     <div class="input-row">
       <textarea id="input" placeholder="Message your home..." rows="1"></textarea>
@@ -1358,6 +1396,7 @@ const CHAT_HTML = `<!DOCTYPE html>
       </button>
     </div>
     <div class="mic-row">
+      <button class="mic-aux-btn" type="button" onclick="clearChat()">Clear</button>
       <button id="micBtn" type="button" aria-label="Tap to speak" data-state="idle">
         <span class="mic-icon" aria-hidden="true">
           <svg viewBox="0 0 24 24" fill="currentColor" width="32" height="32">
@@ -1366,8 +1405,8 @@ const CHAT_HTML = `<!DOCTYPE html>
         </span>
         <span class="mic-label">Tap to speak</span>
       </button>
+      <span class="mic-aux-spacer"></span>
     </div>
-    <div class="input-hint">Enter to send · Shift+Enter for newline · 🎙 voice</div>
   </div>
 </div>
 
