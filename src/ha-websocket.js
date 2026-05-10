@@ -900,6 +900,18 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
           return new Response(JSON.stringify({ connected: this.connected, authenticated: this.authenticated }), { headers });
         }
 
+        case "/version": {
+          // Reports the version-metadata binding as seen by THIS DO
+          // isolate at load time. Compare to the worker's reading via
+          // /admin/version to detect stale DO code (persistent HA WS
+          // keeps the isolate alive across deploys).
+          const wm = this.env.CF_VERSION_METADATA || {};
+          return new Response(JSON.stringify({
+            id: wm.id || null,
+            tag: wm.tag || null
+          }), { headers });
+        }
+
         case "/ai_enable": {
           this.aiEnabled = true;
           return new Response(JSON.stringify({ ai_enabled: true }), { headers });

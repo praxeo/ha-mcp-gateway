@@ -3230,6 +3230,7 @@ async function buildMemoryDocs(env) {
   const memory = await doFetch(env, "/ai_memory");
   if (!Array.isArray(memory)) return [];
   const docs = [];
+  const nowIso = new Date().toISOString();
   for (const text of memory) {
     if (typeof text !== "string" || !text) continue;
     const ref_id = fnv1aHex(text);
@@ -3253,7 +3254,12 @@ async function buildMemoryDocs(env) {
         entity_category: "primary",
         is_noisy: false,
         topic_tag: "",
-        hash
+        hash,
+        // Default stamp; backfillKnowledge overlays original created_at
+        // from existing Vectorize metadata when the vector already exists,
+        // so time-decay scoring tracks the actual write time, not rebuild
+        // time. Only applies to memory/observation kinds.
+        created_at: nowIso
       })
     });
   }
@@ -3264,6 +3270,7 @@ async function buildObservationDocs(env) {
   const observations = await doFetch(env, "/ai_observations");
   if (!Array.isArray(observations)) return [];
   const docs = [];
+  const nowIso = new Date().toISOString();
   for (const text of observations) {
     if (typeof text !== "string" || !text) continue;
     const ref_id = fnv1aHex(text);
@@ -3288,7 +3295,8 @@ async function buildObservationDocs(env) {
         entity_category: "primary",
         is_noisy: false,
         topic_tag,
-        hash
+        hash,
+        created_at: nowIso
       })
     });
   }
@@ -3373,9 +3381,18 @@ async function backfillKnowledge(env, { force = false, kinds = null } = {}) {
     dedupedDocs.push(d);
   }
 
-  // Skip-by-hash: look up existing vectors in batches of 20.
+  // Look up existing vectors. We use the result for two purposes:
+  //   1. Skip-by-hash (only when !force) to avoid re-embedding unchanged docs.
+  //   2. Preserving original `created_at` on memory/observation kinds —
+  //      these are stamped with `now` in their docs builders as a default,
+  //      and the overlay below restores the original write time when the
+  //      vector already exists. Without this, every force rebuild would
+  //      reset `created_at` and time-decay scoring would treat the entire
+  //      observation history as fresh.
+  // The lookup runs even when `force` is true (for purpose #2 above).
   const existingHash = new Map();
-  if (!force && typeof env.KNOWLEDGE.getByIds === "function" && dedupedDocs.length > 0) {
+  const existingCreatedAt = new Map();
+  if (typeof env.KNOWLEDGE.getByIds === "function" && dedupedDocs.length > 0) {
     const LOOKUP_BATCH = 20;
     for (let i = 0; i < dedupedDocs.length; i += LOOKUP_BATCH) {
       const slice = dedupedDocs.slice(i, i + LOOKUP_BATCH).map((d) => d.vector_id);
@@ -3383,15 +3400,25 @@ async function backfillKnowledge(env, { force = false, kinds = null } = {}) {
         const existing = await env.KNOWLEDGE.getByIds(slice);
         if (Array.isArray(existing)) {
           for (const v of existing) {
-            if (v && v.id && v.metadata && v.metadata.hash) existingHash.set(v.id, v.metadata.hash);
+            if (!v || !v.id || !v.metadata) continue;
+            if (v.metadata.hash) existingHash.set(v.id, v.metadata.hash);
+            if (v.metadata.created_at) existingCreatedAt.set(v.id, v.metadata.created_at);
           }
         }
       } catch (err) {
         console.warn("KNOWLEDGE.getByIds failed, will re-embed all:", err.message);
         existingHash.clear();
+        existingCreatedAt.clear();
         break;
       }
     }
+  }
+
+  // Overlay preserved created_at onto memory/observation docs.
+  for (const d of dedupedDocs) {
+    if (d.kind !== "memory" && d.kind !== "observation") continue;
+    const orig = existingCreatedAt.get(d.vector_id);
+    if (orig) d.metadata.created_at = orig;
   }
 
   const toEmbed = [];
@@ -3751,6 +3778,26 @@ var worker_default = {
         });
       }
       return new Response(JSON.stringify(result), {
+        headers: { ...corsHeaders, "Content-Type": "application/json" }
+      });
+    }
+    if (url.pathname === "/admin/version") {
+      if (request.method !== "GET") {
+        return new Response("Method not allowed", { status: 405 });
+      }
+      const wm = env.CF_VERSION_METADATA || {};
+      const doVer = await doFetch(env, "/version");
+      const worker = { id: wm.id || null, tag: wm.tag || null };
+      const durable_object = (doVer && typeof doVer === "object") ? doVer : null;
+      const stale = !!(durable_object && durable_object.id && worker.id && durable_object.id !== worker.id);
+      return new Response(JSON.stringify({
+        worker,
+        durable_object,
+        stale_isolate_suspected: stale,
+        note: stale
+          ? "DO isolate is running an older deploy than the worker. New DO-side code changes may not be live yet. See README operational note on persistent-WS DO refresh."
+          : "Worker and DO are on the same version."
+      }, null, 2), {
         headers: { ...corsHeaders, "Content-Type": "application/json" }
       });
     }

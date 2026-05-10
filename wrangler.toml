@@ -36,6 +36,14 @@ id = "d341a11cfff149cdb99e5edee7612132"
 binding = "KNOWLEDGE"
 index_name = "ha-knowledge"
 
+# Version metadata binding — exposes the deployed version ID to the
+# worker and DO at runtime. Used by /admin/version to compare the
+# worker isolate's loaded version (latest deploy) against the DO
+# instance's loaded version (whatever was current when the DO last
+# refreshed). Mismatch = DO is running stale code.
+[version_metadata]
+binding = "CF_VERSION_METADATA"
+
 [durable_objects]
 bindings = [
   { name = "HA_WS", class_name = "HAWebSocketV2" }

@@ -31,6 +31,27 @@ body. Do not delete entries — the history is the audit trail.
 
 ---
 
+## #vec-orphan-diff-noop — 2026-05-10 — orphan_deleted count is 0 across every force=1 rebuild
+
+**Severity:** low (fails safe) • **Source:** spotted during A1/E2 deploy verification (Round 1.5)
+
+`backfillKnowledge`'s orphan-diff logic (introduced in Round 1) reads `last_indexed_ids_v1` from DO storage, diffs against the current rebuild's id set, and deletes vectors that no longer appear. Then it writes the new id set for next time.
+
+In `/admin/index-stats` history (5 force=1 runs spanning two days), every run reports `orphans_deleted: 0`, including partial rebuilds where the current set was a small subset of the prior full-rebuild set. Expected: the first partial rebuild after the full 2728-vector rebuild should have flagged ~2471 ids as orphans. Observed: 0.
+
+Empirically the bug is failing safe — a partial force=1 rebuild of just `memory,observation` did NOT delete entities (vector_search for "basement" still returns 5 entities). So either:
+- The DO `/last_indexed_ids_read` endpoint is returning an empty list across calls.
+- The DO `/last_indexed_ids_write` POSTs from the worker are silently failing (e.g., `doFetch` serialization issue with the ~183 KB id payload).
+- The shard reassembly in `/last_indexed_ids_read` is dropping all entries.
+
+**Investigation hooks:** add `console.log` of `lastIds.length` and `currentSet.size` inside the orphan-diff branch in `backfillKnowledge`, redeploy, run a `force=1` rebuild, inspect via `wrangler tail --format json`. Then check `/last_indexed_ids_read` DO endpoint directly. Most likely culprit: the body-size of the `last_indexed_ids_write` POST exceeds something CF / `doFetch` doesn't handle gracefully — a 183 KB JSON body is below the 1 MB request limit but might still be triggering an unseen error.
+
+**Impact:** vectors orphaned by entity renames or HA registry deletions will accumulate. The `/admin/cleanup-stale-vectors` endpoint handles the known-bad patterns (automation/script/scene entity-id form), so the practical damage is limited.
+
+**Workaround until fixed:** none needed; periodically rerun `/admin/cleanup-stale-vectors` after large HA registry changes.
+
+---
+
 ## ~~#vec-topic-tag-filter — 2026-05-09 — vector_search topic_tag filter silently ignored at Vectorize layer; client-side fallback shipped but blocked on DO refresh~~
 
 **Resolved 2026-05-09.** Root cause was misdiagnosed throughout. Actual bug: `executeNativeTool`'s `case "vector_search"` (the chat agent's internal tool dispatcher at [src/ha-websocket.js:3091](src/ha-websocket.js:3091)) did not thread `topic_tag` or `min_score` through to `retrieveKnowledge` — even though the parent worker's `case "vector_search"` did, and the DO's HTTP `/vector_search` endpoint did. Three vector_search call paths exist; only two were updated in Round 1.
