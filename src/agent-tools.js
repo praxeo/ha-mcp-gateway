@@ -362,13 +362,16 @@ export const NATIVE_ACTION_TOOL_NAMES = new Set(
 );
 
 // Names of tools the CHAT profile is allowed to expose to MiniMax.
-// save_memory and save_observation are intentionally excluded — confirmed
-// facts and patterns get picked up by the autonomous heartbeat from the
-// unified timeline. Removing the temptation makes chat replies tighter.
+// save_memory and save_observation are gated by a prompt-level rule (only on
+// explicit user request), not by tool absence — the user can now say "remember
+// X" or "note that Y" and have it written immediately, rather than waiting on
+// the autonomous heartbeat to pick it up.
 // report_bug is chat-only — autonomous has no user to flag bugs.
 export const CHAT_ALLOWED_TOOL_NAMES = new Set([
   "call_service",
   "ai_send_notification",
+  "save_memory",
+  "save_observation",
   "get_state",
   "get_logbook",
   "render_template",
