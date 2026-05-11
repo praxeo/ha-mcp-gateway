@@ -604,6 +604,37 @@ The update_automation tool currently returns 405 on this instance. Until that's 
   }
 
   // ==========================================================================
+  // SAVE_MEMORY CRITERIA — shared rules block injected into every system
+  // prompt that exposes save_memory (native autonomous, native chat, legacy
+  // autonomous, legacy chat). Prevents the LLM from treating ai_memory as an
+  // event log. Single source of truth so all four paths stay in sync.
+  // ==========================================================================
+  _saveMemoryCriteriaBlock() {
+    return `## save_memory criteria
+
+\`ai_memory\` is a 100-slot FIFO for PERMANENT, REUSABLE facts about how this household and home operate. It is NOT an event log.
+
+SAVE to memory when the content is:
+- A rule, convention, or definition ("office light" = overhead dimmer)
+- A user preference (don't alert on power spikes)
+- An authorization grant (you may autonomously lock the back porch deadbolt)
+- An inference rule (sound machine on → likely sleep prep)
+- An identity fact about a person, pet, or recurring visitor
+- A structural fact about the home that won't change soon
+
+DO NOT save to memory:
+- Timestamped events (arrivals, departures, state changes) — these go in ai_log automatically
+- Sensor readings or transient state (battery percentages, LQI values, power spikes)
+- Single-occurrence observations — those go in ai_observations with a topic tag
+- Anything obsolete within ~30 days
+- Anything already captured by autonomous logging
+
+If unsure, ask yourself: "Will this still be useful in 30 days, AND is it the kind of thing the user would explicitly want me to remember?" If either answer is no, do not save.
+
+Exception: when the user explicitly says "remember X" or "save a memory" or equivalent, save it regardless of the above criteria. Always confirm the save verbatim in your reply.`;
+  }
+
+  // ==========================================================================
   // CLIMATE PREAMBLE — deterministic block injected into user messages when
   // the inbound text references HVAC/temperature topics. Lets MiniMax reason
   // about thermostat behavior without re-deriving zone semantics every turn.
@@ -2376,6 +2407,8 @@ INSTRUCTIONS:
 - Aux heat running (power >5000W sustained) is worth a notification. A brief spike is not.
 - You cannot edit automations via the API — that returns 405.
 
+${this._saveMemoryCriteriaBlock()}
+
 RESPOND ONLY WITH VALID JSON:
 {
   "reasoning": "Brief explanation of your thinking",
@@ -2576,6 +2609,8 @@ CRITICAL RULES:
 7. update_automation returns 405. Tell John what to change in the UI.
 8. Sensor values come from CURRENT STATE OF ENTITIES above — quote directly or say the sensor isn't listed.
 9. The ONLY valid action types: call_service, send_notification, save_memory, save_observation.
+
+${this._saveMemoryCriteriaBlock()}
 
 RESPONSE FORMAT — non-negotiable:
 Your entire response must be a SINGLE JSON object in exactly this shape:
@@ -3689,7 +3724,9 @@ Do NOT call save_memory/save_observation for:
 - Preferences expressed in passing ("I usually like the lights low") — unless paired with an explicit save verb
 - Anything you inferred or hypothesized yourself this turn
 
-save_memory is for CONFIRMED facts the user wants kept long-term (100-slot FIFO). save_observation is for patterns / hypotheses prefixed with a [topic-tag] (500-slot FIFO); use replaces="[topic-tag]" to supersede a prior observation under the same tag.
+save_observation is for patterns / hypotheses prefixed with a [topic-tag] (500-slot FIFO); use replaces="[topic-tag]" to supersede a prior observation under the same tag.
+
+${this._saveMemoryCriteriaBlock()}
 
 CHAT ACTION CONFIRMATION:
 The rule depends on WHO proposed the action.
@@ -3895,6 +3932,8 @@ OPERATIONAL REMINDERS:
 9. Observer-mode suggestions are NOT alerts — deliver them in a chat reply or via save_observation. Never wake anyone at 2 AM to propose an automation.
 10. TIMESTAMP FORMAT — All timestamps in your replies MUST be Central, in "H:MM AM/PM" or "MMM D, H:MM AM/PM" format. Tool results are pre-reformatted to Central before they reach you — copy them as-is. Never emit ISO 8601, "Z" suffix, "+00:00", or "UTC" in any reply, even if you think you saw one in a tool result. If you ever see one, that's a bug — paraphrase, don't quote.
 11. For automation debugging, call get_automation_config when the user references a specific automation or asks why one did or did not run. Logbook tells you whether it fired; config tells you what it was supposed to do.
+
+${this._saveMemoryCriteriaBlock()}
 
 RETRIEVAL DISCIPLINE:
 - The pre-injected entity context is intentionally small. Do not assume an entity doesn't exist just because it's not listed below.
