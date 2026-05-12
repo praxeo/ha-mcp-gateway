@@ -629,6 +629,65 @@ var TOOLS = [
       },
       required: ["message"]
     }
+  },
+  // --- Bug Report (parity with chat agent) ---
+  {
+    name: "report_bug",
+    description: "Capture a user-flagged issue to the bug log for review at the next iteration session. Use when the user (or you, on their behalf) wants to record a problem with an automation, sensor, or the gateway itself.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        description: { type: "string", description: "What the bug is. One or two sentences." },
+        entities: { type: "array", items: { type: "string" }, description: "Optional list of entity_ids involved" },
+        severity: { type: "string", enum: ["low", "medium", "high"], description: "Severity. Default 'low'." }
+      },
+      required: ["description"]
+    }
+  },
+  // --- Forensic Query Tools ---
+  {
+    name: "query_state_history",
+    description: "Query the forensic state-change log for any entity or domain over any time window. Use for questions like 'what changed at 3 AM', 'when did the front door last open', 'how many times did this fire today'. Time params accept ISO 8601 with offset OR 'NOW-30m' / 'NOW-2h' / 'NOW-7d' style relative expressions. Defaults to last 24 hours if since/until omitted.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        entity_id: { type: "string", description: "Exact entity_id filter, e.g. 'binary_sensor.front_door'" },
+        entity_id_like: { type: "string", description: "SQL LIKE pattern, e.g. '%front_door%' or 'lock.%'" },
+        domain: { type: "string", description: "Domain filter, e.g. 'lock'" },
+        new_state: { type: "string", description: "Filter on new_state value, e.g. 'on', 'unlocked'" },
+        since: { type: "string", description: "Lower time bound (ISO 8601 with offset OR 'NOW-1h' / 'NOW-7d')" },
+        until: { type: "string", description: "Upper time bound. Defaults to now." },
+        limit: { type: "number", description: "Max rows (default 50, hard cap 500)" }
+      }
+    }
+  },
+  {
+    name: "query_automation_runs",
+    description: "Query the forensic automation_runs log. Use to answer 'did automation X fire?', 'what fired in the last hour?', 'which automation reacted to the door opening?'.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        automation_id: { type: "string", description: "Exact automation entity_id" },
+        automation_id_like: { type: "string", description: "SQL LIKE pattern" },
+        trigger_entity_id: { type: "string", description: "Filter to runs triggered by this entity" },
+        since: { type: "string", description: "Lower time bound (NOW-Nh style or ISO)" },
+        until: { type: "string", description: "Upper time bound" },
+        limit: { type: "number", description: "Max rows (default 50, hard cap 500)" }
+      }
+    }
+  },
+  {
+    name: "query_causal_chain",
+    description: "Given a context_id from any forensic row (state_change, automation_run, or service_call), walks the causal chain forward (children — events this caused) and backward (parents — events that caused this). Use for 'why did X happen' or 'what did Y trigger' questions. Returns events from all three forensic tables, chronologically ordered.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        context_id: { type: "string", description: "HA context UUID from a forensic row" },
+        direction: { type: "string", enum: ["forward", "backward", "both"], description: "Default 'both'" },
+        depth: { type: "number", description: "Max chain depth (default 5, hard cap 10)" }
+      },
+      required: ["context_id"]
+    }
   }
 ];
 
@@ -2721,6 +2780,22 @@ async function handleTool(env, name, args) {
         data: { title: args.title || null, source: "tool_call" }
       });
       return result;
+    }
+    // ---- Bug Report (parity with chat agent) ----
+    case "report_bug": {
+      const r = await doFetch(env, "/report_bug", {
+        description: args.description,
+        entities: args.entities || [],
+        severity: args.severity || "low"
+      });
+      return r || { error: "DO not responding" };
+    }
+    // ---- Forensic Queries (parity with chat agent) ----
+    case "query_state_history":
+    case "query_automation_runs":
+    case "query_causal_chain": {
+      const r = await doFetch(env, "/" + name, args || {});
+      return r || { error: "DO not responding" };
     }
     // ---- Cache Management ----
     case "cache_status": {

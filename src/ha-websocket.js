@@ -1198,6 +1198,20 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
           });
         }
 
+        // Forensic query + report_bug parity endpoints — back the MCP surface.
+        // Each accepts a JSON body matching the corresponding tool's `args` and
+        // delegates to executeNativeTool, so MCP clients and the chat agent
+        // share one implementation.
+        case "/report_bug":
+        case "/query_state_history":
+        case "/query_automation_runs":
+        case "/query_causal_chain": {
+          const toolName = url.pathname.slice(1);
+          const body = await request.json().catch(() => ({}));
+          const result = await this.executeNativeTool(toolName, body || {});
+          return new Response(JSON.stringify(result), { headers });
+        }
+
         default:
           return new Response(JSON.stringify({ error: "Unknown DO endpoint: " + url.pathname }), { status: 404, headers });
       }
@@ -1736,7 +1750,9 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
     const attr = newState.attributes || {};
     const deviceClass = attr.device_class || "";
     const unit = String(attr.unit_of_measurement || "").toLowerCase();
-    const lcId = String(entityId).toLowerCase();
+    // Strip trailing _<digits> suffix that HA appends to duplicate entity IDs
+    // (e.g. sensor.foo_lqi_2). Without this strip the suffix match misses.
+    const lcId = String(entityId).toLowerCase().replace(/_\d+$/, "");
 
     const DENY_SUFFIX = [
       "_lqi", "_signal_strength", "_rssi", "_bssid", "_ssid",
@@ -1925,6 +1941,213 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
     console.log(`backfill: wrote ${written} rows since ${sinceIso} (skipped ${skipped})`);
     this.logAI("backfill_complete", `Backfilled ${written} state changes since ${sinceIso}`,
       { written, skipped, since_ms: sinceMs });
+  }
+
+  // ========================================================================
+  // Forensic query tools (Deploy 2). Back both the native tool dispatcher and
+  // the MCP HTTP routes — single implementation per helper, two surfaces.
+  // ========================================================================
+
+  // Parse a time reference into ms-since-epoch. Accepts:
+  //   - "NOW-30m" / "NOW-2h" / "NOW-7d" / "NOW-90s" / "NOW"
+  //   - ISO 8601 strings (with or without timezone offset)
+  // Falls back to `defaultMs` on unparseable input.
+  _parseTimeRefToMs(s, defaultMs) {
+    if (s == null || s === "") return defaultMs;
+    const str = String(s).trim();
+    const rel = /^NOW(?:-(\d+)(s|m|h|d))?$/i.exec(str);
+    if (rel) {
+      if (!rel[1]) return Date.now();
+      const n = parseInt(rel[1], 10);
+      const mult = { s: 1000, m: 60000, h: 3600000, d: 86400000 }[rel[2].toLowerCase()];
+      return Date.now() - n * mult;
+    }
+    const p = Date.parse(str);
+    return isNaN(p) ? defaultMs : p;
+  }
+
+  async _executeQueryStateHistory(args) {
+    if (!this.env.DB) return { error: "DB not bound" };
+    const now = Date.now();
+    const sinceMs = this._parseTimeRefToMs(args.since, now - 86400000);
+    const untilMs = this._parseTimeRefToMs(args.until, now);
+    const limit = Math.min(Math.max(parseInt(args.limit || 50, 10) || 50, 1), 500);
+
+    const wheres = ["fired_at_ms >= ?", "fired_at_ms <= ?"];
+    const binds = [sinceMs, untilMs];
+    if (args.entity_id) { wheres.push("entity_id = ?"); binds.push(String(args.entity_id)); }
+    if (args.entity_id_like) { wheres.push("entity_id LIKE ?"); binds.push(String(args.entity_id_like)); }
+    if (args.domain) { wheres.push("domain = ?"); binds.push(String(args.domain)); }
+    if (args.new_state) { wheres.push("new_state = ?"); binds.push(String(args.new_state)); }
+
+    const sql = `SELECT entity_id, friendly_name, domain, old_state, new_state, attributes_json,
+                        fired_at_ms, fired_at_central, context_id, context_parent_id, context_user_id, source
+                 FROM state_changes
+                 WHERE ${wheres.join(" AND ")}
+                 ORDER BY fired_at_ms DESC
+                 LIMIT ?`;
+    binds.push(limit + 1); // +1 to detect truncation
+
+    try {
+      const result = await this.env.DB.prepare(sql).bind(...binds).all();
+      const rows = result?.results || [];
+      const truncated = rows.length > limit;
+      if (truncated) rows.pop();
+      return {
+        rows,
+        row_count: rows.length,
+        truncated,
+        query_summary: `state_changes from ${new Date(sinceMs).toISOString()} to ${new Date(untilMs).toISOString()}, limit ${limit}`
+      };
+    } catch (err) {
+      return { error: "query_state_history failed: " + err.message };
+    }
+  }
+
+  async _executeQueryAutomationRuns(args) {
+    if (!this.env.DB) return { error: "DB not bound" };
+    const now = Date.now();
+    const sinceMs = this._parseTimeRefToMs(args.since, now - 86400000);
+    const untilMs = this._parseTimeRefToMs(args.until, now);
+    const limit = Math.min(Math.max(parseInt(args.limit || 50, 10) || 50, 1), 500);
+
+    const wheres = ["fired_at_ms >= ?", "fired_at_ms <= ?"];
+    const binds = [sinceMs, untilMs];
+    if (args.automation_id) { wheres.push("automation_id = ?"); binds.push(String(args.automation_id)); }
+    if (args.automation_id_like) { wheres.push("automation_id LIKE ?"); binds.push(String(args.automation_id_like)); }
+    if (args.trigger_entity_id) { wheres.push("trigger_entity_id = ?"); binds.push(String(args.trigger_entity_id)); }
+
+    const sql = `SELECT automation_id, automation_name, fired_at_ms, fired_at_central,
+                        trigger_entity_id, trigger_description, context_id, context_parent_id, result
+                 FROM automation_runs
+                 WHERE ${wheres.join(" AND ")}
+                 ORDER BY fired_at_ms DESC
+                 LIMIT ?`;
+    binds.push(limit + 1);
+
+    try {
+      const result = await this.env.DB.prepare(sql).bind(...binds).all();
+      const rows = result?.results || [];
+      const truncated = rows.length > limit;
+      if (truncated) rows.pop();
+      return {
+        rows,
+        row_count: rows.length,
+        truncated,
+        query_summary: `automation_runs from ${new Date(sinceMs).toISOString()} to ${new Date(untilMs).toISOString()}, limit ${limit}`
+      };
+    } catch (err) {
+      return { error: "query_automation_runs failed: " + err.message };
+    }
+  }
+
+  // Iterative chain walker rather than a single recursive CTE — simpler to
+  // reason about, easier to depth-limit, and each iteration is one D1 query
+  // (max 1+depth+depth = 11 round-trips at depth=5 worst case, well-bounded).
+  async _executeQueryCausalChain(args) {
+    if (!this.env.DB) return { error: "DB not bound" };
+    if (!args.context_id || typeof args.context_id !== "string") {
+      return { error: "context_id is required" };
+    }
+    const direction = (args.direction || "both").toLowerCase();
+    if (!["forward", "backward", "both"].includes(direction)) {
+      return { error: "direction must be 'forward', 'backward', or 'both'" };
+    }
+    const depth = Math.min(Math.max(parseInt(args.depth || 5, 10) || 5, 1), 10);
+    const ctxId = String(args.context_id);
+
+    const visited = new Set([ctxId]);
+    const collected = [];
+
+    const fetchByContext = async (ctxIds, column) => {
+      if (!ctxIds.length) return [];
+      const placeholders = ctxIds.map(() => "?").join(",");
+      const sql = `
+        SELECT 'state_change' AS kind, context_id, context_parent_id, fired_at_ms, fired_at_central,
+               entity_id AS subject, (COALESCE(old_state,'?')||' -> '||COALESCE(new_state,'?')) AS detail
+          FROM state_changes WHERE ${column} IN (${placeholders})
+        UNION ALL
+        SELECT 'automation_run' AS kind, context_id, context_parent_id, fired_at_ms, fired_at_central,
+               COALESCE(automation_name, automation_id, '(unnamed)') AS subject,
+               COALESCE(trigger_description, '') AS detail
+          FROM automation_runs WHERE ${column} IN (${placeholders})
+        UNION ALL
+        SELECT 'service_call' AS kind, context_id, context_parent_id, fired_at_ms, fired_at_central,
+               (domain||'.'||service) AS subject,
+               COALESCE(target_entity_ids, '') AS detail
+          FROM service_calls WHERE ${column} IN (${placeholders})
+        ORDER BY fired_at_ms ASC
+        LIMIT 200`;
+      const binds = [...ctxIds, ...ctxIds, ...ctxIds];
+      const result = await this.env.DB.prepare(sql).bind(...binds).all();
+      return result?.results || [];
+    };
+
+    try {
+      const seed = await fetchByContext([ctxId], "context_id");
+      for (const r of seed) collected.push(r);
+
+      if (direction === "forward" || direction === "both") {
+        let frontier = [ctxId];
+        for (let i = 0; i < depth && frontier.length > 0; i++) {
+          const children = await fetchByContext(frontier, "context_parent_id");
+          const next = [];
+          for (const c of children) {
+            collected.push(c);
+            if (c.context_id && !visited.has(c.context_id)) {
+              visited.add(c.context_id);
+              next.push(c.context_id);
+            }
+          }
+          frontier = next;
+        }
+      }
+
+      if (direction === "backward" || direction === "both") {
+        let frontier = [];
+        for (const r of seed) {
+          if (r.context_parent_id && !visited.has(r.context_parent_id)) {
+            visited.add(r.context_parent_id);
+            frontier.push(r.context_parent_id);
+          }
+        }
+        for (let i = 0; i < depth && frontier.length > 0; i++) {
+          const parents = await fetchByContext(frontier, "context_id");
+          const next = [];
+          for (const p of parents) {
+            collected.push(p);
+            if (p.context_parent_id && !visited.has(p.context_parent_id)) {
+              visited.add(p.context_parent_id);
+              next.push(p.context_parent_id);
+            }
+          }
+          frontier = next;
+        }
+      }
+    } catch (err) {
+      return { error: "query_causal_chain failed: " + err.message };
+    }
+
+    // De-duplicate by (kind, context_id, fired_at_ms) and sort chronologically.
+    const seen = new Set();
+    const deduped = [];
+    for (const r of collected) {
+      const key = `${r.kind}|${r.context_id || ""}|${r.fired_at_ms}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        deduped.push(r);
+      }
+    }
+    deduped.sort((a, b) => (a.fired_at_ms || 0) - (b.fired_at_ms || 0));
+
+    return {
+      rows: deduped,
+      row_count: deduped.length,
+      depth_walked: depth,
+      direction,
+      seed_context_id: ctxId,
+      query_summary: `causal chain from ${ctxId} (${direction}, depth ${depth})`
+    };
   }
 
   async handleEntityRegistryUpdated(data) {
@@ -3597,6 +3820,15 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
           }
         }
 
+        case "query_state_history":
+          return await this._executeQueryStateHistory(args);
+
+        case "query_automation_runs":
+          return await this._executeQueryAutomationRuns(args);
+
+        case "query_causal_chain":
+          return await this._executeQueryCausalChain(args);
+
         case "get_automation_config": {
           const rawId = args.entity_id || args.automation_id;
           if (!rawId || typeof rawId !== "string") {
@@ -4193,6 +4425,16 @@ RETRIEVAL DISCIPLINE:
 - If the user asks about an entity, room, or device you cannot see in the snapshot, your first move is vector_search — not "I don't see that" and not a guess at the entity_id.
 - If you're about to answer "I don't have that entity" or "I can't find X," stop and call vector_search first. Only after a vector_search returns nothing relevant should you tell the user it doesn't exist.
 - When two entities have similar friendly names (common with the basement bay doors, the front door sensors, the iPhone trackers), use vector_search with metadata filters (domain, area) to disambiguate before acting.
+
+FORENSIC MEMORY — your always-on log of the house.
+Every state change, automation run, and service call in this house lands in a queryable forensic log (D1 tables: state_changes, automation_runs, service_calls). You have three tools for it:
+- query_state_history — raw state transitions for any entity or domain over any time window. Use for "did the door open at 7:14", "when did the basement lock last cycle", "what changed in the last 4 hours".
+- query_automation_runs — automation fires. Use for "did the front-porch automation run last night", "what triggered automation X".
+- query_causal_chain — given a context_id from any forensic row, walks parents and children to show what caused this and what this caused. Use for "why did the porch light fail when the door opened" — pull the door's state_change, take its context_id, and walk the chain.
+
+Trust the forensic log over your priors. When the user asks about anything that happened — what fired, what changed, when, why, why not — query the log directly. You don't have to guess and you don't have to bounce through get_logbook. Pre-injected context (HOUSE_STATE_SNAPSHOT, RELEVANT ENTITIES, UNIFIED TIMELINE) is a recent slice; the forensic log is the full record.
+
+NARRATION OVER ENUMERATION. Query results come back as raw rows. Synthesize them into a narrative — pull out the story, flag the anomaly, lead with the answer. Don't dump a table. Use the fired_at_central field directly in your reply; never emit UTC.
 
 ${snapshot}
 

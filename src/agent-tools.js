@@ -345,6 +345,75 @@ const READ_TOOLS = [
         required: ["description"]
       }
     }
+  },
+  {
+    type: "function",
+    function: {
+      name: "query_state_history",
+      description:
+        "Query the forensic state-change log for any entity or domain over any time " +
+        "window. Use for questions like 'what changed at 3 AM', 'when did the front door " +
+        "last open', 'how many times did this fire today'. Returns rows ordered most-" +
+        "recent-first. Time params accept ISO 8601 with Central offset OR 'NOW-30m' / " +
+        "'NOW-2h' / 'NOW-7d' style relative expressions. Default window is the last 24 " +
+        "hours if neither since nor until is given. This is the agent's always-on " +
+        "memory — call it freely.",
+      parameters: {
+        type: "object",
+        properties: {
+          entity_id: { type: "string", description: "Exact entity_id filter, e.g. 'binary_sensor.front_door'." },
+          entity_id_like: { type: "string", description: "SQL LIKE pattern, e.g. '%front_door%' or 'lock.%'." },
+          domain: { type: "string", description: "Domain filter, e.g. 'lock', 'cover', 'binary_sensor'." },
+          new_state: { type: "string", description: "Filter on new_state value, e.g. 'on', 'unlocked'." },
+          since: { type: "string", description: "Lower time bound — ISO 8601 with Central offset OR 'NOW-1h' / 'NOW-30m' / 'NOW-7d'." },
+          until: { type: "string", description: "Upper time bound — same format as since. Defaults to now." },
+          limit: { type: "integer", description: "Max rows (default 50, hard cap 500)." }
+        }
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "query_automation_runs",
+      description:
+        "Query the forensic automation_runs log. Use to answer 'did automation X fire?', " +
+        "'what fired in the last hour?', 'which automation reacted to the door opening?'. " +
+        "Returns rows ordered most-recent-first.",
+      parameters: {
+        type: "object",
+        properties: {
+          automation_id: { type: "string", description: "Exact automation entity_id." },
+          automation_id_like: { type: "string", description: "SQL LIKE pattern." },
+          trigger_entity_id: { type: "string", description: "Filter to runs triggered by this entity." },
+          since: { type: "string", description: "Lower time bound (NOW-Nh style or ISO)." },
+          until: { type: "string", description: "Upper time bound." },
+          limit: { type: "integer", description: "Max rows (default 50, hard cap 500)." }
+        }
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "query_causal_chain",
+      description:
+        "Given a context_id from any forensic row (state_change, automation_run, or " +
+        "service_call), walk the causal chain forward (children — events this caused) " +
+        "and backward (parents — events that caused this). Use for 'why did X happen' " +
+        "or 'what did Y trigger' questions. Returns interleaved events from all three " +
+        "forensic tables, ordered chronologically. Depth-limited to prevent runaway " +
+        "chains.",
+      parameters: {
+        type: "object",
+        required: ["context_id"],
+        properties: {
+          context_id: { type: "string", description: "The HA context UUID from a forensic row." },
+          direction: { type: "string", enum: ["forward", "backward", "both"], description: "Default 'both'." },
+          depth: { type: "integer", description: "Max chain depth. Default 5, hard cap 10." }
+        }
+      }
+    }
   }
 ];
 
@@ -377,5 +446,8 @@ export const CHAT_ALLOWED_TOOL_NAMES = new Set([
   "render_template",
   "vector_search",
   "get_automation_config",
-  "report_bug"
+  "report_bug",
+  "query_state_history",
+  "query_automation_runs",
+  "query_causal_chain"
 ]);
