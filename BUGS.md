@@ -50,6 +50,8 @@ Empirically the bug is failing safe — a partial force=1 rebuild of just `memor
 
 **Workaround until fixed:** none needed; periodically rerun `/admin/cleanup-stale-vectors` after large HA registry changes.
 
+**Update 2026-05-12 (post-V4 deploy):** `/admin/reindex-observations` rewritten to enumerate observation vectors via multi-probe Vectorize query and delete anything not in the canonical `topicTagFor` keep-set. First run deleted 256 orphans accumulated across prior ref_id schema migrations. The pattern (probe with 4 distinct embeddings × topK=100 → diff against canonical keep-set) generalizes; if other kinds start showing the same orphan-bomb symptom, lift the same approach. The DO-side `last_indexed_ids_v1` write path is still suspected broken — root-cause work pending.
+
 ---
 
 ## ~~#vec-topic-tag-filter — 2026-05-09 — vector_search topic_tag filter silently ignored at Vectorize layer; client-side fallback shipped but blocked on DO refresh~~

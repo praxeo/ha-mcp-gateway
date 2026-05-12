@@ -143,7 +143,7 @@ Cloudflare Worker (worker.js)         ◀── /mcp, /chat, /transcribe,
    │  multi-kind backfill, three crons (cache prewarm, knowledge resync,
    │  ai_log + forensic-log retention)
    ▼
-Durable Object: HAWebSocketV3 (ha-websocket.js)
+Durable Object: HAWebSocketV5 (ha-websocket.js)
    │  singleton "ha-websocket-singleton" — owns the persistent WS
    │  in-memory stateCache, hibernation snapshot, cover fast path,
    │  HOUSE_STATE_SNAPSHOT builder, chat tool loop, forensic D1 writers,
@@ -180,7 +180,7 @@ Layer-by-layer:
 | File | Role |
 |---|---|
 | `src/worker.js` | Cloudflare Worker entry. Owns the MCP handler (`TOOLS` list + `handleTool` dispatch), HTTP routes including `/admin/recent_activity`, the embedded `CHAT_HTML` UI, the ElevenLabs STT proxy, the `formatBugsAsMarkdown` helper, KV cache helpers, the multi-kind `backfillKnowledge`, and the `scheduled()` cron handler with daily knowledge resync, 30-day `ai_log` retention, and 90-day forensic-log retention (`dailyForensicLogRetention`). |
-| `src/ha-websocket.js` | Durable Object class `HAWebSocketV3` (renamed forward through the persistent-WS refresh dance — see [Operational notes](#operational-notes)). Holds the persistent HA WebSocket and in-memory `stateCache`. Subscribes to five HA event types: `state_changed`, `entity_registry_updated`, `device_registry_updated`, `automation_triggered`, `call_service`. Writes every meaningful event fire-and-forget to D1 via `_writeStateChangeToD1` / `_writeAutomationRunToD1` / `_writeServiceCallToD1`, gated by `_shouldLogStateChange` for the state path (Zigbee/network-noise denylist). Reconnect backfill from HA history via `_backfillStateChangesFromHA`. One system prompt: `getChatSystemPrompt`, including a `FORENSIC MEMORY` section pointing the agent at the three query tools. One execution path: `chatWithAgentNative` (user-driven, SSE), preceded by `_tryDeterministicFastPath` for cover commands. Native tool loop in `runNativeToolLoop`, action executor in `executeAIAction`, tool dispatcher in `executeNativeTool` (now includes `query_state_history` / `query_automation_runs` / `query_causal_chain` cases). `alarm()` is WS keepalive only — ping/pong, reconnect on no-pong, mandatory reschedule. |
+| `src/ha-websocket.js` | Durable Object class `HAWebSocketV5` (renamed forward through the persistent-WS refresh dance — see [Operational notes](#operational-notes)). Holds the persistent HA WebSocket and in-memory `stateCache`. Subscribes to five HA event types: `state_changed`, `entity_registry_updated`, `device_registry_updated`, `automation_triggered`, `call_service`. Writes every meaningful event fire-and-forget to D1 via `_writeStateChangeToD1` / `_writeAutomationRunToD1` / `_writeServiceCallToD1`, gated by `_shouldLogStateChange` for the state path (Zigbee/network-noise denylist). Reconnect backfill from HA history via `_backfillStateChangesFromHA`. One system prompt: `getChatSystemPrompt`, including a `FORENSIC MEMORY` section pointing the agent at the three query tools. One execution path: `chatWithAgentNative` (user-driven, SSE), preceded by `_tryDeterministicFastPath` for cover commands. Native tool loop in `runNativeToolLoop`, action executor in `executeAIAction`, tool dispatcher in `executeNativeTool` (now includes `query_state_history` / `query_automation_runs` / `query_causal_chain` cases). `alarm()` is WS keepalive only — ping/pong, reconnect on no-pong, mandatory reschedule. |
 | `src/agent-tools.js` | OpenAI-format tool schemas passed to MiniMax. 4 action tools (`call_service`, `ai_send_notification`, `save_memory`, `save_observation`) + 9 read tools (`get_state`, `get_logbook`, `render_template`, `vector_search`, `get_automation_config`, `report_bug`, `query_state_history`, `query_automation_runs`, `query_causal_chain`) = 13 total. `CHAT_ALLOWED_TOOL_NAMES` includes all 13 — the chat agent has the full surface. |
 | `src/vectorize-schema.js` | Canonical metadata schema, `vectorIdFor(kind, refId)`, FNV-1a hash, `topicTagFor(text)`, per-kind embed-text builders, `isNoisyEntity` / `isNoisyService` / `entityCategoryFor` helpers, `buildMetadata` (lowercase-coerces `area`, string-coerces `is_noisy`, propagates `created_at`). |
 | `migrations/0001_d1_indexes_and_columns.sql` | Indexes on the legacy `ai_log` / `observations` / `bugs` tables. Also adds the nullable `data` JSON column to `observations`. |
@@ -221,7 +221,7 @@ lives in `migrations/0002_forensic_log.sql`.
 
 | HA event             | Forensic table     | Filter             |
 |----------------------|--------------------|--------------------|
-| `state_changed`      | `state_changes`    | `_shouldLogStateChange`: suffix denylist (`*_lqi*`, `*_rssi*`, `*_signal_strength*`, `*_bssid*`, `*_ssid*`, `*_last_update_trigger*`, `dBm`/`dB`/`lqi` units); hard denylist (`*_summation_delivered`, `*_summation_received`); numeric deadband (power 50W, energy 0.01kWh, humidity 2%, temperature 0.5°, illuminance 10% relative) |
+| `state_changed`      | `state_changes`    | `_shouldLogStateChange`: domain skip (`image.*` — timestamp churn); suffix denylist (`*_lqi*`, `*_rssi*`, `*_signal_strength*`, `*_bssid*`, `*_ssid*`, `*_last_update_trigger*`, `dBm`/`dB`/`lqi` units); hard denylist (`*_summation_delivered`, `*_summation_received`, roborock `*_cleaning_area`/`*_cleaning_time`/`*_cleaning_progress`/`*_filter_time_left`/`*_main_brush_time_left`/`*_side_brush_time_left`/`*_dock_strainer_time_left`/`*_sensor_dirty_time_left`); numeric deadband (power 50W, energy 0.01kWh, voltage 2V, humidity 2%, temperature 0.5°, illuminance 10% relative) |
 | `automation_triggered` | `automation_runs` | none — every fire logged |
 | `call_service`       | `service_calls`    | none — every call logged |
 
@@ -341,7 +341,7 @@ locking Vectorize identity to the D1 primary key.
 - `POST /admin/rebuild-knowledge?force=1&kinds=a,b,c` — multi-kind backfill.
 - `GET /admin/index-stats` — last 20 backfill summaries.
 - `POST /admin/cleanup-stale-vectors` — one-shot legacy cleanup (idempotent).
-- `POST /admin/reindex-observations` — wipe + force-rebuild observations.
+- `POST /admin/reindex-observations` — enumerates observation vectors via multi-probe similarity query (topK=100 per probe, 4 probes ≈ 400 IDs), deletes anything not in the canonical `topicTagFor`-derived keep-set, then force-rebuilds the observation kind. Idempotent; re-run if the index ever holds >400 observation vectors and a single pass misses some.
 - DO `POST /vector_search` — internal endpoint backing the `vector_search` tool.
 
 ### Index recreation (one-time, before deploy)
@@ -496,7 +496,7 @@ Sub-500ms typical.
 | `last_event_seen_ms` | DO storage | scalar | Cursor for reconnect backfill (`_backfillStateChangesFromHA`). |
 
 Timeline timestamps are reformatted to **Central time** at prompt-injection
-(`HAWebSocketV3._formatTimelineTimestamp`). Underlying `ai_log` entries
+(`HAWebSocketV5._formatTimelineTimestamp`). Underlying `ai_log` entries
 stay ISO 8601 for parseability.
 
 ---
@@ -507,7 +507,7 @@ stay ISO 8601 for parseability.
 
 | Binding | Resource | Purpose |
 |---|---|---|
-| `HA_WS` | Durable Object class `HAWebSocketV3` | Singleton `ha-websocket-singleton` |
+| `HA_WS` | Durable Object class `HAWebSocketV5` | Singleton `ha-websocket-singleton` |
 | `HA_CACHE` | KV namespace | TTL'd cache for HA registries / states between cold starts |
 | `KNOWLEDGE` | Vectorize index `ha-knowledge` | Multi-kind semantic index |
 | `AI` | Workers AI | `@cf/baai/bge-large-en-v1.5` embeddings (cls pooling) |
@@ -705,9 +705,9 @@ wrangler d1 execute ha_db --remote --command="SELECT 'state_changes' AS t, COUNT
   don't. **Diagnostic playbook**: `wrangler tail --format json` and
   inspect per-event `scriptVersion.id` against the latest `wrangler
   deploy` version id. **Fix**: rename the DO class via
-  `renamed_classes` migration. The class has been renamed twice already
-  for this reason (`HAWebSocket` → `HAWebSocketV2` → `HAWebSocketV3`).
-  Storage is preserved across renames.
+  `renamed_classes` migration. The class has been renamed four times
+  already for this reason (`HAWebSocket` → `HAWebSocketV2` → `HAWebSocketV3`
+  → `HAWebSocketV4` → `HAWebSocketV5`). Storage is preserved across renames.
 - **Three redundant DO keepalives.** The persistent HA WebSocket is the
   primary; the 60s alarm (which still reschedules itself even though it
   no longer dispatches an LLM call) is the secondary; the minute-cadence
@@ -752,6 +752,44 @@ wrangler d1 execute ha_db --remote --command="SELECT 'state_changes' AS t, COUNT
 
 Newest first.
 
+- **report_bug storage architecture fix + agent error-confabulation guardrail.**
+  The old `report_bug` handler wrote the entire bugs list as a single
+  `bugs` array key on DO storage. Each entry carried `last_chat_turns`,
+  `last_log_entries`, and full `entity_states` (raw attribute trees), so
+  a handful of entries blew the 128 KiB DO value cap. Writes failed
+  silently; worse, the chat agent confabulated `"Logged bug #..."` replies
+  after error returns because the BUG REPORTS rule documented the
+  success-shape reply without telling the model to check the result
+  first. v5 migration splits storage into per-id keys (`bug:<id>` plus
+  a small `bug_ids` index — FIFO 200 with delete-on-drop) and trims every
+  field: attribute allowlist for `entity_states`, 1 KB cap per chat turn,
+  500-char cap per log entry's `data`, and an oversize fallback that
+  sheds chat turns / log entries / entity_states in that order before
+  reaching 100 KiB. A new `TOOL ERROR HANDLING — NO CONFABULATION`
+  block at the top of the chat system prompt forbids the agent from
+  inventing success after an `error`-shaped tool result, and the
+  BUG REPORTS section now explicitly says: check the result, branch on
+  `ok: true` vs `error`, surface the error text verbatim. Existing
+  9-entry legacy `bugs` array migrates lossless on first new write.
+  Post-deploy single-entry size went from ~10 KB (array-of-bloat) to
+  ~4.7 KB (trimmed per-key).
+- **Forensic noise-filter expansion + observation-vector orphan cleanup.**
+  Live D1 audit found `_summation_delivered` leaking 1,400+ rows/hr
+  despite a source-level hard-deny rule (the rule was committed after the
+  v3 isolate-refresh rename, so the running DO never picked it up). Added
+  a v4 class rename (`HAWebSocketV3` → `HAWebSocketV4`) to force refresh
+  and extended `_shouldLogStateChange`: domain skip for `image.*`
+  (timestamp churn), suffix denylist for roborock cleaning telemetry
+  (`*_cleaning_area`, `*_cleaning_time`, `*_cleaning_progress`,
+  `*_filter_time_left`, `*_main_brush_time_left`, etc.), and a 2V
+  voltage deadband (mains jitter ±1V is meaningless; 120V→0V power
+  cycles still pass). Eight new unit-test cases. Same deploy
+  rewrote `/admin/reindex-observations` to enumerate observation
+  vectors via multi-probe Vectorize query (kind filter, topK=100,
+  4 probes ≈ 400 IDs) and delete any not in the canonical
+  topicTagFor-derived keep-set. First post-deploy run deleted 256
+  orphans accumulated across earlier ref_id schema changes
+  (fnv1aHex → topicTagFor in commit 59c9b69).
 - **Autonomous monitor excision (3-deploy refactor).** The 60-second
   heartbeat-driven autonomous LLM monitor was removed entirely after
   ~30 days of demonstrating no useful proactive intervention. In its

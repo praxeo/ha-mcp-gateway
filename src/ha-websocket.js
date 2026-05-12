@@ -25,7 +25,7 @@ function sanitizeChannelKey(from) {
   return cleaned.substring(0, 64) || "default";
 }
 
-export class HAWebSocketV3 {
+export class HAWebSocketV5 {
   // Static config for prioritized entity context building
   static CONTEXT_DOMAIN_PRIORITY = [
     "alarm_control_panel", "climate", "lock", "cover", "binary_sensor",
@@ -124,7 +124,7 @@ export class HAWebSocketV3 {
     return {
       fired_at_ms: ms,
       fired_at_iso: isoTs,
-      fired_at_central: HAWebSocketV3._formatTimelineTimestamp(isoTs)
+      fired_at_central: HAWebSocketV5._formatTimelineTimestamp(isoTs)
     };
   }
 
@@ -659,7 +659,7 @@ Exception: when the user explicitly says "remember X" or "save a memory" or equi
 
   static climateTriggerMatches(text) {
     if (!text || typeof text !== "string") return false;
-    return HAWebSocketV3.CLIMATE_TRIGGER_RE.test(text);
+    return HAWebSocketV5.CLIMATE_TRIGGER_RE.test(text);
   }
 
   static _seasonDominant(monthIdx) {
@@ -757,7 +757,7 @@ Exception: when the user explicitly says "remember X" or "save a memory" or equi
 
   async _buildClimatePreambleIfNeeded(triggerText, source = "chat") {
     if (this.env.CLIMATE_PREAMBLE_ENABLED === "false") return null;
-    if (!HAWebSocketV3.climateTriggerMatches(triggerText)) return null;
+    if (!HAWebSocketV5.climateTriggerMatches(triggerText)) return null;
     if (!this.connected || !this.authenticated) return null;
 
     const ok = await this._fetchClimateData();
@@ -769,13 +769,13 @@ Exception: when the user explicitly says "remember X" or "save a memory" or equi
     const nowStr = nowDate.toLocaleString("en-US", { timeZone: "America/Chicago", timeZoneName: "short" });
     const monthFmt = new Intl.DateTimeFormat("en-US", { timeZone: "America/Chicago", month: "numeric" });
     const monthIdx = parseInt(monthFmt.format(nowDate), 10) - 1;
-    const seasonStr = HAWebSocketV3._seasonDominant(monthIdx);
+    const seasonStr = HAWebSocketV5._seasonDominant(monthIdx);
 
     const tempStr = (w.temperature !== null && w.temperature !== undefined) ? `${w.temperature}°F` : "n/a";
     const condStr = w.state || "unknown";
 
-    const hl = HAWebSocketV3._forecastHighLow(w.forecast);
-    const trend = HAWebSocketV3._forecastTrend(w.forecast);
+    const hl = HAWebSocketV5._forecastHighLow(w.forecast);
+    const trend = HAWebSocketV5._forecastTrend(w.forecast);
     const forecastLine = hl
       ? `Forecast next 12h: high ${hl.high}°F, low ${hl.low}°F, trend ${trend || "stable"}`
       : `Forecast next 12h: unavailable (no forecast attribute)`;
@@ -814,8 +814,8 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
 
     if (!this._logInitialized) {
       this.aiLog = await this.loadLogFromStorage();
-      if (this.aiLog.length > HAWebSocketV3.LOG_IN_MEMORY_CAP) {
-        this.aiLog = this.aiLog.slice(-HAWebSocketV3.LOG_IN_MEMORY_CAP);
+      if (this.aiLog.length > HAWebSocketV5.LOG_IN_MEMORY_CAP) {
+        this.aiLog = this.aiLog.slice(-HAWebSocketV5.LOG_IN_MEMORY_CAP);
       }
       this._logInitialized = true;
     }
@@ -968,7 +968,7 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
 
         case "/ai_log": {
           const count = parseInt(url.searchParams.get("count") || "50");
-          if (count > HAWebSocketV3.LOG_IN_MEMORY_CAP) {
+          if (count > HAWebSocketV5.LOG_IN_MEMORY_CAP) {
             const rows = await this._loadAiLogFromD1(count);
             return new Response(JSON.stringify(Array.isArray(rows) ? rows : []), { headers });
           }
@@ -1005,12 +1005,31 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
         }
 
         case "/bugs": {
-          const bugs = await this.state.storage.get("bugs") || [];
+          // New format: bug_ids index → bug:<id> per-key. Legacy fallback: the
+          // single `bugs` array key (migrated on next report_bug write).
+          const bugIds = await this.state.storage.get("bug_ids") || [];
+          const bugs = [];
+          if (Array.isArray(bugIds) && bugIds.length > 0) {
+            for (const id of bugIds) {
+              const b = await this.state.storage.get(`bug:${id}`);
+              if (b) bugs.push(b);
+            }
+          } else {
+            const legacy = await this.state.storage.get("bugs");
+            if (Array.isArray(legacy)) bugs.push(...legacy);
+          }
           return new Response(JSON.stringify({ count: bugs.length, bugs }), { headers });
         }
 
         case "/bugs_clear": {
-          await this.state.storage.put("bugs", []);
+          const bugIds = await this.state.storage.get("bug_ids") || [];
+          if (Array.isArray(bugIds)) {
+            for (const id of bugIds) {
+              await this.state.storage.delete(`bug:${id}`).catch(() => {});
+            }
+          }
+          await this.state.storage.delete("bug_ids").catch(() => {});
+          await this.state.storage.delete("bugs").catch(() => {}); // legacy key
           return new Response(JSON.stringify({ cleared: true }), { headers });
         }
 
@@ -1290,7 +1309,7 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
     if (event.event_type === "automation_triggered" && event.data) {
       const ctx = event.context || {};
       const { fired_at_ms, fired_at_iso, fired_at_central } =
-        HAWebSocketV3._tsFromMs(Date.parse(event.time_fired) || Date.now());
+        HAWebSocketV5._tsFromMs(Date.parse(event.time_fired) || Date.now());
       this._writeAutomationRunToD1({
         automation_id: event.data.entity_id || null,
         automation_name: event.data.name || null,
@@ -1309,7 +1328,7 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
     if (event.event_type === "call_service" && event.data) {
       const ctx = event.context || {};
       const { fired_at_ms, fired_at_iso, fired_at_central } =
-        HAWebSocketV3._tsFromMs(Date.parse(event.time_fired) || Date.now());
+        HAWebSocketV5._tsFromMs(Date.parse(event.time_fired) || Date.now());
       const targets = event.data.service_data ? event.data.service_data.entity_id : null;
       const targetIds = Array.isArray(targets) ? targets.join(",") : (targets || null);
       this._writeServiceCallToD1({
@@ -1348,7 +1367,7 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
       // every real transition lands in the state_changes table.
       if (newState && oldState && newState.state !== oldState.state) {
         const { fired_at_ms, fired_at_iso, fired_at_central } =
-          HAWebSocketV3._tsFromMs(
+          HAWebSocketV5._tsFromMs(
             Date.parse(newState.last_changed || newState.last_updated) || Date.now()
           );
         this._touchLastEventSeen(fired_at_ms);
@@ -1427,25 +1446,25 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
     const out = [];
     for (const [id, s] of this.stateCache) {
       const domain = id.split(".")[0];
-      if (!HAWebSocketV3.SNAPSHOT_DOMAIN_ALLOWLIST.has(domain)) continue;
+      if (!HAWebSocketV5.SNAPSHOT_DOMAIN_ALLOWLIST.has(domain)) continue;
       if (s.state === "unavailable" || s.state === "unknown") continue;
       if (domain === "switch" && isNoisySwitch(id)) continue;
 
       const attrs = s.attributes || {};
       if (domain === "sensor") {
         const deviceClass = attrs.device_class || "";
-        if (HAWebSocketV3.SENSOR_WHITELIST.has(deviceClass)) {
+        if (HAWebSocketV5.SENSOR_WHITELIST.has(deviceClass)) {
           // keep
         } else if (deviceClass === "battery") {
           const pct = parseFloat(s.state);
-          if (isNaN(pct) || pct > HAWebSocketV3.BATTERY_LOW_THRESHOLD) continue;
+          if (isNaN(pct) || pct > HAWebSocketV5.BATTERY_LOW_THRESHOLD) continue;
         } else {
           continue;
         }
       }
 
       const filteredAttrs = {};
-      for (const k of HAWebSocketV3.SNAPSHOT_ATTR_ALLOWLIST) {
+      for (const k of HAWebSocketV5.SNAPSHOT_ATTR_ALLOWLIST) {
         if (attrs[k] !== undefined) {
           filteredAttrs[k] = attrs[k];
         }
@@ -1560,6 +1579,10 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
     // (e.g. sensor.foo_lqi_2). Without this strip the suffix match misses.
     const lcId = String(entityId).toLowerCase().replace(/_\d+$/, "");
 
+    // Domain-level skip: image.* entities expose their last-update timestamp
+    // as state, churning every few seconds with no causal meaning.
+    if (lcId.startsWith("image.")) return false;
+
     const DENY_SUFFIX = [
       "_lqi", "_signal_strength", "_rssi", "_bssid", "_ssid",
       "_last_update_trigger", "_audio_output", "_link_quality"
@@ -1570,9 +1593,17 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
 
     if (unit === "dbm" || unit === "db" || unit === "lqi") return false;
 
-    // Hard denylist: monotonic counters that belong in InfluxDB, not the
-    // forensic log. Never causally interesting.
-    const HARD_DENY_SUFFIX = ["_summation_delivered", "_summation_received"];
+    // Hard denylist: monotonic counters and per-device diagnostic ticks that
+    // belong in InfluxDB, not the forensic log. Never causally interesting.
+    const HARD_DENY_SUFFIX = [
+      "_summation_delivered", "_summation_received",
+      // Roborock cleaning-session telemetry — fine-grained progress ticks
+      // multiple times/minute during a clean. The vacuum.* state carries
+      // the causal signal.
+      "_cleaning_area", "_cleaning_time", "_cleaning_progress",
+      "_filter_time_left", "_main_brush_time_left", "_side_brush_time_left",
+      "_dock_strainer_time_left", "_sensor_dirty_time_left"
+    ];
     if (HARD_DENY_SUFFIX.some((s) => lcId.endsWith(s))) return false;
 
     // Numeric deadband: suppress high-frequency ticks where the delta is too
@@ -1584,6 +1615,10 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
         threshold = 50;
       } else if (deviceClass === "energy" || unit === "kwh") {
         threshold = 0.01;
+      } else if (deviceClass === "voltage" || unit === "v") {
+        // ±1V jitter on 120V mains is meaningless; 0V → 120V (power cycle)
+        // is a 120V delta and passes.
+        threshold = 2;
       } else if (deviceClass === "humidity" || unit === "%") {
         threshold = 2;
       } else if (deviceClass === "temperature") {
@@ -1769,7 +1804,7 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
           attributes_json: this._shouldStoreAttributes(entityId) ? JSON.stringify(curr.attributes || {}) : null,
           fired_at_ms: tsMs,
           fired_at_iso: new Date(tsMs).toISOString(),
-          fired_at_central: HAWebSocketV3._formatTimelineTimestamp(new Date(tsMs).toISOString()),
+          fired_at_central: HAWebSocketV5._formatTimelineTimestamp(new Date(tsMs).toISOString()),
           context_id: null,
           context_parent_id: null,
           context_user_id: null,
@@ -2319,7 +2354,7 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
       if (done) return;
       await this.state.storage.delete("ai_log").catch(() => {});
       await this.state.storage.delete("ai_log_head").catch(() => {});
-      for (let i = 0; i < HAWebSocketV3.LOG_CHUNKS_MAX; i++) {
+      for (let i = 0; i < HAWebSocketV5.LOG_CHUNKS_MAX; i++) {
         await this.state.storage.delete("ai_log_chunk_" + i).catch(() => {});
         await this.state.storage.delete("ai_log_chunk_gen_" + i).catch(() => {});
       }
@@ -2353,8 +2388,8 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
         data: { original_type: entry.type, original_ts: entry.timestamp },
         timestamp: new Date().toISOString(),
       });
-      if (this.aiLog.length > HAWebSocketV3.LOG_IN_MEMORY_CAP) {
-        this.aiLog.splice(0, this.aiLog.length - HAWebSocketV3.LOG_IN_MEMORY_CAP);
+      if (this.aiLog.length > HAWebSocketV5.LOG_IN_MEMORY_CAP) {
+        this.aiLog.splice(0, this.aiLog.length - HAWebSocketV5.LOG_IN_MEMORY_CAP);
       }
     }
   }
@@ -2718,7 +2753,7 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
   // retained so existing call sites (await this.persistLog()) keep resolving.
   // ==========================================================================
   async loadLogFromStorage() {
-    const fromD1 = await this._loadAiLogFromD1(HAWebSocketV3.LOG_IN_MEMORY_CAP);
+    const fromD1 = await this._loadAiLogFromD1(HAWebSocketV5.LOG_IN_MEMORY_CAP);
     return Array.isArray(fromD1) ? fromD1 : [];
   }
 
@@ -2730,7 +2765,7 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
 
   async clearPersistedLog() {
     await this.state.storage.delete("ai_log").catch(() => {});
-    for (let i = 0; i < HAWebSocketV3.LOG_CHUNKS_MAX; i++) {
+    for (let i = 0; i < HAWebSocketV5.LOG_CHUNKS_MAX; i++) {
       await this.state.storage.delete("ai_log_chunk_" + i).catch(() => {});
       await this.state.storage.delete("ai_log_chunk_gen_" + i).catch(() => {});
     }
@@ -2750,8 +2785,8 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
     const entry = { type, message, data, timestamp: new Date().toISOString() };
     if (source) entry.source = source;
     this.aiLog.push(entry);
-    if (this.aiLog.length > HAWebSocketV3.LOG_IN_MEMORY_CAP) {
-      this.aiLog.splice(0, this.aiLog.length - HAWebSocketV3.LOG_IN_MEMORY_CAP);
+    if (this.aiLog.length > HAWebSocketV5.LOG_IN_MEMORY_CAP) {
+      this.aiLog.splice(0, this.aiLog.length - HAWebSocketV5.LOG_IN_MEMORY_CAP);
     }
     console.log("AI LOG [" + type + (source ? "/" + source : "") + "]:", message);
     this.persistLog().catch((err) => console.error("logAI persist:", err.message));
@@ -2784,7 +2819,7 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
     const timeline = persistentLog
       .filter((e) => ["chat_user", "chat_reply", "action", "action_verified", "notification", "decision", "state_change", "memory_saved", "observation_saved"].includes(e.type))
       .slice(-150)
-      .map((e) => `[${HAWebSocketV3._formatTimelineTimestamp(e.timestamp)}] ${e.type}: ${e.message}`)
+      .map((e) => `[${HAWebSocketV5._formatTimelineTimestamp(e.timestamp)}] ${e.type}: ${e.message}`)
       .join("\n");
 
     // ---- Entity context snapshot ----
@@ -2796,7 +2831,7 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
       if (domain === "switch" && isNoisySwitch(id)) continue;
       if (state.state === "unavailable" || state.state === "unknown") continue;
 
-      if (HAWebSocketV3.CONTEXT_DOMAIN_PRIORITY.includes(domain)) {
+      if (HAWebSocketV5.CONTEXT_DOMAIN_PRIORITY.includes(domain)) {
         const entry = { entity_id: id, friendly_name: attr.friendly_name || id, state: state.state };
         if (domain === "climate") {
           entry.setpoint = attr.temperature ?? null;
@@ -2818,11 +2853,11 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
         byDomain.get(domain).push(entry);
       } else if (domain === "sensor") {
         let include = false;
-        if (HAWebSocketV3.SENSOR_WHITELIST.has(deviceClass)) {
+        if (HAWebSocketV5.SENSOR_WHITELIST.has(deviceClass)) {
           include = true;
         } else if (deviceClass === "battery") {
           const pct = parseFloat(state.state);
-          include = !isNaN(pct) && pct <= HAWebSocketV3.BATTERY_LOW_THRESHOLD;
+          include = !isNaN(pct) && pct <= HAWebSocketV5.BATTERY_LOW_THRESHOLD;
         }
         if (include) {
           const entry = { entity_id: id, friendly_name: attr.friendly_name || id, state: state.state, device_class: deviceClass, unit: attr.unit_of_measurement || null };
@@ -2834,16 +2869,16 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
 
     const contextEntities = [];
     let sensorCount = 0;
-    for (const domain of [...HAWebSocketV3.CONTEXT_DOMAIN_PRIORITY, "sensor"]) {
+    for (const domain of [...HAWebSocketV5.CONTEXT_DOMAIN_PRIORITY, "sensor"]) {
       for (const entry of (byDomain.get(domain) || [])) {
-        if (contextEntities.length >= HAWebSocketV3.MAX_CONTEXT_ENTITIES) break;
+        if (contextEntities.length >= HAWebSocketV5.MAX_CONTEXT_ENTITIES) break;
         if (domain === "sensor") {
-          if (sensorCount >= HAWebSocketV3.MAX_SENSOR_CONTEXT) break;
+          if (sensorCount >= HAWebSocketV5.MAX_SENSOR_CONTEXT) break;
           sensorCount++;
         }
         contextEntities.push(entry);
       }
-      if (contextEntities.length >= HAWebSocketV3.MAX_CONTEXT_ENTITIES) break;
+      if (contextEntities.length >= HAWebSocketV5.MAX_CONTEXT_ENTITIES) break;
     }
 
     // ---- System prompt ----
@@ -2928,11 +2963,11 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
       let responseText = response.choices?.[0]?.message?.content || response.response || "";
       if (!responseText) {
         const rawReasoning = response.choices?.[0]?.message?.reasoning || "";
-        const jsonFallback = HAWebSocketV3.extractFirstJSON(rawReasoning);
+        const jsonFallback = HAWebSocketV5.extractFirstJSON(rawReasoning);
         if (jsonFallback) responseText = jsonFallback;
       }
       let parsed = null;
-      const jsonMatch = HAWebSocketV3.extractFirstJSON(responseText);
+      const jsonMatch = HAWebSocketV5.extractFirstJSON(responseText);
       if (jsonMatch) {
         try {
           parsed = JSON.parse(jsonMatch);
@@ -3249,20 +3284,72 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
         const ts_central = now.toLocaleString("en-US", { timeZone: "America/Chicago" });
 
         // Pull recent context server-side — the model can't fake what gets attached.
+        // Every field is bounded: DO storage value cap is 128 KiB per key, and the
+        // raw chat history + ai_log + entity attributes can easily blow that.
         const channelKey = sanitizeChannelKey(action.from || "default");
-        const history = await this.state.storage.get(`chat_history:${channelKey}`) || [];
-        const last_chat_turns = history.slice(-4);
+        const rawHistory = await this.state.storage.get(`chat_history:${channelKey}`) || [];
+        const TURN_CONTENT_CAP = 1024;
+        const last_chat_turns = rawHistory.slice(-4).map((t) => {
+          const out = { role: t.role };
+          if (typeof t.content === "string") {
+            out.content = t.content.slice(0, TURN_CONTENT_CAP);
+          } else if (t.content != null) {
+            out.content = JSON.stringify(t.content).slice(0, TURN_CONTENT_CAP);
+          }
+          if (Array.isArray(t.tool_calls)) {
+            out.tool_calls = t.tool_calls.map((tc) => ({
+              id: tc.id,
+              type: tc.type,
+              function: tc.function ? {
+                name: tc.function.name,
+                arguments: typeof tc.function.arguments === "string"
+                  ? tc.function.arguments.slice(0, 512)
+                  : tc.function.arguments
+              } : undefined
+            }));
+          }
+          if (t.tool_call_id) out.tool_call_id = t.tool_call_id;
+          return out;
+        });
 
-        const last_log_entries = (this.aiLog || []).slice(-10);
+        const LOG_DATA_CAP = 500;
+        const last_log_entries = (this.aiLog || []).slice(-10).map((e) => {
+          const out = {
+            timestamp: e.timestamp,
+            type: e.type,
+            message: typeof e.message === "string" ? e.message.slice(0, 500) : e.message,
+          };
+          if (e.source) out.source = e.source;
+          if (e.data != null) {
+            try {
+              out.data = JSON.stringify(e.data).slice(0, LOG_DATA_CAP);
+            } catch { /* skip unserializable */ }
+          }
+          return out;
+        });
 
-        const entities = Array.isArray(action.entities) ? action.entities : [];
+        // Attribute allowlist: keep what's actually useful for diagnosing a bug;
+        // drop the bulk (full Zigbee attribute trees, base64 image blobs, etc.).
+        const ATTR_ALLOW = new Set([
+          "friendly_name", "device_class", "unit_of_measurement", "state_class",
+          "battery_level", "current_position", "current_temperature",
+          "target_temp_high", "target_temp_low", "hvac_action", "hvac_mode",
+          "locked", "latched", "is_locked", "code_format",
+          "brightness", "color_temp", "color_mode", "rgb_color",
+          "supported_features", "icon"
+        ]);
+        const rawEntities = Array.isArray(action.entities) ? action.entities : [];
+        const entities = rawEntities.slice(0, 10); // hard cap on cited entities
         const entity_states = {};
         for (const eid of entities) {
           if (typeof eid !== "string" || !eid) continue;
           const s = this.stateCache.get(eid);
-          entity_states[eid] = s
-            ? { state: s.state, attributes: s.attributes }
-            : null;
+          if (!s) { entity_states[eid] = null; continue; }
+          const trimmedAttrs = {};
+          for (const k of Object.keys(s.attributes || {})) {
+            if (ATTR_ALLOW.has(k)) trimmedAttrs[k] = s.attributes[k];
+          }
+          entity_states[eid] = { state: s.state, attributes: trimmedAttrs };
         }
 
         const severity = ["low", "medium", "high"].includes(action.severity) ? action.severity : "low";
@@ -3281,23 +3368,93 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
           last_log_entries
         };
 
-        const bugs = await this.state.storage.get("bugs") || [];
-        bugs.push(entry);
-        // FIFO 200 — generous cap; expected write volume is low.
-        const trimmed = bugs.length > 200 ? bugs.slice(-200) : bugs;
-        await this.state.storage.put("bugs", trimmed);
+        // Oversize guard. DO storage caps each value at 128 KiB; aim well below.
+        // If we're somehow still over budget after the field-level trims above
+        // (e.g. very long description, or many entities), shed context to make
+        // room. Description + id always survive — that's the floor.
+        const SIZE_BUDGET = 100 * 1024;
+        let serialized = JSON.stringify(entry);
+        const truncationNotes = [];
+        if (serialized.length > SIZE_BUDGET) {
+          entry.last_chat_turns = [];
+          truncationNotes.push("dropped last_chat_turns");
+          serialized = JSON.stringify(entry);
+        }
+        if (serialized.length > SIZE_BUDGET) {
+          entry.last_log_entries = [];
+          truncationNotes.push("dropped last_log_entries");
+          serialized = JSON.stringify(entry);
+        }
+        if (serialized.length > SIZE_BUDGET) {
+          entry.entity_states = {};
+          truncationNotes.push("dropped entity_states");
+          serialized = JSON.stringify(entry);
+        }
+        if (truncationNotes.length > 0) {
+          entry.truncation_notes = truncationNotes.join("; ");
+        }
+
+        // Per-bug storage: one DO key per bug, plus a small index. Avoids the
+        // failure mode where a single growing `bugs` array key trips the 128 KiB
+        // cap and silently drops new writes.
+        try {
+          await this.state.storage.put(`bug:${id}`, entry);
+          let bugIds = await this.state.storage.get("bug_ids") || [];
+          if (!Array.isArray(bugIds)) bugIds = [];
+          // Legacy migration: drain the old `bugs` array into the new index +
+          // per-id keys on first write after deploy. Idempotent — the legacy
+          // key is deleted after migration.
+          if (bugIds.length === 0) {
+            const legacy = await this.state.storage.get("bugs");
+            if (Array.isArray(legacy) && legacy.length > 0) {
+              for (const legacyBug of legacy) {
+                if (!legacyBug || !legacyBug.id) continue;
+                try {
+                  await this.state.storage.put(`bug:${legacyBug.id}`, legacyBug);
+                  bugIds.push(legacyBug.id);
+                } catch { /* skip oversize legacy entries */ }
+              }
+              await this.state.storage.delete("bugs").catch(() => {});
+            }
+          }
+          bugIds.push(id);
+          // FIFO 200: delete the dropped keys so storage doesn't grow unbounded.
+          if (bugIds.length > 200) {
+            const dropped = bugIds.slice(0, bugIds.length - 200);
+            bugIds = bugIds.slice(-200);
+            for (const dropId of dropped) {
+              await this.state.storage.delete(`bug:${dropId}`).catch(() => {});
+            }
+          }
+          await this.state.storage.put("bug_ids", bugIds);
+        } catch (err) {
+          // Failure must be visible. The agent's CONFABULATION rule in the
+          // system prompt requires it to surface this error verbatim instead
+          // of pretending the bug was saved.
+          const errMsg = err && err.message ? err.message : String(err);
+          this.logAI(
+            "bug_save_failed",
+            `report_bug write failed: ${errMsg}`,
+            { id, error: errMsg, serialized_size: serialized.length, truncation_notes: entry.truncation_notes || null },
+            source
+          );
+          return {
+            ok: false,
+            error: `Storage write failed: ${errMsg} (entry was ${serialized.length} bytes after trims${entry.truncation_notes ? "; " + entry.truncation_notes : ""})`
+          };
+        }
 
         this.logAI(
           "bug_reported",
           `#${id} ${description.substring(0, 80)}`,
-          { id, severity, entities, channel: channelKey },
+          { id, severity, entities, channel: channelKey, serialized_size: serialized.length, truncation_notes: entry.truncation_notes || null },
           source
         );
 
         return {
           ok: true,
           id,
-          summary: `Logged bug #${id}. Captured ${Object.keys(entity_states).length} entity state(s) + last ${last_log_entries.length} log entries.`
+          summary: `Logged bug #${id}. Captured ${Object.keys(entity_states).length} entity state(s) + last ${entry.last_log_entries.length} log entries.${entry.truncation_notes ? " Note: " + entry.truncation_notes + "." : ""}`
         };
       }
       default:
@@ -3866,7 +4023,7 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
       if (domain === "switch" && isNoisySwitch(id)) continue;
       if (state.state === "unavailable" || state.state === "unknown") continue;
 
-      if (HAWebSocketV3.CONTEXT_DOMAIN_PRIORITY.includes(domain)) {
+      if (HAWebSocketV5.CONTEXT_DOMAIN_PRIORITY.includes(domain)) {
         const entry = { entity_id: id, friendly_name: attr.friendly_name || id, state: state.state };
         if (domain === "climate") {
           entry.setpoint = attr.temperature ?? null;
@@ -3888,11 +4045,11 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
         byDomain.get(domain).push(entry);
       } else if (domain === "sensor") {
         let include = false;
-        if (HAWebSocketV3.SENSOR_WHITELIST.has(deviceClass)) {
+        if (HAWebSocketV5.SENSOR_WHITELIST.has(deviceClass)) {
           include = true;
         } else if (deviceClass === "battery") {
           const pct = parseFloat(state.state);
-          include = !isNaN(pct) && pct <= HAWebSocketV3.BATTERY_LOW_THRESHOLD;
+          include = !isNaN(pct) && pct <= HAWebSocketV5.BATTERY_LOW_THRESHOLD;
         }
         if (include) {
           const entry = { entity_id: id, friendly_name: attr.friendly_name || id, state: state.state, device_class: deviceClass, unit: attr.unit_of_measurement || null };
@@ -3904,16 +4061,16 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
 
     const contextEntities = [];
     let sensorCount = 0;
-    for (const domain of [...HAWebSocketV3.CONTEXT_DOMAIN_PRIORITY, "sensor"]) {
+    for (const domain of [...HAWebSocketV5.CONTEXT_DOMAIN_PRIORITY, "sensor"]) {
       for (const entry of (byDomain.get(domain) || [])) {
-        if (contextEntities.length >= HAWebSocketV3.MAX_CONTEXT_ENTITIES) break;
+        if (contextEntities.length >= HAWebSocketV5.MAX_CONTEXT_ENTITIES) break;
         if (domain === "sensor") {
-          if (sensorCount >= HAWebSocketV3.MAX_SENSOR_CONTEXT) break;
+          if (sensorCount >= HAWebSocketV5.MAX_SENSOR_CONTEXT) break;
           sensorCount++;
         }
         contextEntities.push(entry);
       }
-      if (contextEntities.length >= HAWebSocketV3.MAX_CONTEXT_ENTITIES) break;
+      if (contextEntities.length >= HAWebSocketV5.MAX_CONTEXT_ENTITIES) break;
     }
     return contextEntities;
   }
@@ -3923,7 +4080,7 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
     return this.aiLog
       .filter((e) => relevantTypes.includes(e.type))
       .slice(-150)
-      .map((e) => `[${HAWebSocketV3._formatTimelineTimestamp(e.timestamp)}] ${e.type}${e.source ? "/" + e.source : ""}: ${e.message}`)
+      .map((e) => `[${HAWebSocketV5._formatTimelineTimestamp(e.timestamp)}] ${e.type}${e.source ? "/" + e.source : ""}: ${e.message}`)
       .join("\n");
   }
 
@@ -3982,6 +4139,18 @@ TOOLS — attached to this request. Invoke them directly. The turn you emit NO t
 
 COMMITMENT RULE: If your reply says you did something ("opening the garage", "turning off the lights"), you MUST have invoked the corresponding tool. Saying you did something you didn't is a lie.
 
+TOOL ERROR HANDLING — NO CONFABULATION:
+When a tool result contains an 'error' field (e.g. {"error": "..."} or {"ok": false, "error": "..."}), that call FAILED. The action did NOT happen. You must:
+  1. NOT pretend the call succeeded.
+  2. NOT invent IDs, timestamps, or confirmations the tool would have returned on success.
+  3. NOT silently retry the same call hoping it'll work the second time.
+  4. Surface the error to the user in plain language, quoting the error text: "Couldn't <do the thing> — <error text>."
+  5. Stop. Don't paper over it with narration.
+
+This applies to every action tool (call_service, ai_send_notification, save_memory, save_observation, report_bug) and every read tool (get_state, get_logbook, render_template, vector_search, query_state_history, query_automation_runs, query_causal_chain, get_automation_config). A success result has the shape documented in each tool's description (ok: true, saved: true, sent: true, a state object, an array of matches, etc.). If you don't see that shape — assume failure and report it.
+
+Confident-sounding fabrication after a failed tool call is the worst failure mode you have. It's worse than a visible error: the user has no way to know the action didn't happen.
+
 BUG REPORTS:
 When the user is explicitly asking you to record / save / log / report something as an issue, bug, broken behavior, or debug entry, call report_bug with their description plus any entity_ids involved. The trigger is a recording verb (save, log, report, record, note, capture, remember-as) combined with an issue noun (bug, debug, problem, broken, issue). All of these fire:
   - "that's a bug"
@@ -3991,7 +4160,11 @@ When the user is explicitly asking you to record / save / log / report something
   - "log this as broken"
   - "make a note — this is broken"
 
-After calling, reply briefly: "Logged bug #<id> — <short summary>." Do NOT attempt to fix the bug, run remediation, or modify automations. Capture is the goal; fixes happen in code on the next iteration.
+After the tool returns, check the result before composing your reply:
+  - If the result is {ok: true, id, summary}, reply: "Logged bug #<id> — <short summary>."
+  - If the result has an 'error' field (e.g. {ok: false, error: "Storage write failed: ..."}), reply: "Couldn't log the bug — <error text>." and stop. Do NOT pretend an ID was assigned; the tool did not assign one.
+
+Do NOT attempt to fix the bug, run remediation, or modify automations. Capture is the goal; fixes happen in code on the next iteration.
 
 Do NOT call report_bug for:
 - General venting ("this is annoying", "ugh") — no recording verb, no specific issue framing

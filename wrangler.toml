@@ -51,7 +51,7 @@ binding = "CF_VERSION_METADATA"
 
 [durable_objects]
 bindings = [
-  { name = "HA_WS", class_name = "HAWebSocketV3" }
+  { name = "HA_WS", class_name = "HAWebSocketV5" }
 ]
 
 [[migrations]]
@@ -77,6 +77,34 @@ renamed_classes = [
 tag = "v3"
 renamed_classes = [
   { from = "HAWebSocketV2", to = "HAWebSocketV3" }
+]
+
+# v4 — noise-filter extensions (image.* skip, voltage 2V deadband, roborock
+# cleaning-telemetry suffix denylist) live inside `_shouldLogStateChange` on
+# the DO. The previous noise-filter tweak (commit b59cea7) was committed
+# after the V3 rename and the live DO never picked it up — verified by D1
+# showing 1,400+ summation_delivered rows in 1h despite the source-level
+# hard-deny rule. Renaming forces fresh DO instantiation. State preserved.
+[[migrations]]
+tag = "v4"
+renamed_classes = [
+  { from = "HAWebSocketV3", to = "HAWebSocketV4" }
+]
+
+# v5 — report_bug storage architecture fix. Old code stored every bug under
+# a single `bugs` array key, which blew the 128 KiB DO storage value cap
+# after a handful of entries (each carries chat history + ai_log slices +
+# entity state). Symptom: agent confabulated "Logged bug #..." replies
+# after silent write failures. New layout: bug:<id> per-key plus a
+# bug_ids index. Plus aggressive per-field trimming and an oversize
+# fallback. The system prompt also gained a TOOL ERROR HANDLING rule
+# forbidding success-confabulation after error results. DO-side changes
+# require a rename to take effect — persistent HA WS keeps the live
+# isolate from idling.
+[[migrations]]
+tag = "v5"
+renamed_classes = [
+  { from = "HAWebSocketV4", to = "HAWebSocketV5" }
 ]
 
 # Two cron triggers:

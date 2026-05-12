@@ -1,4 +1,4 @@
-import { HAWebSocketV3 } from "./ha-websocket.js";
+import { HAWebSocketV5 } from "./ha-websocket.js";
 import {
   ALL_KINDS,
   fnv1aHex,
@@ -3928,14 +3928,27 @@ var worker_default = {
       });
     }
     if (url.pathname === "/admin/reindex-observations") {
-      // One-shot platform-bug workaround: Vectorize's `topic_tag` metadata
-      // index doesn't get populated for existing vectors that are upserted
-      // (only fresh inserts trigger metadata indexing). Sequence:
-      //   1. Pull current observation list from DO
-      //   2. Compute their vector_ids
-      //   3. Delete them from Vectorize (so next upsert is a fresh INSERT)
-      //   4. Force rebuild observation kind only
-      // After this runs once, topic_tag filter should work in Vectorize-side.
+      // Wipe + rebuild observation vectors. Handles two pathologies:
+      //   1. Legacy ref_id format. Pre-59c9b69 observation vectors used
+      //      fnv1aHex(text) as ref_id; current code uses topicTagFor(text).
+      //      Old-format vectors are orphaned even though their texts are
+      //      still in D1 — same observation, two vector IDs.
+      //   2. Orphan accumulation. Observations deleted from D1 (during a
+      //      cutover or manual cleanup) leave their vectors behind because
+      //      `last_indexed_ids_v1` orphan-diff has been failing silently
+      //      (BUGS.md #vec-orphan-diff-noop).
+      //
+      // Cleanup strategy:
+      //   a. Pull current observation texts from D1.
+      //   b. Compute canonical keep-set: vectorIdFor(kind, topicTagFor(text)).
+      //   c. Probe Vectorize via similarity query (kind=observation filter)
+      //      using up to 4 distinct probe embeddings to enumerate ID set.
+      //   d. Delete anything not in keep-set.
+      //   e. Force-rebuild observation kind to ensure all keep-set IDs exist
+      //      with current embed text + metadata.
+      //
+      // Idempotent. Safe to re-run if the index has >400 observation vectors
+      // and a single pass misses some.
       if (request.method !== "POST") {
         return new Response("Method not allowed", { status: 405 });
       }
@@ -3948,31 +3961,76 @@ var worker_default = {
       const t0 = Date.now();
       try {
         const observations = await doFetch(env, "/ai_observations") || [];
-        const ids = (Array.isArray(observations) ? observations : [])
-          .filter((t) => typeof t === "string" && t.length > 0)
-          .map((t) => vectorIdFor("observation", fnv1aHex(t)));
-        const uniqueIds = Array.from(new Set(ids));
+        const texts = (Array.isArray(observations) ? observations : [])
+          .filter((t) => typeof t === "string" && t.length > 0);
+
+        const canonicalKeepSet = new Set(
+          texts.map((t) => vectorIdFor("observation", topicTagFor(t)))
+        );
+
+        // Probe Vectorize to enumerate IDs. We need up to 4 distinct probe
+        // vectors to cover up to 400 observation vectors (CF Vectorize tops
+        // out top_k at 100). Probes come from a sample of current observation
+        // embeddings; if no observations exist (table fully wiped) we fall
+        // back to a single zero-ish probe.
+        const probeTexts = texts.slice(0, 4);
+        if (probeTexts.length === 0) probeTexts.push("orphan probe seed");
+        const enumeratedIds = new Set();
+        const probeStats = [];
+        for (let i = 0; i < probeTexts.length; i++) {
+          const probeEmbed = await env.AI.run("@cf/baai/bge-large-en-v1.5", {
+            text: probeTexts[i],
+            pooling: "cls"
+          });
+          const vec = probeEmbed && probeEmbed.data && probeEmbed.data[0];
+          if (!Array.isArray(vec)) continue;
+          const res = await env.KNOWLEDGE.query(vec, {
+            topK: 100,
+            filter: { kind: "observation" },
+            returnValues: false,
+            returnMetadata: "none"
+          });
+          const before = enumeratedIds.size;
+          if (res && Array.isArray(res.matches)) {
+            for (const m of res.matches) if (m && m.id) enumeratedIds.add(m.id);
+          }
+          probeStats.push({ probe: i, new_ids: enumeratedIds.size - before, total_enumerated: enumeratedIds.size });
+        }
+
+        const orphanIds = [];
+        for (const id of enumeratedIds) {
+          if (!canonicalKeepSet.has(id)) orphanIds.push(id);
+        }
+
         let deleted = 0;
         const deleteErrors = [];
-        if (uniqueIds.length > 0 && typeof env.KNOWLEDGE.deleteByIds === "function") {
+        if (orphanIds.length > 0 && typeof env.KNOWLEDGE.deleteByIds === "function") {
           const DELETE_BATCH = 100;
-          for (let i = 0; i < uniqueIds.length; i += DELETE_BATCH) {
+          for (let i = 0; i < orphanIds.length; i += DELETE_BATCH) {
             try {
-              await env.KNOWLEDGE.deleteByIds(uniqueIds.slice(i, i + DELETE_BATCH));
-              deleted += Math.min(DELETE_BATCH, uniqueIds.length - i);
+              await env.KNOWLEDGE.deleteByIds(orphanIds.slice(i, i + DELETE_BATCH));
+              deleted += Math.min(DELETE_BATCH, orphanIds.length - i);
             } catch (err) {
               deleteErrors.push(err && err.message ? err.message : String(err));
             }
           }
         }
+
         const summary = await backfillKnowledge(env, { force: true, kinds: ["observation"] });
         return new Response(JSON.stringify({
-          observations_in_storage: observations.length,
-          ids_to_delete: uniqueIds.length,
-          deleted,
+          observations_in_storage: texts.length,
+          canonical_keep_set_size: canonicalKeepSet.size,
+          probes_run: probeStats.length,
+          probe_stats: probeStats,
+          enumerated_ids: enumeratedIds.size,
+          orphans_found: orphanIds.length,
+          orphans_deleted: deleted,
           delete_errors: deleteErrors,
           rebuild_summary: summary,
-          duration_ms: Date.now() - t0
+          duration_ms: Date.now() - t0,
+          note: enumeratedIds.size >= probeStats.length * 100
+            ? "Probe results saturated — re-run if the index has >400 observation vectors."
+            : "Likely full enumeration; orphan set complete."
         }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
       } catch (e) {
         return new Response(JSON.stringify({ error: e.message, duration_ms: Date.now() - t0 }), {
@@ -4192,6 +4250,6 @@ var worker_default = {
   }
 };
 export {
-  HAWebSocketV3,
+  HAWebSocketV5,
   worker_default as default
 };

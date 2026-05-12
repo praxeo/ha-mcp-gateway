@@ -1,7 +1,7 @@
 /**
  * Unit tests for _shouldLogStateChange behavioral contract.
  *
- * The function lives in HAWebSocketV3 but its logic is pure aside from
+ * The function lives in HAWebSocketV5 but its logic is pure aside from
  * `this._numericDeadbandMap`. We test it here via a minimal stub that
  * avoids the full CF worker import chain.
  */
@@ -22,6 +22,8 @@ class ShouldLogStub {
     const unit = String(attr.unit_of_measurement || "").toLowerCase();
     const lcId = String(entityId).toLowerCase().replace(/_\d+$/, "");
 
+    if (lcId.startsWith("image.")) return false;
+
     const DENY_SUFFIX = [
       "_lqi", "_signal_strength", "_rssi", "_bssid", "_ssid",
       "_last_update_trigger", "_audio_output", "_link_quality"
@@ -31,7 +33,12 @@ class ShouldLogStub {
     if (deviceClass === "signal_strength") return false;
     if (unit === "dbm" || unit === "db" || unit === "lqi") return false;
 
-    const HARD_DENY_SUFFIX = ["_summation_delivered", "_summation_received"];
+    const HARD_DENY_SUFFIX = [
+      "_summation_delivered", "_summation_received",
+      "_cleaning_area", "_cleaning_time", "_cleaning_progress",
+      "_filter_time_left", "_main_brush_time_left", "_side_brush_time_left",
+      "_dock_strainer_time_left", "_sensor_dirty_time_left"
+    ];
     if (HARD_DENY_SUFFIX.some((s) => lcId.endsWith(s))) return false;
 
     const rawVal = parseFloat(newState.state);
@@ -41,6 +48,8 @@ class ShouldLogStub {
         threshold = 50;
       } else if (deviceClass === "energy" || unit === "kwh") {
         threshold = 0.01;
+      } else if (deviceClass === "voltage" || unit === "v") {
+        threshold = 2;
       } else if (deviceClass === "humidity" || unit === "%") {
         threshold = 2;
       } else if (deviceClass === "temperature") {
@@ -173,6 +182,45 @@ describe("_shouldLogStateChange", () => {
   it("always passes 'locked'/'unlocked' states", () => {
     expect(stub._shouldLogStateChange("lock.front_door", mkState("locked"))).toBe(true);
     expect(stub._shouldLogStateChange("lock.front_door", mkState("unlocked"))).toBe(true);
+  });
+
+  // --- Domain skip: image.* ---
+  it("drops image.* domain entirely", () => {
+    expect(stub._shouldLogStateChange("image.roborock_qv_35a_map_0",
+      mkState("2026-05-12T22:09:27.511872+00:00"))).toBe(false);
+  });
+
+  // --- Hard denylist: roborock cleaning telemetry ---
+  it("drops _cleaning_area suffix", () => {
+    expect(stub._shouldLogStateChange("sensor.roborock_qv_35a_cleaning_area", mkState("78.1"))).toBe(false);
+  });
+
+  it("drops _cleaning_time suffix", () => {
+    expect(stub._shouldLogStateChange("sensor.roborock_qv_35a_cleaning_time", mkState("107.45"))).toBe(false);
+  });
+
+  it("drops _filter_time_left suffix", () => {
+    expect(stub._shouldLogStateChange("sensor.roborock_qv_35a_filter_time_left", mkState("93.17"))).toBe(false);
+  });
+
+  it("drops _main_brush_time_left suffix", () => {
+    expect(stub._shouldLogStateChange("sensor.roborock_qv_35a_main_brush_time_left", mkState("243.17"))).toBe(false);
+  });
+
+  // --- Deadband: voltage ---
+  it("drops voltage delta below 2V threshold (mains jitter)", () => {
+    stub._shouldLogStateChange("sensor.attic_voltage", mkState("123", { device_class: "voltage", unit_of_measurement: "V" }));
+    expect(stub._shouldLogStateChange("sensor.attic_voltage", mkState("124", { device_class: "voltage", unit_of_measurement: "V" }))).toBe(false);
+  });
+
+  it("passes voltage delta at or above 2V threshold", () => {
+    stub._shouldLogStateChange("sensor.attic_voltage", mkState("123", { device_class: "voltage", unit_of_measurement: "V" }));
+    expect(stub._shouldLogStateChange("sensor.attic_voltage", mkState("125", { device_class: "voltage", unit_of_measurement: "V" }))).toBe(true);
+  });
+
+  it("passes voltage 120V → 0V transition (power cycle)", () => {
+    stub._shouldLogStateChange("sensor.attic_voltage", mkState("123", { device_class: "voltage", unit_of_measurement: "V" }));
+    expect(stub._shouldLogStateChange("sensor.attic_voltage", mkState("0", { device_class: "voltage", unit_of_measurement: "V" }))).toBe(true);
   });
 
   // --- Deadband map is per-entity ---
