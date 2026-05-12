@@ -1899,6 +1899,24 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
     };
   }
 
+  async _loadObservationsFromD1(limit = 100) {
+    if (!this.env.DB) return [];
+    try {
+      const result = await this.env.DB
+        .prepare(`SELECT text FROM observations ORDER BY timestamp DESC LIMIT ?1`)
+        .bind(limit)
+        .all();
+      const rows = result?.results || [];
+      return rows.map((r) => r.text).filter((t) => typeof t === "string" && t);
+    } catch (err) {
+      this.logAI("error", "d1_load_observations_failed", {
+        error: String(err?.message || err),
+        limit,
+      });
+      return [];
+    }
+  }
+
   _observationDocFor(text) {
     if (typeof text !== "string" || !text) return null;
     const ref_id = topicTagFor(text);
@@ -3913,7 +3931,7 @@ COMMITMENT RULE: If your final reply says you did something ("opening the garage
 YOUR MEMORY (confirmed facts, ${memory.length}/100):
 ${memory.length > 0 ? memory.map((m) => "- " + m).join("\n") : "No memories yet. Observe patterns and save useful confirmed facts as you learn them."}
 
-YOUR OBSERVATIONS (patterns & hypotheses in progress, ${observations.length}/500):
+YOUR OBSERVATIONS (patterns & hypotheses in progress, ${observations.length} most recent):
 ${observations.length > 0 ? observations.map((o) => "- " + o).join("\n") : "No observations yet. Watch for repeating sequences — that's how automations get proposed."}
 
 UNIFIED TIMELINE — everything recent: chat messages, your replies, state changes, your past tool calls. Each entry is tagged with its source (legacy_json / native_loop / tool_call) so you can see whether a past action came from you (native_loop), from the old JSON path (legacy_json), or from a direct MCP call (tool_call).
@@ -4009,7 +4027,7 @@ If you are ever unsure whether an action falls in the "never autonomous" list, d
   async runAIAgentNative(eventsToProcess) {
     const now = new Date();
     const memory = await this.state.storage.get("ai_memory") || [];
-    const observations = await this.state.storage.get("ai_observations") || [];
+    const observations = await this._loadObservationsFromD1(100);
     // Synthesize a query for vector retrieval from the events being processed:
     // entity_id + friendly_name gives the embedder enough surface area to find
     // semantically related entities (the same room, related devices, etc.).
