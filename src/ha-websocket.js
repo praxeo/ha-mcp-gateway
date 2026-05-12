@@ -2946,7 +2946,33 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
           evictedTexts = observations.splice(0, observations.length - 500);
         }
         await this.state.storage.put("ai_observations", observations);
-        this.logAI("observation_saved", text.substring(0, 200), { replaces: action.replaces || null }, source);
+
+        // ─── D1 write-through (step 2 of D1 migration) ─────────────────────
+        // Source of truth during this transition is still DO storage; D1 is
+        // populated in parallel so the next dispatch can flip reads safely.
+        let topicTag;
+        {
+          const m = String(text).match(/^\[([a-z0-9_-]+)\]/i);
+          topicTag = m ? m[1].toLowerCase() : fnv1aHex(String(text));
+        }
+        try {
+          const ts = new Date().toISOString();
+          await this.env.DB
+            .prepare(
+              `INSERT OR REPLACE INTO observations (topic_tag, text, timestamp)
+               VALUES (?1, ?2, ?3)`
+            )
+            .bind(topicTag, String(text), ts)
+            .run();
+        } catch (err) {
+          this.logAI("error", "d1_save_observation_failed", {
+            error: String(err?.message || err),
+            text_preview: String(text).slice(0, 200),
+          }, source);
+        }
+        // ───────────────────────────────────────────────────────────────────
+
+        this.logAI("observation_saved", text.substring(0, 200), { replaces: action.replaces || null, topic_tag: topicTag }, source);
         // Write-through: embed + upsert the new observation, then delete the
         // vectors for any prefix-replaced or FIFO-evicted entries.
         if (this.env.AI && this.env.KNOWLEDGE) {

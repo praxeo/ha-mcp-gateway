@@ -26,6 +26,11 @@ command = "npx esbuild src/worker.js --bundle --outdir=dist --format=esm --outba
 binding = "HA_CACHE"
 id = "d341a11cfff149cdb99e5edee7612132"
 
+[[d1_databases]]
+binding = "DB"
+database_name = "ha_db"
+database_id = "71dd548f-632b-4e65-9ad6-f699db9f3a57"
+
 # Unified multi-kind index — entity / automation / script / scene / area /
 # device / service / memory / observation. The legacy ha-entities index and
 # its VECTORIZE binding were dropped after the multi-kind index was verified.
