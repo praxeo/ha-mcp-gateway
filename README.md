@@ -221,7 +221,7 @@ lives in `migrations/0002_forensic_log.sql`.
 
 | HA event             | Forensic table     | Filter             |
 |----------------------|--------------------|--------------------|
-| `state_changed`      | `state_changes`    | `_shouldLogStateChange` denylist (`*_lqi*`, `*_rssi*`, `*_signal_strength*`, `*_bssid*`, `*_ssid*`, `*_last_update_trigger*`, `dBm`/`dB`/`lqi` units; `_<digits>` suffix tolerant) |
+| `state_changed`      | `state_changes`    | `_shouldLogStateChange`: suffix denylist (`*_lqi*`, `*_rssi*`, `*_signal_strength*`, `*_bssid*`, `*_ssid*`, `*_last_update_trigger*`, `dBm`/`dB`/`lqi` units); hard denylist (`*_summation_delivered`, `*_summation_received`); numeric deadband (power 50W, energy 0.01kWh, humidity 2%, temperature 0.5°, illuminance 10% relative) |
 | `automation_triggered` | `automation_runs` | none — every fire logged |
 | `call_service`       | `service_calls`    | none — every call logged |
 
@@ -240,8 +240,10 @@ On every successful HA WS auth-ok, the DO reads `last_event_seen_ms`
 from its storage. If it's set and the gap is under 1 hour, it pulls
 `/api/history/period/{iso}` from HA and inserts the missed state
 changes into `state_changes` with `source='backfill'` and
-`context_id=null` (HA history doesn't preserve context). Service calls
-and automation fires are not backfilled — HA's REST API doesn't expose
+`context_id=null` (HA history doesn't preserve context). Writes use
+`INSERT OR IGNORE` against a unique index on `(entity_id, fired_at_ms,
+new_state)`, so reconnect backfill is idempotent. Service calls and
+automation fires are not backfilled — HA's REST API doesn't expose
 them reliably; brief gaps in those tables on reconnect are acceptable.
 
 ### Retention
@@ -279,8 +281,8 @@ Single helpers (`_executeQueryStateHistory`, `_executeQueryAutomationRuns`,
 plain-text dump of the last N hours UNION'd across all three tables:
 
 ```
-[May 12, 2:32 PM    ] state_change   input_boolean.basement_work_mode      off -> on
-[May 12, 2:32 PM    ] service_call   input_boolean.turn_on                 input_boolean.basement_work_mode
+[May 12, 2026, 2:32 PM] state_change   input_boolean.basement_work_mode      off -> on
+[May 12, 2026, 2:32 PM] service_call   input_boolean.turn_on                 input_boolean.basement_work_mode
 ```
 
 `?format=json` returns structured rows. Useful for verifying data flow
@@ -411,7 +413,7 @@ Tool surface (13 total):
 | `ai_send_notification` | yes | `notify.notify` + writes `notification` entry to `ai_log`. |
 | `save_memory` | yes | Append to DO storage (100 FIFO, `PINNED:` prefix exempt). Embed + upsert. Chat-prompt rule: only on explicit user request. |
 | `save_observation` | yes | INSERT OR REPLACE into D1 `observations` keyed on `topicTagFor(text)`. Embed + upsert. Chat-prompt rule: only on explicit user request. |
-| `get_state` | no | stateCache hit; `force_refresh` fetches via WS. |
+| `get_state` | no | stateCache hit; `force_refresh: true` fetches via REST `GET /api/states/{id}` (single entity, updates cache); `force_refresh: "bulk"` repopulates entire cache via WS `get_states`. |
 | `get_logbook` | no | HA `/api/logbook`. Description requires explicit TZ offset (`-05:00` for CDT). |
 | `render_template` | no | HA `/api/template`. Jinja2 evaluation. |
 | `vector_search` | no | DO `/vector_search` → `retrieveKnowledge`. Multi-kind metadata-filtered semantic search. Args: `query`, `kinds` (REQUIRED), `domain`, `area`, `topic_tag`, `min_score` (default 0.50), `top_k` (max 50), `include_noisy`. |
