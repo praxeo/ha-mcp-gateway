@@ -540,22 +540,15 @@ var TOOLS = [
       required: ["query"]
     }
   },
-  // --- AI Agent ---
-  { name: "ai_status", description: "Check the autonomous AI agent status.", inputSchema: { type: "object" } },
-  { name: "ai_enable", description: "Enable the autonomous AI agent.", inputSchema: { type: "object" } },
-  { name: "ai_disable", description: "Disable the autonomous AI agent.", inputSchema: { type: "object" } },
+  // --- AI Agent (read-only inspection of chat-path state) ---
   {
     name: "ai_log",
     description: "View the AI agent's recent action log.",
     inputSchema: { type: "object", properties: { count: { type: "number" } } }
   },
-  { name: "ai_clear_log", description: "Clear the AI agent's action log.", inputSchema: { type: "object" } },
   { name: "ai_memory", description: "View the AI agent's learned memories.", inputSchema: { type: "object" } },
-  { name: "ai_clear_memory", description: "Clear the AI agent's memory.", inputSchema: { type: "object" } },
-  { name: "ai_observations", description: "View the AI agent's observations-in-progress — patterns and hypotheses being tracked before promotion to memory.", inputSchema: { type: "object" } },
+  { name: "ai_observations", description: "View the AI agent's observations-in-progress — patterns and hypotheses tracked over time.", inputSchema: { type: "object" } },
   { name: "ai_clear_observations", description: "Clear the AI agent's observations list.", inputSchema: { type: "object" } },
-  { name: "ai_clear_chat", description: "Clear the AI agent's chat conversation history.", inputSchema: { type: "object" } },
-  { name: "ai_trigger", description: "Force the AI agent to evaluate pending events now.", inputSchema: { type: "object" } },
   {
     name: "ai_chat",
     description: "Send a message to the autonomous AI home agent and get its response. The agent can see all entity states and take actions like controlling lights, locks, covers, and climate. Use for debugging the agent, getting home status summaries, or issuing commands through the agent.",
@@ -2717,34 +2710,17 @@ async function handleTool(env, name, args) {
       if (r) return r;
       return { error: "vector_search requires Durable Object" };
     }
-    // ---- AI Agent ----
-    case "ai_status": {
-      const status = await doFetch(env, "/status");
-      if (status) return { ai_enabled: status.ai_enabled, ai_pending_events: status.ai_pending_events, ai_log_entries: status.ai_log_entries, websocket_connected: status.connected };
-      return { error: "Durable Object not responding" };
-    }
-    case "ai_enable":
-      return await doFetch(env, "/ai_enable") || { error: "DO not responding" };
-    case "ai_disable":
-      return await doFetch(env, "/ai_disable") || { error: "DO not responding" };
+    // ---- AI Agent (read-only inspection of chat-path state) ----
     case "ai_log": {
       const count = args.count || 50;
       return await doFetch(env, "/ai_log?count=" + count) || { error: "DO not responding" };
     }
-    case "ai_clear_log":
-      return await doFetch(env, "/ai_clear_log") || { error: "DO not responding" };
     case "ai_memory":
       return await doFetch(env, "/ai_memory") || { error: "DO not responding" };
-    case "ai_clear_memory":
-      return await doFetch(env, "/ai_clear_memory") || { error: "DO not responding" };
     case "ai_observations":
       return await doFetch(env, "/ai_observations") || { error: "DO not responding" };
     case "ai_clear_observations":
       return await doFetch(env, "/ai_clear_observations") || { error: "DO not responding" };
-    case "ai_clear_chat":
-      return await doFetch(env, "/ai_clear_chat") || { error: "DO not responding" };
-    case "ai_trigger":
-      return await doFetch(env, "/ai_trigger") || { error: "DO not responding" };
     case "ai_chat": {
       const result = await doFetch(env, "/ai_chat", { message: args.message });
       if (result) return result;

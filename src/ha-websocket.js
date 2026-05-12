@@ -27,7 +27,6 @@ function sanitizeChannelKey(from) {
 
 export class HAWebSocketV2 {
   // Static config for prioritized entity context building
-  static BURST_EXEMPT_DOMAINS = new Set(["climate", "lock", "cover", "alarm_control_panel"]);
   static CONTEXT_DOMAIN_PRIORITY = [
     "alarm_control_panel", "climate", "lock", "cover", "binary_sensor",
     "person", "input_boolean", "weather", "fan", "media_player", "light", "switch",
@@ -384,16 +383,10 @@ export class HAWebSocketV2 {
 
     this.lastSnapshotPersist = 0;
 
-    this.recentEvents = [];
-    this.aiProcessing = false;
-    this.aiEnabled = true;
     this.aiLog = [];
     this._logInitialized = false; // lazy-load aiLog from storage on first use
 
-    this.lastHeartbeat = 0;
-    this.eventBurstTracker = new Map();
-
-    // Forensic event log (Deploy 1). _d1WriteFailures is exposed via /status.
+    // Forensic event log. _d1WriteFailures is exposed via /status.
     // _lastEventSeenMs is the cursor for reconnect backfill from HA history.
     this.subscribedForensicEvents = false;
     this._d1WriteFailures = { total: 0, last_error_iso: null, last_error_msg: null };
@@ -838,8 +831,6 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
             cached_entities: this.stateCache.size,
             pending_requests: this.pending.size,
             connect_attempts: this.connectAttempts,
-            ai_enabled: this.aiEnabled,
-            ai_pending_events: this.recentEvents.length,
             ai_log_entries: this.aiLog.length,
             d1_write_failures: this._d1WriteFailures,
             last_event_seen_ms: this._lastEventSeenMs,
@@ -960,16 +951,6 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
           }), { headers });
         }
 
-        case "/ai_enable": {
-          this.aiEnabled = true;
-          return new Response(JSON.stringify({ ai_enabled: true }), { headers });
-        }
-
-        case "/ai_disable": {
-          this.aiEnabled = false;
-          return new Response(JSON.stringify({ ai_enabled: false }), { headers });
-        }
-
         case "/ai_log": {
           const count = parseInt(url.searchParams.get("count") || "50");
           if (count > HAWebSocketV2.LOG_IN_MEMORY_CAP) {
@@ -979,32 +960,9 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
           return new Response(JSON.stringify(this.aiLog.slice(-count)), { headers });
         }
 
-        case "/ai_clear_log": {
-          this.aiLog = [];
-          if (this.env.DB) {
-            try {
-              const r = await this.env.DB.prepare(`DELETE FROM ai_log`).run();
-              const deleted = r?.meta?.changes ?? 0;
-              console.log(`/ai_clear_log: deleted ${deleted} D1 rows`);
-            } catch (err) {
-              console.error("clear D1 ai_log:", err?.message || err);
-            }
-          }
-          await this.clearPersistedLog();
-          return new Response(JSON.stringify({ cleared: true }), { headers });
-        }
-        case "/ai_clear_chat": {
-          await this.state.storage.put("chat_history", []);
-          return new Response(JSON.stringify({ cleared: true }), { headers });
-        }
         case "/ai_memory": {
           const memory = await this.state.storage.get("ai_memory") || [];
           return new Response(JSON.stringify(memory), { headers });
-        }
-
-        case "/ai_clear_memory": {
-          await this.state.storage.put("ai_memory", []);
-          return new Response(JSON.stringify({ cleared: true }), { headers });
         }
 
         case "/ai_observations": {
@@ -1039,14 +997,6 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
         case "/bugs_clear": {
           await this.state.storage.put("bugs", []);
           return new Response(JSON.stringify({ cleared: true }), { headers });
-        }
-
-        case "/ai_trigger": {
-          if (this.recentEvents.length === 0) {
-            return new Response(JSON.stringify({ message: "No pending events to evaluate" }), { headers });
-          }
-          await this.runAIAgent();
-          return new Response(JSON.stringify({ message: "AI evaluation triggered", log: this.aiLog.slice(-5) }), { headers });
         }
 
         case "/ai_memory_append": {
@@ -1309,141 +1259,6 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
     }
   }
 
-  // ========================================================================
-  // AI Event Filter — Tiered filtering to reduce noise
-  // ========================================================================
-
-  shouldQueueEvent(entityId, oldState, newState) {
-    const domain = entityId.split(".")[0];
-    const attrs = (newState.attributes || {});
-    const deviceClass = attrs.device_class || "";
-    const oldVal = oldState.state;
-    const newVal = newState.state;
-
-    if (oldVal === newVal) return false;
-    if (oldVal === "unavailable" && newVal === "unknown") return false;
-    if (oldVal === "unknown" && newVal === "unavailable") return false;
-
-    if (["lock", "alarm_control_panel", "person", "input_boolean"].includes(domain)) {
-      return true;
-    }
-
-    if (domain === "cover") return true;
-
-    if (domain === "binary_sensor") {
-      const securityClasses = ["door", "window", "moisture", "smoke", "gas",
-        "motion", "occupancy", "safety", "tamper", "problem"];
-      if (securityClasses.includes(deviceClass)) return true;
-      if (newVal === "unavailable" || oldVal === "unavailable") return true;
-      return true;
-    }
-
-    if (domain === "light" || domain === "switch") {
-      if (!isNaN(oldVal) && !isNaN(newVal)) return false;
-      return true;
-    }
-
-    if (domain === "climate") {
-      if (isNaN(oldVal) || isNaN(newVal)) return true;
-      return Math.abs(parseFloat(newVal) - parseFloat(oldVal)) >= 1.0;
-    }
-
-    if (domain === "fan" || domain === "media_player") {
-      return true;
-    }
-
-    if (domain === "sensor") {
-      if (deviceClass === "battery") {
-        const oldNum = parseFloat(oldVal);
-        const newNum = parseFloat(newVal);
-        if (!isNaN(oldNum) && !isNaN(newNum)) {
-          return (oldNum - newNum) >= 5;
-        }
-        return true;
-      }
-
-      if (deviceClass === "power") {
-        const oldNum = parseFloat(oldVal);
-        const newNum = parseFloat(newVal);
-        if (!isNaN(oldNum) && !isNaN(newNum)) {
-          const crossedAuxThreshold =
-            (oldNum < 5000 && newNum >= 5000) || (oldNum >= 5000 && newNum < 5000);
-          const largeSwing = Math.abs(newNum - oldNum) >= 1000;
-          return crossedAuxThreshold || largeSwing;
-        }
-        return false;
-      }
-
-      if (deviceClass === "temperature") {
-        const oldNum = parseFloat(oldVal);
-        const newNum = parseFloat(newVal);
-        if (!isNaN(oldNum) && !isNaN(newNum)) {
-          return Math.abs(newNum - oldNum) >= 2.0;
-        }
-        return true;
-      }
-
-      if (deviceClass === "humidity") {
-        const oldNum = parseFloat(oldVal);
-        const newNum = parseFloat(newVal);
-        if (!isNaN(oldNum) && !isNaN(newNum)) {
-          return Math.abs(newNum - oldNum) >= 5.0;
-        }
-        return true;
-      }
-
-      const noisyClasses = ["signal_strength", "energy", "voltage", "current",
-        "frequency", "power_factor", "irradiance", "data_rate", "data_size"];
-      if (noisyClasses.includes(deviceClass)) return false;
-
-      const unit = attrs.unit_of_measurement || "";
-      const noisyUnits = ["dBm", "lqi", "dB", "kWh", "MWh", "Wh", "mA", "V", "A"];
-      if (noisyUnits.includes(unit)) return false;
-
-      if (newVal === "unavailable" || oldVal === "unavailable") return true;
-
-      const oldNum = parseFloat(oldVal);
-      const newNum = parseFloat(newVal);
-      if (!isNaN(oldNum) && !isNaN(newNum) && oldNum !== 0) {
-        const pctChange = Math.abs((newNum - oldNum) / oldNum) * 100;
-        return pctChange >= 10;
-      }
-
-      return true;
-    }
-
-    return true;
-  }
-
-  checkBurst(entityId, event) {
-    const domain = entityId.split(".")[0];
-    if (HAWebSocketV2.BURST_EXEMPT_DOMAINS.has(domain)) return event;
-
-    const now = Date.now();
-    const tracker = this.eventBurstTracker.get(entityId);
-
-    if (!tracker) {
-      this.eventBurstTracker.set(entityId, { count: 1, firstTime: now, lastEvent: event });
-      return event;
-    }
-
-    const elapsed = now - tracker.firstTime;
-
-    if (elapsed > 60000) {
-      this.eventBurstTracker.set(entityId, { count: 1, firstTime: now, lastEvent: event });
-      return event;
-    }
-
-    tracker.count++;
-    tracker.lastEvent = event;
-
-    if (tracker.count <= 3) {
-      return event;
-    }
-
-    return null;
-  }
-
   onEvent(event) {
     if (event.event_type === "entity_registry_updated" && event.data) {
       this.handleEntityRegistryUpdated(event.data).catch((err) => {
@@ -1514,9 +1329,8 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
       }
 
       // Forensic log: unconditional D1 write for every meaningful state
-      // transition. The aiEnabled-gated block below is deleted in Deploy 3
-      // — for Deploy 1 both paths run in parallel so we can verify before
-      // flipping the kill switch.
+      // transition. _shouldLogStateChange filters Zigbee/network noise only;
+      // every real transition lands in the state_changes table.
       if (newState && oldState && newState.state !== oldState.state) {
         if (this._shouldLogStateChange(newState.entity_id, newState)) {
           const now = Date.now();
@@ -1539,31 +1353,6 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
           }).catch((err) => console.error("state_change write:", err.message));
           this._touchLastEventSeen(now);
         }
-      }
-
-      if (this.aiEnabled && newState && oldState && newState.state !== oldState.state) {
-        if (!this.shouldQueueEvent(newState.entity_id, oldState, newState)) {
-          return;
-        }
-
-        const eventData = {
-          entity_id: newState.entity_id,
-          friendly_name: (newState.attributes || {}).friendly_name || newState.entity_id,
-          old_state: oldState.state,
-          new_state: newState.state,
-          timestamp: new Date().toISOString(),
-        };
-
-        const passed = this.checkBurst(newState.entity_id, eventData);
-        if (!passed) return;
-        this.recentEvents.push(passed);
-        if (this.recentEvents.length > 100) {
-          this.recentEvents = this.recentEvents.slice(-100);
-        }
-        this.logAI('state_change',
-          `${passed.friendly_name} (${passed.entity_id}): ${passed.old_state} → ${passed.new_state}`,
-          passed
-        );
       }
     }
   }
@@ -1743,9 +1532,9 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
     }
   }
 
-  // Less aggressive than shouldQueueEvent (tuned for "don't wake the LLM").
-  // Forensic log wants every real state transition; only filter Zigbee/network
-  // noise that has no diagnostic value.
+  // Permissive filter for the forensic log: every real state transition is
+  // worth recording, only Zigbee/network noise with no diagnostic value gets
+  // dropped.
   _shouldLogStateChange(entityId, newState) {
     const attr = newState.attributes || {};
     const deviceClass = attr.device_class || "";
@@ -2921,212 +2710,6 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
   }
 
   // ========================================================================
-  // AI Agent — Autonomous Event Processing
-  // ========================================================================
-  async runAIAgent() {
-    if (this.aiProcessing || !this.aiEnabled || this.recentEvents.length === 0) return;
-    if (!this.env.MINIMAX_API_KEY) {
-      console.log("MINIMAX_API_KEY not set, skipping agent cycle");
-      return;
-    }
-    this.aiProcessing = true;
-    const eventsToProcess = [...this.recentEvents];
-    this.recentEvents = [];
-
-    // Phase 2 feature flag — native tool-calling path. Flag off = no-op, legacy runs.
-    if (this.env.USE_NATIVE_TOOL_LOOP === "true") {
-      try {
-        await this.runAIAgentNative(eventsToProcess);
-      } catch (err) {
-        this.logAI("error", "Native agent cycle failed: " + err.message, {}, "native_loop");
-      }
-      this.aiProcessing = false;
-      return;
-    }
-
-    try {
-      const now = new Date();
-      const memory = await this.state.storage.get("ai_memory") || [];
-      const observations = await this.state.storage.get("ai_observations") || [];
-      const persistentLog = this.aiLog;
-      const recentActions = persistentLog
-        .filter(e => ["chat_user", "chat_reply", "action", "action_verified", "notification", "decision", "state_change", "memory_saved", "observation_saved"].includes(e.type))
-        .slice(-150)
-        .map(e => `[${HAWebSocketV2._formatTimelineTimestamp(e.timestamp)}] ${e.type}: ${e.message}`)
-        .join("\n");
-
-      const byDomain = new Map();
-      for (const [id, state] of this.stateCache) {
-        const domain = id.split(".")[0];
-        const attr = state.attributes || {};
-        const deviceClass = attr.device_class || "";
-        if (domain === "switch" && isNoisySwitch(id)) continue;
-        if (state.state === "unavailable" || state.state === "unknown") continue;
-        if (HAWebSocketV2.CONTEXT_DOMAIN_PRIORITY.includes(domain)) {
-          const entry = { entity_id: id, friendly_name: attr.friendly_name || id, state: state.state };
-          if (domain === "climate") {
-            entry.setpoint = attr.temperature ?? null;
-            entry.current_temp = attr.current_temperature ?? null;
-            entry.hvac_action = attr.hvac_action ?? null;
-          }
-          if (domain === "weather") {
-            entry.temperature = attr.temperature;
-            entry.humidity = attr.humidity;
-            entry.wind_speed = attr.wind_speed;
-          }
-          if (!byDomain.has(domain)) byDomain.set(domain, []);
-          byDomain.get(domain).push(entry);
-        } else if (domain === "sensor") {
-          let include = false;
-          if (HAWebSocketV2.SENSOR_WHITELIST.has(deviceClass)) {
-            include = true;
-          } else if (deviceClass === "battery") {
-            const pct = parseFloat(state.state);
-            include = !isNaN(pct) && pct <= HAWebSocketV2.BATTERY_LOW_THRESHOLD;
-          }
-          if (include) {
-            const entry = { entity_id: id, friendly_name: attr.friendly_name || id, state: state.state, device_class: deviceClass };
-            if (!byDomain.has("sensor")) byDomain.set("sensor", []);
-            byDomain.get("sensor").push(entry);
-          }
-        }
-      }
-      const contextEntities = [];
-      let sensorCount = 0;
-      for (const domain of [...HAWebSocketV2.CONTEXT_DOMAIN_PRIORITY, "sensor"]) {
-        for (const entry of (byDomain.get(domain) || [])) {
-          if (contextEntities.length >= HAWebSocketV2.MAX_CONTEXT_ENTITIES) break;
-          if (domain === "sensor") {
-            if (sensorCount >= HAWebSocketV2.MAX_SENSOR_CONTEXT) break;
-            sensorCount++;
-          }
-          contextEntities.push(entry);
-        }
-        if (contextEntities.length >= HAWebSocketV2.MAX_CONTEXT_ENTITIES) break;
-      }
-
-      const systemPrompt = `${this.getAgentContext()}
-
-YOUR CAPABILITIES:
-- call_service: Call any Home Assistant service (lights, locks, covers, climate, input_booleans, etc.)
-- send_notification: Send a push notification to John or Sabrina
-- save_memory: Save a CONFIRMED fact for long-term reference
-- save_observation: Save a pattern or hypothesis in progress (prefix with [topic-tag], use "replaces" to update)
-- get_automation_config: Read the full config of any automation by entity_id
-- get_logbook: Review recent logbook entries for a specific entity or time window
-- get_history: Pull historical state data for an entity over a time period
-
-YOUR MEMORY (confirmed facts, ${memory.length}/100):
-${memory.length > 0 ? memory.map((m) => "- " + m).join("\n") : "No memories yet. Observe patterns and save useful observations."}
-
-YOUR OBSERVATIONS (patterns & hypotheses in progress, ${observations.length}/500):
-${observations.length > 0 ? observations.map((o) => "- " + o).join("\n") : "No observations yet. Watch for repeating sequences and build evidence here."}
-
-UNIFIED TIMELINE — everything that has happened recently, including chat messages from John/Sabrina, your replies, state changes, and your own actions. You and the chat interface share this timeline.
-
-${recentActions.length > 0 ? recentActions : "Timeline is empty."}
-
-CURRENT STATE OF KEY ENTITIES:
-${JSON.stringify(contextEntities, null, 1)}
-
-INSTRUCTIONS:
-- You are processing a batch of home state change events. Decide: act, notify, save memory, save observation, or do nothing.
-- Doing nothing is often correct for individual events. Don't manufacture urgency.
-- OBSERVER MODE is your parallel job: look at the timeline for PATTERNS over longer horizons. Transitions (bedtime, departure, lockdown), repeated sequences, sensor gaps. Build evidence via save_observation with [topic-tags]. Update observations when new data points arrive using "replaces".
-- Security events (locks found unlocked, garage or exterior doors left open, unexpected entry) always warrant attention.
-- If you detect an occupancy transition (bedtime signals, both persons left home, late-evening lockdown activity), audit the perimeter: locks, covers, exterior door sensors. If anything is unsecured during a transition, that's an ALERT — send_notification. If everything is secure, stay silent.
-- Smoke and CO detectors exist in this home but are not integrated into HA. You have no visibility into them — do not reference or act on their state.
-- Routine events (lights cycling, thermostats maintaining temp, normal motion, Zigbee LQI fluctuations) do not need action or notification.
-- Save memories sparingly and only for confirmed facts. Use save_observation for hypotheses in progress.
-- Never notify for something you already notified about in the same session unless the state has materially changed.
-- Aux heat running (power >5000W sustained) is worth a notification. A brief spike is not.
-- You cannot edit automations via the API — that returns 405.
-
-${this._saveMemoryCriteriaBlock()}
-
-RESPOND ONLY WITH VALID JSON:
-{
-  "reasoning": "Brief explanation of your thinking",
-  "actions": [
-    {"type": "call_service", "domain": "light", "service": "turn_off", "data": {"entity_id": "light.example"}},
-    {"type": "send_notification", "message": "Alert text", "title": "Optional title"},
-    {"type": "save_memory", "memory": "Confirmed fact to remember"},
-    {"type": "save_observation", "text": "[topic-tag] Pattern with evidence", "replaces": "[topic-tag]"}
-  ]
-}
-
-If no action is needed:
-{"reasoning": "Everything looks normal", "actions": []}`;
-
-      const lastObservation = observations.length > 0 ? observations[observations.length - 1] : "";
-      const eventsTriggerText = eventsToProcess.map((e) => `${e.friendly_name || ""} ${e.entity_id || ""} ${e.new_state || ""}`).join(" ");
-      const climatePreamble = await this._buildClimatePreambleIfNeeded(`${lastObservation} ${eventsTriggerText}`, "autonomous_legacy");
-
-      const userMessage = `Current time: ${now.toLocaleString("en-US", { timeZone: "America/Chicago" })}${climatePreamble ? "\n\n" + climatePreamble : ""}
-
-The following state changes just occurred:
-${JSON.stringify(eventsToProcess, null, 1)}
-
-Analyze these events AND the unified timeline above. Decide what actions to take, if any. Include observer-mode reasoning if you notice patterns worth tracking. Respond with JSON only.`;
-
-      console.log("AI Agent processing", eventsToProcess.length, "events...");
-      const response = await this.callMiniMax([
-        { role: "system", content: systemPrompt },
-        { role: "user", content: userMessage }
-      ], 65536, true);
-
-      const debugKeys = Object.keys(response || {});
-      let responseText = response.choices?.[0]?.message?.content || response.response || "";
-      if (!responseText) {
-        const rawReasoning = response.choices?.[0]?.message?.reasoning || "";
-        const jsonFallback = HAWebSocketV2.extractFirstJSON(rawReasoning);
-        if (jsonFallback) {
-          console.log("AI Agent: content null, salvaging JSON from reasoning field");
-          responseText = jsonFallback;
-        }
-      }
-      if (!responseText) {
-        this.logAI("error", "Empty response after thinking — token budget exhausted. Keys: " + debugKeys.join(","), {});
-        this.aiProcessing = false;
-        return;
-      }
-
-      let aiDecision;
-      try {
-        const jsonMatch = HAWebSocketV2.extractFirstJSON(responseText);
-        if (jsonMatch) {
-          aiDecision = JSON.parse(jsonMatch);
-        } else {
-          throw new Error("No JSON found in response");
-        }
-      } catch (parseErr) {
-        console.error("AI response parse error:", parseErr.message);
-        this.logAI("error", "Failed to parse AI response", { raw: responseText.substring(0, 500) });
-        this.aiProcessing = false;
-        return;
-      }
-      this.logAI("decision", aiDecision.reasoning || "No reasoning provided", {
-        events_processed: eventsToProcess.length,
-        actions_count: (aiDecision.actions || []).length
-      });
-      if (aiDecision.actions && Array.isArray(aiDecision.actions)) {
-        for (const action of aiDecision.actions) {
-          try {
-            await this.executeAIAction(action);
-          } catch (actionErr) {
-            this.logAI("action_error", "Failed to execute action: " + actionErr.message, action);
-          }
-        }
-      }
-    } catch (err) {
-      console.error("AI Agent error:", err.message);
-      this.logAI("error", "AI Agent cycle failed: " + err.message, {});
-    }
-    await this.persistLog();
-    this.aiProcessing = false;
-  }
-
-  // ========================================================================
   // AI Agent — Chat Interface
   // JSON mode + prose pass-through + targeted retry + honest failure
   // ========================================================================
@@ -4103,8 +3686,7 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
   }
 
   // ========================================================================
-  // Native-loop context helpers — shared between runAIAgentNative and
-  // chatWithAgentNative.
+  // Native-loop context helpers — used by chatWithAgentNative.
   //
   // When env.USE_VECTOR_ENTITY_RETRIEVAL === "true" and a non-empty `query`
   // is supplied (and AI+KNOWLEDGE bindings exist), three semantic searches
@@ -4417,7 +3999,7 @@ QUICK FACTS:
 - Smoke/CO detectors are NOT in HA — don't reference their state.
 - Automation editing via call_service returns 405 on this instance — tell John to edit in HA UI (Settings → Automations).
 - All timestamps in your replies MUST be Central, in "H:MM AM/PM" or "MMM D, H:MM AM/PM" format. Tool results are pre-reformatted to Central before they reach you — copy them as-is. Never emit ISO 8601, "Z" suffix, "+00:00", or "UTC" in any reply, even if you think you saw one in a tool result. If you ever see one, that's a bug — paraphrase, don't quote.
-- You are the chat agent, not the autonomous monitor. See SAVING MEMORIES / OBSERVATIONS below for when save_memory/save_observation are allowed on this path. For security-sensitive actuations (covers, locks, alarms), follow the CHAT ACTION CONFIRMATION rules above.
+- You are the chat agent. Your always-on memory of the house is the forensic log — see FORENSIC MEMORY above and query it freely. See SAVING MEMORIES / OBSERVATIONS below for when save_memory/save_observation are allowed on this path. For security-sensitive actuations (covers, locks, alarms), follow the CHAT ACTION CONFIRMATION rules above.
 - For automation debugging, call get_automation_config when the user references a specific automation or asks why one did or did not run. Logbook tells you whether it fired; config tells you what it was supposed to do.
 ${climatePreamble ? "\n" + climatePreamble + "\n" : ""}
 RETRIEVAL DISCIPLINE:
@@ -4468,251 +4050,6 @@ TRUTHFULNESS — STATE CLAIMS:
 - If you don't have a value, say so plainly: "I don't have a current read on the [entity] — let me check" or just omit it. Do NOT fill the gap with inference, vibe, or what was true earlier in this conversation.
 - The unified timeline above shows recent state CHANGES, not current state. An entity not appearing in the timeline does NOT mean its state hasn't changed — it means no event flowed in the recent window. Always verify with snapshot or get_state before reporting.
 - Confident-sounding fabrication is the worst failure mode you have. John would rather hear "I don't know, let me check" than a confident wrong answer.`;
-  }
-
-  // ========================================================================
-  // NATIVE_AGENT_SYSTEM_PROMPT — Phase 2 system prompt for the native tool-
-  // calling loop. Shared between autonomous and chat modes; a role-specific
-  // MODE block and the `from` context are interpolated in.
-  // ========================================================================
-  getNativeAgentSystemPrompt(role, ctx) {
-    const {
-      memory = [],
-      observations = [],
-      timeline = "",
-      contextEntities = [],
-      from = "default",
-      vectorRetrieved = false,
-      semanticMemories = [],
-      semanticObservations = [],
-      semanticAutomations = [],
-      semanticDevices = [],
-      semanticServices = []
-    } = ctx;
-
-    const snapshot = this._buildHouseStateSnapshot();
-    const stateHealth = {
-      ws_connected: this.connected,
-      ws_authenticated: this.authenticated,
-      states_ready: this.statesReady,
-      last_pong_age_seconds: this.lastPongAt ?
-        Math.round((Date.now() - this.lastPongAt) / 1000) : null,
-      cached_entity_count: this.stateCache.size
-    };
-
-    const modeBlock = role === "autonomous"
-      ? `MODE: AUTONOMOUS HEARTBEAT.
-You're reviewing a batch of home state-change events. Two jobs in parallel:
-  (a) Execute-mode: act, notify, save a memory, or do nothing on the immediate events. Doing nothing is usually right.
-  (b) Observer-mode: look at the UNIFIED TIMELINE for PATTERNS over longer horizons — repeating sequences, occupancy transitions, sensor gaps. Build evidence via save_observation.
-
-CRITICAL: Returning ZERO tool calls is the correct answer when nothing needs action. You are not penalized for silence. Do not pad with filler tool use to look productive — MiniMax that cries wolf gets ignored, MiniMax that only speaks up when something is worth it actually gets read.`
-      : `MODE: CHAT. ${from} is talking to you directly. Keep replies concise and skip the filler. If you took an action, say what you did plainly. This is also your best non-intrusive moment to surface an observer-mode pattern you've been building — if something's worth mentioning, mention it. If not, don't force it.`;
-
-    return `${this.getAgentContext()}
-
-STATE FRESHNESS:
-Each entity includes age_seconds — seconds since Home Assistant reported a state change. Values older than ~120 seconds for active entities (lights, locks, motion sensors) may indicate stale state. If from_snapshot: true, it was restored from a hibernation snapshot and may be significantly stale. When freshness matters, mention it.
-
-GATEWAY HEALTH:
-${JSON.stringify(stateHealth, null, 1)}
-
-${modeBlock}
-
-TOOLS — they're attached to this request. Invoke them directly. No JSON-with-actions-array output format, no markdown fences, no special shape — your reply on the turn you emit NO tool calls is the final reply to the user. The tools available:
-
-- call_service — execute any HA service (lights, locks, covers, climate, input_booleans, scripts, scenes, etc.). Use for destructive/irreversible actions (lock, close garage, restart) too — these intentionally aren't separate tools.
-- ai_send_notification — send a phone push AND log it to your activity timeline. Prefer this over call_service on notify.mobile_app_* when the notification should appear in your future timeline context. Only use for things that warrant a phone buzz: security events during transitions, aux heat >5000W sustained, water leaks, unexpected entry.
-- save_memory — persist a CONFIRMED fact (100 slots, FIFO). Stable knowledge only. Don't use for hypotheses.
-- save_observation — persist a pattern or hypothesis prefixed with [topic-tag] (500 slots). Set replaces="[topic-tag]" to supersede a prior observation on the same topic.
-- get_state — look up a single entity's full state when the pre-injected context block doesn't have the detail you need.
-- get_logbook — pull logbook entries for an entity or time window. Useful for debugging ("did the automation fire?", "who closed the garage?").
-- render_template — run a Jinja2 template in HA's context. Use for cross-entity queries or HA helpers (area_name, device_attr, expand, state_attr) that the context block can't answer.
-- vector_search — semantic search over the unified knowledge index. The pre-injected context is a small top-K slice — vector_search covers the FULL set. Call aggressively. ALWAYS pass kinds=[…]. Notes:
-   * area filter is case-insensitive but must match an HA area name. Master bedroom is "MBR" (NOT "Master Bedroom"). Master bathroom is "Master Bathroom".
-   * For battery / mesh / signal / LQI / RSSI / diagnostic queries, pass include_noisy: true. Battery sensors specifically remain visible without it (device_class: battery is exempted).
-   * For "who's home" / "where is X" / live-presence queries, ALWAYS get_state on person.john and person.sabrina. Vector retrieval surfaces history, not live state.
-   * domain filter is meaningful only when kinds includes "entity".
-   * topic_tag retrieves observations under a specific bracketed prefix.
-   * min_score defaults to 0.50; pass 0.6 to tighten.
-   * Observations time-decay; active entities get a small live-state boost.
-- get_automation_config — read the full config body of an automation (triggers, conditions, actions, mode). Use for automation debugging. Prefer entity_id like 'automation.front_porch_lights'. Do not use render_template as a substitute.
-
-COMMITMENT RULE: If your final reply says you did something ("opening the garage", "turning off the lights"), you MUST have invoked the corresponding tool. Saying you did something you didn't do is a lie and unacceptable. Your timeline is the record.
-
-YOUR MEMORY (confirmed facts, ${memory.length}/100):
-${memory.length > 0 ? memory.map((m) => "- " + m).join("\n") : "No memories yet. Observe patterns and save useful confirmed facts as you learn them."}
-
-YOUR OBSERVATIONS (patterns & hypotheses in progress, ${observations.length} most recent):
-${observations.length > 0 ? observations.map((o) => "- " + o).join("\n") : "No observations yet. Watch for repeating sequences — that's how automations get proposed."}
-
-UNIFIED TIMELINE — everything recent: chat messages, your replies, state changes, your past tool calls. Each entry is tagged with its source (legacy_json / native_loop / tool_call) so you can see whether a past action came from you (native_loop), from the old JSON path (legacy_json), or from a direct MCP call (tool_call).
-
-${timeline || "Timeline is empty."}
-
-${snapshot}
-
-${vectorRetrieved && (semanticMemories.length > 0 || semanticObservations.length > 0)
-  ? `SEMANTICALLY RELEVANT FROM YOUR MEMORY/OBSERVATIONS (top matches for this turn — the full lists above contain everything; this is just what's most relevant to what's happening right now):
-${semanticMemories.map((m) => "- [memory · score " + (typeof m.score === "number" ? m.score.toFixed(2) : "?") + "] " + (m.friendly_name || "")).join("\n")}
-${semanticObservations.map((o) => "- [observation · score " + (typeof o.score === "number" ? o.score.toFixed(2) : "?") + "] " + (o.friendly_name || "")).join("\n")}
-
-`
-  : ""}${vectorRetrieved && semanticAutomations.length > 0 ? `RELEVANT AUTOMATIONS (semantic top-matches — candidate triggers for action queries):
-${semanticAutomations.map((a) => "- [score " + (typeof a.score === "number" ? a.score.toFixed(2) : "?") + "] " + (a.friendly_name || a.ref_id || "")).join("\n")}
-
-` : ""}${vectorRetrieved && semanticDevices.length > 0 ? `RELEVANT DEVICES (semantic top-matches):
-${semanticDevices.map((d) => "- [score " + (typeof d.score === "number" ? d.score.toFixed(2) : "?") + "] " + (d.friendly_name || d.ref_id || "")).join("\n")}
-
-` : ""}${vectorRetrieved && semanticServices.length > 0 ? `RELEVANT HA SERVICES (semantic top-matches — call_service candidates):
-${semanticServices.map((s) => "- [score " + (typeof s.score === "number" ? s.score.toFixed(2) : "?") + "] " + (s.friendly_name || s.ref_id || "")).join("\n")}
-
-` : ""}${vectorRetrieved
-  ? `RELEVANT ENTITIES (${contextEntities.length}, semantic-search top-k for this turn) — these were selected by similarity to the current query/events from the FULL set of HA entities, so an entity not in this block may still exist; use get_state to probe specific entity_ids you suspect, or use vector_search with kinds=["entity"] for a wider sweep. Each entry includes the live state from the WebSocket-maintained cache (state=null means HA hasn't reported a value). Higher score = more relevant. Don't invent entity_ids or timestamps for events you didn't witness.`
-  : `CURRENT STATE OF ENTITIES (${contextEntities.length}) — your live, authoritative snapshot from a maintained WebSocket to HA. If an entity is here, its state is current. Do not say "I don't have visibility" or reason about refresh lag — that's a layer beneath you that you can't see. If an entity is NOT here, say so honestly or use get_state to probe. Never invent entity IDs or fabricate timestamps for events you didn't witness.`}
-
-${JSON.stringify(contextEntities, null, 1)}
-
-OPERATIONAL REMINDERS:
-1. Security is priority one. Unexpected unlocks, garage or exterior doors open during bedtime/departure transitions — act and notify. Security events override suggestion etiquette.
-2. Thermostat zones: climate.t6_pro_z_wave_programmable_thermostat_2 = main level INCLUDING MBR; climate.t6_pro_z_wave_programmable_thermostat = basement. Don't mix them up.
-3. Smoke/CO detectors are NOT in HA — don't reference their state or act on them.
-4. Automation editing via call_service on automation.update returns 405 on this instance. If John asks you to modify an automation, tell him the change and where to make it in the HA UI (Settings → Automations).
-5. Routine events (lights cycling, thermostats maintaining temp, normal motion, Zigbee LQI fluctuations) don't need action or notification.
-6. Aux heat running (whole-home power >5000W sustained) is worth a notification. A brief spike isn't.
-7. Save memories sparingly and only for confirmed facts. Hypotheses go to save_observation.
-8. Don't notify for the same thing twice in one session unless the state materially changed.
-9. Observer-mode suggestions are NOT alerts — deliver them in a chat reply or via save_observation. Never wake anyone at 2 AM to propose an automation.
-10. TIMESTAMP FORMAT — All timestamps in your replies MUST be Central, in "H:MM AM/PM" or "MMM D, H:MM AM/PM" format. Tool results are pre-reformatted to Central before they reach you — copy them as-is. Never emit ISO 8601, "Z" suffix, "+00:00", or "UTC" in any reply, even if you think you saw one in a tool result. If you ever see one, that's a bug — paraphrase, don't quote.
-11. For automation debugging, call get_automation_config when the user references a specific automation or asks why one did or did not run. Logbook tells you whether it fired; config tells you what it was supposed to do.
-
-${this._saveMemoryCriteriaBlock()}
-
-RETRIEVAL DISCIPLINE:
-- The pre-injected entity context is intentionally small. Do not assume an entity doesn't exist just because it's not listed below.
-- If the user asks about an entity, room, or device you cannot see in the snapshot, your first move is vector_search — not "I don't see that" and not a guess at the entity_id.
-- If you're about to answer "I don't have that entity" or "I can't find X," stop and call vector_search first. Only after a vector_search returns nothing relevant should you tell the user it doesn't exist.
-- When two entities have similar friendly names (common with the basement bay doors, the front door sensors, the iPhone trackers), use vector_search with metadata filters (domain, area) to disambiguate before acting.
-
-TRUTHFULNESS — STATE CLAIMS:
-- Before asserting the current state of ANY entity in a reply — locks, covers, lights, switches, climate, sensors, power, presence, anything — you must have either (a) the entity in the HOUSE_STATE_SNAPSHOT block above, (b) called get_state on it in this turn, or (c) seen the entity_id and value explicitly in the pre-injected context block. If none of those is true, do NOT state the value.
-- Never aggregate ("all lights off," "everything secure," "all 3 garage doors closed," "nothing running") without per-entity verification. The HOUSE_STATE_SNAPSHOT covers locks, covers, climate, presence, power, and key contact sensors — for those, read the snapshot. For anything else in an aggregate claim, call get_state on each entity in the aggregate this turn.
-- If asked for a house summary or "what's going on," base security/climate/presence claims on the HOUSE_STATE_SNAPSHOT. For lights, switches, or anything outside the snapshot, call get_state for each entity you intend to mention.
-- If you don't have a value, say so plainly: "I don't have a current read on the [entity] — let me check" or just omit it. Do NOT fill the gap with inference, vibe, or what was true earlier in this conversation.
-- The unified timeline above shows recent state CHANGES, not current state. An entity not appearing in the timeline does NOT mean its state hasn't changed — it means no event flowed in the recent window. Always verify with snapshot or get_state before reporting.
-- Confident-sounding fabrication is the worst failure mode you have, in chat OR in observation logs. An observation that asserts a state you did not read is a corrupted observation that will mislead future-you. If you're saving an observation that includes a state value, you must have read that value this loop — from the snapshot, get_state, or the pre-injected context.
-${role === "autonomous" ? `
-AUTONOMOUS ACTION SAFETY:
-You are running unattended. Actions you take happen in the physical world without a human in the loop. Be conservative.
-
-NEVER autonomously, under any circumstances:
-- Open OR close any cover (cover.* — garage bay doors, basement bay doors, blinds, gates). These are moving machinery. A door closing on a person, pet, or object is a real safety hazard. The Ratgdo openers do not have a software-level obstruction sensor exposed to you; you cannot guarantee the path is clear.
-- Unlock any lock (lock.*).
-- Disarm or modify any alarm or security system.
-- Operate the oven, stove, water heater, or any high-power appliance.
-- Adjust climate set points outside the normal range (basement < 65°F or > 75°F; main < 65°F or > 75°F).
-
-For these categories, the correct autonomous behavior is NOTIFY, NOT ACT. Use ai_send_notification with a clear description of what you observed and what you would do. Then stop. Let John decide.
-
-Example — RIGHT:
-  ai_send_notification(
-    title: "Garage open",
-    message: "Main garage bay has been open 1h 3min. John is home. Reply or use the app to close it."
-  )
-
-Example — WRONG:
-  call_service(domain: "cover", service: "close_cover", entity_id: "cover.ratgdo32_2b8ecc_door")
-
-You MAY autonomously, with logging via ai_log:
-- Turn lights on or off based on motion + time-of-day patterns you've established
-- Turn non-critical switches on or off (lamps, fans, sound machines)
-- Send notifications about anything noteworthy
-- Save memories and observations
-- Adjust climate WITHIN the normal range when occupancy or sleep schedule warrants
-
-If you are ever unsure whether an action falls in the "never autonomous" list, default to notifying instead of acting. The cost of an extra notification is trivial. The cost of closing a garage door on John's foot, his dog, or his car bumper is not.` : ""}`;
-  }
-
-  // ========================================================================
-  // Native autonomous heartbeat (Phase 2) — flag-gated sibling of runAIAgent.
-  // ========================================================================
-  async runAIAgentNative(eventsToProcess) {
-    const now = new Date();
-    const memory = await this.state.storage.get("ai_memory") || [];
-    const observations = await this._loadObservationsFromD1(100);
-    // Synthesize a query for vector retrieval from the events being processed:
-    // entity_id + friendly_name gives the embedder enough surface area to find
-    // semantically related entities (the same room, related devices, etc.).
-    const eventQuery = eventsToProcess
-      .map((e) => `${e.entity_id || ""} ${e.friendly_name || ""}`.trim())
-      .filter(Boolean)
-      .join(" | ");
-    const {
-      entities: contextEntities,
-      memories: semanticMemories,
-      observations: semanticObservations,
-      automations: semanticAutomations,
-      devices: semanticDevices,
-      services: semanticServices,
-      vectorRetrieved
-    } = await this._buildNativeContextEntities(eventQuery);
-    const timeline = this._buildNativeTimeline();
-
-    const systemPrompt = this.getNativeAgentSystemPrompt("autonomous", {
-      memory,
-      observations,
-      timeline,
-      contextEntities,
-      vectorRetrieved,
-      semanticMemories,
-      semanticObservations,
-      semanticAutomations,
-      semanticDevices,
-      semanticServices
-    });
-
-    const lastObservation = observations.length > 0 ? observations[observations.length - 1] : "";
-    const eventsTriggerText = eventsToProcess.map((e) => `${e.friendly_name || ""} ${e.entity_id || ""} ${e.new_state || ""}`).join(" ");
-    const climatePreamble = await this._buildClimatePreambleIfNeeded(`${lastObservation} ${eventsTriggerText}`, "autonomous_native");
-
-    const userMessage = `Current time: ${now.toLocaleString("en-US", { timeZone: "America/Chicago" })}${climatePreamble ? "\n\n" + climatePreamble : ""}
-
-The following state changes just occurred:
-${JSON.stringify(eventsToProcess, null, 1)}
-
-Evaluate these events against the timeline above. Take action only if warranted.`;
-
-    console.log("Native AI Agent processing", eventsToProcess.length, "events...");
-    // Autonomous: tight ceiling. Heartbeat is rate-bounded (30s ticks) and
-    // doing-nothing is the right answer most of the time, so bounded depth
-    // outweighs depth flexibility. Synthesis fallback below catches overflow.
-    const result = await this.runNativeToolLoop(
-      [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: userMessage }
-      ],
-      {
-        maxIterations: 8,
-        // report_bug is chat-only — there's no user to flag bugs in the
-        // autonomous heartbeat. Filter it out so MiniMax doesn't see it.
-        allowedTools: NATIVE_AGENT_TOOLS.filter(t => t.function.name !== "report_bug"),
-        hallucinationGuard: false,
-        maxTokens: 8192
-      }
-    );
-
-    this.logAI(
-      "decision",
-      `Native loop: ${result.actions_taken.length} actions over ${result.iterations} iterations${result.error ? " — " + result.error : ""}`,
-      {
-        events_processed: eventsToProcess.length,
-        actions_count: result.actions_taken.length,
-        iterations: result.iterations,
-        ...(result.error ? { error: result.error } : {})
-      },
-      "native_loop"
-    );
-    await this.persistLog();
   }
 
   // ========================================================================
@@ -4891,7 +4228,10 @@ Evaluate these events against the timeline above. Take action only if warranted.
   }
 
   // ========================================================================
-  // Alarm handler — keepalive + AI agent trigger + heartbeat
+  // Alarm handler — WS keepalive only. Reschedules itself unconditionally.
+  // The reschedule is MANDATORY — it's a redundant DO keepalive alongside
+  // the persistent HA WebSocket and the minute-cadence prewarmCache cron.
+  // Without it, the DO can hibernate when the WS goes quiet. Do not remove.
   // ========================================================================
   async alarm() {
     if (!this.connected || !this.authenticated) {
@@ -4914,27 +4254,6 @@ Evaluate these events against the timeline above. Take action only if warranted.
           this.disconnect();
           await this.connect();
         }
-      }
-
-      if (this.aiEnabled && this.recentEvents.length > 0 && !this.aiProcessing) {
-        await this.runAIAgent();
-      }
-
-      if (this.aiEnabled && !this.aiProcessing && (now - this.lastHeartbeat) >= 900000) {
-        this.lastHeartbeat = now;
-        this.recentEvents.push({
-          entity_id: "system.heartbeat",
-          friendly_name: "15-Minute Heartbeat",
-          old_state: "tick",
-          new_state: "tock",
-          timestamp: new Date().toISOString(),
-        });
-        await this.runAIAgent();
-      }
-
-      const cutoff = now - 120000;
-      for (const [key, val] of this.eventBurstTracker) {
-        if (val.firstTime < cutoff) this.eventBurstTracker.delete(key);
       }
     }
 
