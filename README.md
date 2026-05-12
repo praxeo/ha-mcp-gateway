@@ -1,4 +1,4 @@
-HA-MCP-Gateway
+**HA-MCP-Gateway**
 
 A Cloudflare Worker + Durable Object that bridges Home Assistant to LLMs. It
 holds a persistent WebSocket to HA, exposes ~70 typed tools as an MCP server
