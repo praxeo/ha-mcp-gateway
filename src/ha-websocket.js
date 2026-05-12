@@ -2323,6 +2323,14 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
   //   ai_log    = [entry, entry, ...] (last 150 entries, compacted)
   // ==========================================================================
   async loadLogFromStorage() {
+    const fromD1 = await this._loadAiLogFromD1(HAWebSocketV2.LOG_IN_MEMORY_CAP);
+    if (Array.isArray(fromD1) && fromD1.length > 0) {
+      return fromD1;
+    }
+    return await this._loadAiLogFromDOStorage();
+  }
+
+  async _loadAiLogFromDOStorage() {
     // Try single-key format first (current format).
     const simple = await this.state.storage.get("ai_log");
     if (Array.isArray(simple)) return simple;
