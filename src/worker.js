@@ -3782,6 +3782,65 @@ var worker_default = {
         headers: { ...corsHeaders, "Content-Type": "application/json" }
       });
     }
+    // Plain-text eyeball view of the forensic event log. `?hours=N` (default 1)
+    // sets the window; `?format=json` returns structured rows for tooling.
+    // No LLM involved — straight D1 read.
+    if (url.pathname === "/admin/recent_activity") {
+      if (request.method !== "GET") {
+        return new Response("Method not allowed", { status: 405 });
+      }
+      if (!env.DB) {
+        return new Response(JSON.stringify({ error: "DB not bound" }), {
+          status: 500,
+          headers: { ...corsHeaders, "Content-Type": "application/json" }
+        });
+      }
+      const hoursParam = parseFloat(url.searchParams.get("hours") || "1");
+      const hours = isNaN(hoursParam) ? 1 : Math.max(0.1, Math.min(720, hoursParam));
+      const cutoffMs = Date.now() - hours * 3600000;
+      try {
+        const result = await env.DB.prepare(`
+          SELECT 'state_change' AS kind, fired_at_central, entity_id AS subject,
+                 (COALESCE(old_state,'?') || ' -> ' || COALESCE(new_state,'?')) AS detail, fired_at_ms
+            FROM state_changes WHERE fired_at_ms > ?1
+          UNION ALL
+          SELECT 'automation_run' AS kind, fired_at_central,
+                 COALESCE(automation_name, automation_id, '(unnamed)') AS subject,
+                 COALESCE(trigger_description, '(no trigger info)') AS detail, fired_at_ms
+            FROM automation_runs WHERE fired_at_ms > ?1
+          UNION ALL
+          SELECT 'service_call' AS kind, fired_at_central,
+                 (domain || '.' || service) AS subject,
+                 COALESCE(target_entity_ids, '(no targets)') AS detail, fired_at_ms
+            FROM service_calls WHERE fired_at_ms > ?1
+          ORDER BY fired_at_ms DESC
+          LIMIT 200
+        `).bind(cutoffMs).all();
+        const rows = result?.results || [];
+        const format = url.searchParams.get("format");
+        if (format === "json") {
+          return new Response(JSON.stringify({ hours, row_count: rows.length, rows }, null, 2), {
+            headers: { ...corsHeaders, "Content-Type": "application/json" }
+          });
+        }
+        const pad = (s, n) => {
+          s = String(s || "");
+          return s.length >= n ? s : s + " ".repeat(n - s.length);
+        };
+        const lines = rows.map((r) =>
+          `[${pad(r.fired_at_central, 18)}] ${pad(r.kind, 14)} ${pad(r.subject, 50)} ${r.detail || ""}`
+        );
+        const body = `Recent forensic activity — last ${hours}h (${rows.length} rows)\n\n` + lines.join("\n") + "\n";
+        return new Response(body, {
+          headers: { ...corsHeaders, "Content-Type": "text/plain; charset=utf-8" }
+        });
+      } catch (err) {
+        return new Response(JSON.stringify({ error: err.message }), {
+          status: 500,
+          headers: { ...corsHeaders, "Content-Type": "application/json" }
+        });
+      }
+    }
     if (url.pathname === "/admin/version") {
       if (request.method !== "GET") {
         return new Response("Method not allowed", { status: 405 });
@@ -3990,6 +4049,7 @@ var worker_default = {
     if (event && event.cron === "30 8 * * *") {
       ctx.waitUntil(this.dailyKnowledgeResync(env));
       ctx.waitUntil(this.dailyAiLogRetention(env));
+      ctx.waitUntil(this.dailyForensicLogRetention(env));
       return;
     }
     ctx.waitUntil(this.prewarmCache(env));
@@ -4039,6 +4099,24 @@ var worker_default = {
       console.log(`dailyAiLogRetention: deleted ${deleted} rows older than 30d (${Date.now() - t0}ms)`);
     } catch (err) {
       console.error("dailyAiLogRetention failed:", err?.message || err);
+    }
+  },
+  // 90-day rolling window for the forensic event log tables. ~5k state
+  // changes/day × 200B avg × 90d ≈ 90MB total — well under D1's 5GB ceiling.
+  async dailyForensicLogRetention(env) {
+    if (!env.DB) return;
+    const cutoffMs = Date.now() - 90 * 24 * 60 * 60 * 1000;
+    for (const table of ["state_changes", "automation_runs", "service_calls"]) {
+      try {
+        const t0 = Date.now();
+        const result = await env.DB.prepare(
+          `DELETE FROM ${table} WHERE fired_at_ms < ?1`
+        ).bind(cutoffMs).run();
+        const deleted = result?.meta?.changes ?? 0;
+        console.log(`dailyForensicLogRetention ${table}: deleted ${deleted} (${Date.now() - t0}ms)`);
+      } catch (err) {
+        console.error(`dailyForensicLogRetention ${table} failed:`, err?.message || err);
+      }
     }
   },
   async dailyKnowledgeResync(env) {

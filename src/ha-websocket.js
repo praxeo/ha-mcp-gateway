@@ -392,6 +392,13 @@ export class HAWebSocketV2 {
 
     this.lastHeartbeat = 0;
     this.eventBurstTracker = new Map();
+
+    // Forensic event log (Deploy 1). _d1WriteFailures is exposed via /status.
+    // _lastEventSeenMs is the cursor for reconnect backfill from HA history.
+    this.subscribedForensicEvents = false;
+    this._d1WriteFailures = { total: 0, last_error_iso: null, last_error_msg: null };
+    this._lastEventSeenMs = null;
+    this._lastEventSeenPersistAt = 0;
   }
 
   // ==========================================================================
@@ -834,6 +841,9 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
             ai_enabled: this.aiEnabled,
             ai_pending_events: this.recentEvents.length,
             ai_log_entries: this.aiLog.length,
+            d1_write_failures: this._d1WriteFailures,
+            last_event_seen_ms: this._lastEventSeenMs,
+            subscribed_forensic_events: this.subscribedForensicEvents,
           }), { headers });
 
         case "/states": {
@@ -1258,6 +1268,14 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
         this.fetchAllStates();
         this.subscribeToStateChanges();
         this.subscribeToRegistryEvents();
+        this.subscribeToForensicEvents();
+        // Backfill state changes missed during WS disconnect, bounded to 1h.
+        this.state.storage.get("last_event_seen_ms").then((sinceMs) => {
+          if (sinceMs && Date.now() - sinceMs < 3600000) {
+            this._backfillStateChangesFromHA(sinceMs).catch((err) =>
+              console.error("backfill failed:", err.message));
+          }
+        }).catch(() => {});
         break;
       case "auth_invalid":
         console.error("HA WebSocket auth FAILED:", msg.message);
@@ -1425,6 +1443,46 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
       });
       return;
     }
+    if (event.event_type === "automation_triggered" && event.data) {
+      const ctx = event.context || {};
+      const now = Date.now();
+      const isoTs = new Date(now).toISOString();
+      this._writeAutomationRunToD1({
+        automation_id: event.data.entity_id || null,
+        automation_name: event.data.name || null,
+        fired_at_ms: now,
+        fired_at_iso: isoTs,
+        fired_at_central: HAWebSocketV2._formatTimelineTimestamp(isoTs),
+        trigger_entity_id: this._extractTriggerEntity(event.data.source),
+        trigger_description: event.data.source || null,
+        context_id: ctx.id || null,
+        context_parent_id: ctx.parent_id || null,
+        result: "ran"
+      }).catch((err) => console.error("automation_run write:", err.message));
+      this._touchLastEventSeen(now);
+      return;
+    }
+    if (event.event_type === "call_service" && event.data) {
+      const ctx = event.context || {};
+      const now = Date.now();
+      const isoTs = new Date(now).toISOString();
+      const targets = event.data.service_data ? event.data.service_data.entity_id : null;
+      const targetIds = Array.isArray(targets) ? targets.join(",") : (targets || null);
+      this._writeServiceCallToD1({
+        domain: event.data.domain,
+        service: event.data.service,
+        service_data_json: JSON.stringify(event.data.service_data || {}),
+        target_entity_ids: targetIds,
+        fired_at_ms: now,
+        fired_at_iso: isoTs,
+        fired_at_central: HAWebSocketV2._formatTimelineTimestamp(isoTs),
+        context_id: ctx.id || null,
+        context_parent_id: ctx.parent_id || null,
+        context_user_id: ctx.user_id || null
+      }).catch((err) => console.error("service_call write:", err.message));
+      this._touchLastEventSeen(now);
+      return;
+    }
     if (event.event_type === "state_changed" && event.data) {
       const newState = event.data.new_state;
       const oldState = event.data.old_state;
@@ -1439,6 +1497,34 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
       if (persistNow - this.lastSnapshotPersist > 60000) {
         this.lastSnapshotPersist = persistNow;
         this._persistStateSnapshot();
+      }
+
+      // Forensic log: unconditional D1 write for every meaningful state
+      // transition. The aiEnabled-gated block below is deleted in Deploy 3
+      // — for Deploy 1 both paths run in parallel so we can verify before
+      // flipping the kill switch.
+      if (newState && oldState && newState.state !== oldState.state) {
+        if (this._shouldLogStateChange(newState.entity_id, newState)) {
+          const now = Date.now();
+          const isoTs = new Date(now).toISOString();
+          const ctx = event.context || event.data.context || {};
+          this._writeStateChangeToD1({
+            entity_id: newState.entity_id,
+            friendly_name: (newState.attributes || {}).friendly_name || null,
+            domain: newState.entity_id.split(".")[0],
+            old_state: oldState.state,
+            new_state: newState.state,
+            attributes_json: this._shouldStoreAttributes(newState.entity_id) ? JSON.stringify(newState.attributes || {}) : null,
+            fired_at_ms: now,
+            fired_at_iso: isoTs,
+            fired_at_central: HAWebSocketV2._formatTimelineTimestamp(isoTs),
+            context_id: ctx.id || null,
+            context_parent_id: ctx.parent_id || null,
+            context_user_id: ctx.user_id || null,
+            source: "ws"
+          }).catch((err) => console.error("state_change write:", err.message));
+          this._touchLastEventSeen(now);
+        }
       }
 
       if (this.aiEnabled && newState && oldState && newState.state !== oldState.state) {
@@ -1474,6 +1560,7 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
     this.authenticated = false;
     this.subscribedEvents = false;
     this.subscribedRegistryEvents = false;
+    this.subscribedForensicEvents = false;
     this.statesReady = false;
     this.pingInFlight = false;
     this.ws = null;
@@ -1622,6 +1709,222 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
     } catch (err) {
       console.error("Failed to subscribe to registry events:", err.message);
     }
+  }
+
+  // ========================================================================
+  // Forensic event subscriptions (Deploy 1). Captures automation_triggered
+  // and call_service events so every fire and every service invocation lands
+  // in D1 with HA context-chain links preserved.
+  // ========================================================================
+  async subscribeToForensicEvents() {
+    if (this.subscribedForensicEvents) return;
+    if (!this.env.DB) return;
+    try {
+      await this.sendCommand({ type: "subscribe_events", event_type: "automation_triggered" });
+      await this.sendCommand({ type: "subscribe_events", event_type: "call_service" });
+      this.subscribedForensicEvents = true;
+      console.log("Subscribed to automation_triggered and call_service events");
+    } catch (err) {
+      console.error("Failed to subscribe to forensic events:", err.message);
+    }
+  }
+
+  // Less aggressive than shouldQueueEvent (tuned for "don't wake the LLM").
+  // Forensic log wants every real state transition; only filter Zigbee/network
+  // noise that has no diagnostic value.
+  _shouldLogStateChange(entityId, newState) {
+    const attr = newState.attributes || {};
+    const deviceClass = attr.device_class || "";
+    const unit = String(attr.unit_of_measurement || "").toLowerCase();
+    const lcId = String(entityId).toLowerCase();
+
+    const DENY_SUFFIX = [
+      "_lqi", "_signal_strength", "_rssi", "_bssid", "_ssid",
+      "_last_update_trigger", "_audio_output", "_link_quality"
+    ];
+    if (DENY_SUFFIX.some((s) => lcId.endsWith(s))) return false;
+
+    if (deviceClass === "signal_strength") return false;
+
+    if (unit === "dbm" || unit === "db" || unit === "lqi") return false;
+
+    return true;
+  }
+
+  // Store full attribute payload only for domains where attributes are
+  // forensically useful (lock latch state, cover position, climate setpoints,
+  // etc.). For sensors and switches: null saves D1 space.
+  _shouldStoreAttributes(entityId) {
+    const domain = String(entityId).split(".")[0];
+    switch (domain) {
+      case "lock":
+      case "cover":
+      case "climate":
+      case "light":
+      case "binary_sensor":
+      case "person":
+      case "device_tracker":
+      case "alarm_control_panel":
+      case "media_player":
+        return true;
+      default:
+        return false;
+    }
+  }
+
+  // Parse automation_triggered.source into a triggering entity_id where
+  // possible. HA emits strings like "state of binary_sensor.front_door",
+  // "time pattern /1", etc. Returns null when no entity is identifiable.
+  _extractTriggerEntity(source) {
+    if (typeof source !== "string") return null;
+    const m = /state of ([a-z_]+\.[a-z0-9_]+)/i.exec(source);
+    return m ? m[1] : null;
+  }
+
+  // Update the reconnect-backfill cursor. In-memory value is live; the
+  // persisted copy refreshes every 30s to keep DO storage writes coarse.
+  _touchLastEventSeen(ms) {
+    this._lastEventSeenMs = ms;
+    const now = Date.now();
+    if (now - this._lastEventSeenPersistAt > 30000) {
+      this._lastEventSeenPersistAt = now;
+      this.state.storage.put("last_event_seen_ms", ms).catch(() => {});
+    }
+  }
+
+  _recordD1WriteFailure(err) {
+    this._d1WriteFailures.total++;
+    this._d1WriteFailures.last_error_iso = new Date().toISOString();
+    this._d1WriteFailures.last_error_msg = String(err && err.message ? err.message : err).slice(0, 200);
+  }
+
+  // Fire-and-forget D1 writes for the three forensic tables. Failures
+  // increment the observability counter but never throw — the WS handler
+  // must not block on D1.
+  async _writeStateChangeToD1(row) {
+    if (!this.env.DB) return;
+    try {
+      await this.env.DB.prepare(
+        `INSERT INTO state_changes
+         (entity_id, friendly_name, domain, old_state, new_state, attributes_json,
+          fired_at_ms, fired_at_iso, fired_at_central,
+          context_id, context_parent_id, context_user_id, source)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)`
+      ).bind(
+        row.entity_id, row.friendly_name, row.domain, row.old_state, row.new_state, row.attributes_json,
+        row.fired_at_ms, row.fired_at_iso, row.fired_at_central,
+        row.context_id, row.context_parent_id, row.context_user_id, row.source
+      ).run();
+    } catch (err) {
+      this._recordD1WriteFailure(err);
+    }
+  }
+
+  async _writeAutomationRunToD1(row) {
+    if (!this.env.DB) return;
+    try {
+      await this.env.DB.prepare(
+        `INSERT INTO automation_runs
+         (automation_id, automation_name, fired_at_ms, fired_at_iso, fired_at_central,
+          trigger_entity_id, trigger_description,
+          context_id, context_parent_id, result)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)`
+      ).bind(
+        row.automation_id, row.automation_name,
+        row.fired_at_ms, row.fired_at_iso, row.fired_at_central,
+        row.trigger_entity_id, row.trigger_description,
+        row.context_id, row.context_parent_id, row.result
+      ).run();
+    } catch (err) {
+      this._recordD1WriteFailure(err);
+    }
+  }
+
+  async _writeServiceCallToD1(row) {
+    if (!this.env.DB) return;
+    try {
+      await this.env.DB.prepare(
+        `INSERT INTO service_calls
+         (domain, service, service_data_json, target_entity_ids,
+          fired_at_ms, fired_at_iso, fired_at_central,
+          context_id, context_parent_id, context_user_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)`
+      ).bind(
+        row.domain, row.service, row.service_data_json, row.target_entity_ids,
+        row.fired_at_ms, row.fired_at_iso, row.fired_at_central,
+        row.context_id, row.context_parent_id, row.context_user_id
+      ).run();
+    } catch (err) {
+      this._recordD1WriteFailure(err);
+    }
+  }
+
+  // Backfill state changes that were missed while the WS was disconnected.
+  // Bounded to a 1-hour window — multi-hour outages are operational issues
+  // and shouldn't flood D1. Pulled from HA's REST history endpoint, which
+  // does not preserve context_id, so backfilled rows have context_id = null
+  // and source = 'backfill'.
+  async _backfillStateChangesFromHA(sinceMs) {
+    if (!this.env.HA_URL || !this.env.HA_TOKEN || !this.env.DB) return;
+    const sinceIso = new Date(sinceMs).toISOString();
+    const haUrl = this.env.HA_URL.replace(/\/$/, "");
+    const url = `${haUrl}/api/history/period/${encodeURIComponent(sinceIso)}?minimal_response&significant_changes_only=false`;
+    let groups;
+    try {
+      const resp = await fetch(url, {
+        headers: { Authorization: "Bearer " + this.env.HA_TOKEN }
+      });
+      if (!resp.ok) {
+        console.error(`backfill: HA history returned ${resp.status}`);
+        return;
+      }
+      groups = await resp.json();
+    } catch (err) {
+      console.error("backfill: fetch failed:", err.message);
+      return;
+    }
+    if (!Array.isArray(groups)) return;
+
+    let written = 0;
+    let skipped = 0;
+    for (const group of groups) {
+      if (!Array.isArray(group) || group.length < 2) continue;
+      for (let i = 1; i < group.length; i++) {
+        const prev = group[i - 1];
+        const curr = group[i];
+        if (!prev || !curr) continue;
+        if (prev.state === curr.state) continue;
+        const ts = curr.last_changed || curr.last_updated;
+        if (!ts) continue;
+        const tsMs = Date.parse(ts);
+        if (isNaN(tsMs) || tsMs <= sinceMs) { skipped++; continue; }
+        const entityId = curr.entity_id || prev.entity_id;
+        if (!entityId) continue;
+        if (!this._shouldLogStateChange(entityId, { attributes: curr.attributes || {} })) {
+          skipped++;
+          continue;
+        }
+        this._writeStateChangeToD1({
+          entity_id: entityId,
+          friendly_name: ((curr.attributes || {}).friendly_name) || null,
+          domain: entityId.split(".")[0],
+          old_state: prev.state,
+          new_state: curr.state,
+          attributes_json: this._shouldStoreAttributes(entityId) ? JSON.stringify(curr.attributes || {}) : null,
+          fired_at_ms: tsMs,
+          fired_at_iso: new Date(tsMs).toISOString(),
+          fired_at_central: HAWebSocketV2._formatTimelineTimestamp(new Date(tsMs).toISOString()),
+          context_id: null,
+          context_parent_id: null,
+          context_user_id: null,
+          source: "backfill"
+        }).catch(() => {});
+        written++;
+      }
+    }
+    console.log(`backfill: wrote ${written} rows since ${sinceIso} (skipped ${skipped})`);
+    this.logAI("backfill_complete", `Backfilled ${written} state changes since ${sinceIso}`,
+      { written, skipped, since_ms: sinceMs });
   }
 
   async handleEntityRegistryUpdated(data) {
