@@ -1,25 +1,29 @@
-# ha-mcp-gateway
+HA-MCP-Gateway
 
 A Cloudflare Worker + Durable Object that bridges Home Assistant to LLMs. It
 holds a persistent WebSocket to HA, exposes ~70 typed tools as an MCP server
 for Claude Desktop, and runs an autonomous home agent ("MiniMax") that owns
 chat and a 30-second autonomous heartbeat. State for nine entity-kinds is
-embedded into a Cloudflare Vectorize index for semantic retrieval. Chat and
-the autonomous monitor run on split system prompts with profile-scoped tool
-sets; deterministic cover commands short-circuit the LLM via a sub-500ms
-fast path.
+embedded into a Cloudflare Vectorize index for semantic retrieval, and agent 
+history is stored in a Cloudflare D1 SQL database. Chat and the autonomous 
+monitor run on split system prompts with profile-scoped tool sets; 
+deterministic cover commands short-circuit the LLM via a sub-500ms fast path.
 
 This document is the load-bearing reference for picking up the codebase
 cold — whether that's a future iteration session or another agent. It
 covers architecture, repo layout, the knowledge index, the native tool
 loop, agent state, bindings, and operational gotchas.
+```markdown
+
+
+
 
 ---
 
 ## Architecture
 
-```
-User (web / WhatsApp / Claude Desktop)
+
+User (web / Claude Desktop / WhatsApp[dormant])
         │
         ▼
 Cloudflare Worker (worker.js)         ◀── /mcp, /chat, /twilio, /transcribe,
@@ -38,6 +42,7 @@ Durable Object: HAWebSocketV2 (ha-websocket.js)
    │  HOUSE_STATE_SNAPSHOT builder, native tool loop, autonomous
    │  heartbeat, write-through embeds, per-channel chat_history
    ├──► Home Assistant WebSocket (port 8123, JWT auth)
+   ├──► Cloudflare D1 "ha_db"                (env.DB)
    ├──► Cloudflare Vectorize "ha-knowledge"  (env.KNOWLEDGE)
    ├──► Cloudflare Workers AI @cf/baai/bge-large-en-v1.5  (env.AI)
    ├──► MiniMax M2.7-highspeed at api.minimax.io  (OpenAI-compatible)
@@ -51,9 +56,10 @@ Layer-by-layer:
 3. **HA Green** — a Nabu Casa appliance running HA OS on the local LAN. Cloud-relayed via Nabu Casa for remote access.
 4. **ha-mcp-gateway (this repo)** — Worker + DO. Translates natural language into HA service calls. Auth: Cloudflare Access JWT for browser users; long-lived HA token in worker secret.
 5. **Vectorize knowledge index (`ha-knowledge`)** — see [Knowledge index](#knowledge-index-ha-knowledge) below.
-6. **MiniMax M2.7-highspeed** — chat completions + native tool calls. The DO runs the tool loop, not MiniMax. 45s timeout per call with `AbortError` handling.
-7. **ElevenLabs Scribe** — `scribe_v1` speech-to-text. Worker proxies the chat UI's audio blobs through `/transcribe` and returns `{ text, language_code }`.
-8. **Frontends** — Claude Desktop (MCP), `/chat` HTML UI served by the Worker (SSE-streaming, hero mic button, collapsible reasoning panel, retry/copy/clear), Twilio (WhatsApp).
+6. **Cloudflare D1 (`ha_db`)** — Relational database providing permanent SQL history for agent logs (`ai_log`) and observations.
+7. **MiniMax M2.7-highspeed** — chat completions + native tool calls. The DO runs the tool loop, not MiniMax. 45s timeout per call with `AbortError` handling.
+8. **ElevenLabs Scribe** — `scribe_v1` speech-to-text. Worker proxies the chat UI's audio blobs through `/transcribe` and returns `{ text, language_code }`.
+9. **Frontends** — Claude Desktop (MCP), `/chat` HTML UI served by the Worker (SSE-streaming, hero mic button, collapsible reasoning panel, retry/copy/clear). Twilio (WhatsApp) is currently dormant/non-functional but retained for future re-implementation.
 
 ---
 
@@ -61,11 +67,11 @@ Layer-by-layer:
 
 | File | Role |
 |---|---|
-| `src/worker.js` | Cloudflare Worker entry. Owns the MCP handler (`TOOLS` list + `handleTool` dispatch), HTTP routes (`/chat`, `/twilio`, `/transcribe`, `/admin/rebuild-knowledge`, `/admin/index-stats`, `/admin/cleanup-stale-vectors`, `/admin/reindex-observations`, `/admin/bugs`, `/admin/bugs/clear`, `/health`, `/refresh`, `/mcp`), the embedded `CHAT_HTML` UI (mic, reasoning panel, retry/copy/clear, iOS Safari "Load failed" auto-retry), the ElevenLabs STT proxy, the `formatBugsAsMarkdown` helper, KV cache helpers (states/registries), the multi-kind `backfillKnowledge` (with friendly-name collision guard, vector-id dedup, and orphan-diff cleanup on force rebuilds), and the `scheduled()` cron handler with daily resync. |
-| `src/ha-websocket.js` | Durable Object class `HAWebSocketV2` (renamed from `HAWebSocket` via v2 migration to force isolate refresh). Holds the persistent HA WebSocket, in-memory `stateCache`, recent-events queue. **Two system prompts**: `getChatSystemPrompt` (chat profile, with CHAT ACTION CONFIRMATION) and `getNativeAgentSystemPrompt(role, ctx)` (autonomous + shared, with AUTONOMOUS ACTION SAFETY). Both inject a live `_buildHouseStateSnapshot()` block plus six semantic top-K blocks (entity, memory, observation, automation, device, service). Two execution paths: `chatWithAgentNative` (user-driven, SSE) and `runAIAgentNative` (heartbeat). Cover-command fast path (`_tryDeterministicFastPath`) short-circuits the LLM. The native tool loop (`runNativeToolLoop`), action executor (`executeAIAction` with PINNED-prefix memory FIFO exemption), tool dispatcher (`executeNativeTool`), multi-kind retriever (`retrieveKnowledge` — applies area lowercase normalization, topic_tag bracket-normalization + client-side filter, default min_score floor of 0.50, friendly_name dedup, observation time-decay, entity state-aware boost), write-through embed/upsert helpers (auto-stamp `created_at`), per-channel `chat_history:${channelKey}`, sharded `last_indexed_ids_v1` for orphan diff. |
+| `src/worker.js` | Cloudflare Worker entry. Owns the MCP handler (`TOOLS` list + `handleTool` dispatch), HTTP routes, the embedded `CHAT_HTML` UI (mic, reasoning panel, retry/copy/clear, iOS Safari "Load failed" auto-retry), the ElevenLabs STT proxy, the `formatBugsAsMarkdown` helper, KV cache helpers (states/registries), the multi-kind `backfillKnowledge` (with friendly-name collision guard, vector-id dedup, and orphan-diff cleanup on force rebuilds), and the `scheduled()` cron handler with daily resync and 30-day D1 log retention. Twilio 13s timeout logic lives here. |
+| `src/ha-websocket.js` | Durable Object class `HAWebSocketV2` (renamed from `HAWebSocket` via v2 migration to force isolate refresh). Holds the persistent HA WebSocket, in-memory `stateCache`, recent-events queue. **Two system prompts**: `getChatSystemPrompt` (chat profile, with CHAT ACTION CONFIRMATION) and `getNativeAgentSystemPrompt(role, ctx)` (autonomous + shared, with AUTONOMOUS ACTION SAFETY). Both inject a live `_buildHouseStateSnapshot()` block plus six semantic top-K blocks (entity, memory, observation, automation, device, service). Two execution paths: `chatWithAgentNative` (user-driven, SSE) and `runAIAgentNative` (heartbeat). Cover-command fast path (`_tryDeterministicFastPath`) short-circuits the LLM. The native tool loop (`runNativeToolLoop`), action executor (`executeAIAction` with PINNED-prefix memory FIFO exemption), tool dispatcher (`executeNativeTool`), multi-kind retriever (`retrieveKnowledge`), D1 read/write helpers (`_loadAiLogFromD1`, `_loadObservationsFromD1`), write-through embed/upsert helpers (auto-stamp `created_at`), per-channel `chat_history:${channelKey}`, sharded `last_indexed_ids_v1` for orphan diff. |
 | `src/agent-tools.js` | OpenAI-format tool schemas passed to MiniMax. 4 action tools (`call_service`, `ai_send_notification`, `save_memory`, `save_observation`) + 5 read tools (`get_state`, `get_logbook`, `render_template`, `vector_search`, `get_automation_config`) + 1 chat-only meta tool (`report_bug` — captures user-flagged issues to DO `bugs` storage). `vector_search` accepts `query`, `kinds` (REQUIRED in practice), `domain`, `area` (case-insensitive), `topic_tag` (with or without brackets), `min_score` (default 0.50), `top_k` (max 50), `include_noisy`. Exports `NATIVE_AGENT_TOOLS`, `NATIVE_TOOL_NAMES`, `NATIVE_ACTION_TOOL_NAMES`, and `CHAT_ALLOWED_TOOL_NAMES` (chat profile excludes `save_memory` + `save_observation`; autonomous excludes `report_bug`). |
-| `src/vectorize-schema.js` | Canonical metadata schema (incl. `created_at` for memory/observation), `vectorIdFor(kind, refId)`, FNV-1a hash, per-kind embed-text builders (entity embed includes `manufacturer` + `model` from device lookup; conditional fields drop empty placeholders), `isNoisyEntity` (with `device_class: "battery"` exemption from the diagnostic-flag) / `isNoisyService` / `entityCategoryFor` helpers, `buildMetadata` (lowercase-coerces `area`, string-coerces `is_noisy`, propagates `created_at`). Imported by both worker.js and ha-websocket.js. |
-| `wrangler.toml` | Bindings (HA_WS, HA_CACHE, KNOWLEDGE, AI), build command (esbuild bundles `src/worker.js` → `dist/worker.js`), cron triggers (`* * * * *` cache prewarm, `30 8 * * *` daily knowledge resync), DO migrations v1 (`new_classes` for `HAWebSocket`) + v2 (`renamed_classes` to `HAWebSocketV2`). `compatibility_date = "2026-05-09"`. |
+| `src/vectorize-schema.js` | Canonical metadata schema (incl. `created_at` for memory/observation), `vectorIdFor(kind, refId)`, FNV-1a hash, `topicTagFor(text)` (aligns D1 PK and Vectorize identity), per-kind embed-text builders, `isNoisyEntity` (with `device_class: "battery"` exemption from the diagnostic-flag) / `isNoisyService` / `entityCategoryFor` helpers, `buildMetadata` (lowercase-coerces `area`, string-coerces `is_noisy`, propagates `created_at`). Imported by both worker.js and ha-websocket.js. |
+| `wrangler.toml` | Bindings (HA_WS, HA_CACHE, KNOWLEDGE, AI, DB), build command (esbuild bundles `src/worker.js` → `dist/worker.js`), cron triggers (`* * * * *` cache prewarm, `30 8 * * *` daily knowledge resync + log retention), DO migrations v1 (`new_classes` for `HAWebSocket`) + v2 (`renamed_classes` to `HAWebSocketV2`). `compatibility_date = "2026-05-09"`. |
 | `dist/worker.js` | esbuild output. **Build artifact — never edit.** |
 | `.dev.vars` | Local-dev secrets. Never committed. |
 
@@ -82,7 +88,7 @@ gives near-random rankings).
 | Field             | Type   | Filterable? | Notes                                    |
 |-------------------|--------|-------------|------------------------------------------|
 | `kind`            | string | ✓           | `entity` `automation` `script` `scene` `area` `device` `service` `memory` `observation` |
-| `ref_id`          | string |             | entity_id, automation HA-internal id, `<domain>.<service>`, `fnv1aHex(text)`, … |
+| `ref_id`          | string |             | entity_id, automation HA-internal id, `<domain>.<service>`, `fnv1aHex(text)` for memories, `topicTagFor(text)` for observations, … |
 | `friendly_name`   | string |             | Display label (first 80 chars for memory/observation) |
 | `domain`          | string | ✓           | Entity domain for entity kind, kind name otherwise |
 | `area`            | string | ✓           | Resolved area name, "" if none |
@@ -107,6 +113,8 @@ Default vector_search filters out `is_noisy: "true"` records. Pass
 the prefixed form would exceed the cap. `vectorIdFor(kind, refId)` is the
 single source of truth.
 
+For observations, the `ref_id` is generated by `topicTagFor(text)` which extracts the lowercased bracketed prefix. This locks Vectorize identity to the D1 primary key.
+
 ### Refresh strategy
 
 | Kind         | Refresh trigger                                                 |
@@ -114,15 +122,12 @@ single source of truth.
 | entity       | event-driven (`entity_registry_updated`) + nightly cron resweep |
 | device       | event-driven (`device_registry_updated`) + nightly cron resweep |
 | memory       | write-through (`executeAIAction.save_memory`)                   |
-| observation  | write-through (`executeAIAction.save_observation`)              |
+| observation  | write-through (`executeAIAction.save_observation` to D1)        |
 | automation   | nightly cron                                                    |
 | script       | nightly cron                                                    |
 | scene        | nightly cron                                                    |
 | area         | nightly cron                                                    |
 | service      | nightly cron                                                    |
-
-`executeAIAction` for memory/observation also handles vector cleanup on
-FIFO eviction and on `replaces`-prefix observation supersede.
 
 ### Endpoints
 
@@ -143,21 +148,13 @@ FIFO eviction and on `replaces`-prefix observation supersede.
   ref_ids, and deletes them via `KNOWLEDGE.deleteByIds` (batches of 100,
   the Vectorize cap). Idempotent — re-running is a no-op.
 - `POST /admin/reindex-observations` — delete all observation vector ids
-  then force-rebuild the observation kind. Use when the Vectorize
-  metadata index for a property was created after vectors existed and
-  needs fresh INSERT semantics to populate (per Cloudflare's rule that
-  metadata indexes only apply to vectors inserted after the index is
-  created).
+  then force-rebuild the observation kind.
 - DO `POST /vector_search` — internal endpoint the Worker delegates to
   for the `vector_search` MCP/native tool. Body: `{query, kinds, domain,
   area, topic_tag, min_score, top_k, include_noisy}`. `top_k` clamped
   `[1, 50]`. Internally over-fetches to 50 when `topic_tag` is set so
   client-side bracket-normalized filtering doesn't miss matches outside
   the top semantic neighborhood.
-- DO `POST /index_stats_update` / `GET /index_stats_read` — backfill
-  summary persistence; used by the worker after each rebuild.
-- DO `POST /last_indexed_ids_write` / `GET /last_indexed_ids_read` —
-  sharded id-set persistence used by the orphan diff.
 
 ### Index recreation (one-time, before deploy)
 
@@ -223,7 +220,7 @@ Caps:
   `save_memory` and `save_observation` are excluded; the autonomous
   monitor picks those up from the timeline). Synthesis fallback on
   overflow — pushes a "stop using tools, compose now" user message and
-  re-calls MiniMax with `tools: []` so the model produces prose from
+  re-calls MiniMax with `tools:[]` so the model produces prose from
   work-so-far instead of a tool trace.
 - **Autonomous path** (`runAIAgentNative`): `maxIterations: 8`,
   `maxTokens: 8192`, `hallucinationGuard: false`, tool set is
@@ -235,9 +232,9 @@ Tool surface (10 total):
 | Tool | Side effect | Chat? | Auto? | Notes |
 |---|---|---|---|---|
 | `call_service` | yes | ✓ | ✓ | Any HA service. Post-action verify `get_state` for `climate` / `lock` / `cover`. |
-| `ai_send_notification` | yes | ✓ | ✓ | `notify.notify` call + writes a `notification` entry to `ai_log`. |
-| `save_memory` | yes | ✗ | ✓ | Append to `ai_memory` (100 FIFO). Embed + upsert. Evicted entries get vector-deleted. |
-| `save_observation` | yes | ✗ | ✓ | Append to `ai_observations` (500 FIFO). Embed + upsert. `replaces` prefix-deletes existing entries (and their vectors). |
+| `ai_send_notification` | yes | ✓ | ✓ | `notify.notify` call + writes a `notification` entry to D1 `ai_log`. |
+| `save_memory` | yes | ✗ | ✓ | Append to DO storage (100 FIFO). Embed + upsert. Evicted entries get vector-deleted. |
+| `save_observation` | yes | ✗ | ✓ | Insert into D1 `observations` table (`INSERT OR REPLACE`). Embed + upsert to Vectorize using derived `topicTagFor()`. |
 | `get_state` | no | ✓ | ✓ | stateCache hit; force_refresh fetches via WS. |
 | `get_logbook` | no | ✓ | ✓ | HA `/api/logbook`. Tool description requires explicit TZ offset (`-05:00` for CDT). |
 | `render_template` | no | ✓ | ✓ | HA `/api/template`. Jinja2 evaluation. |
@@ -266,7 +263,7 @@ memories/observations, and the relevant-entity slice. Differences:
 | HOUSE_STATE_SNAPSHOT          | ✓          | ✓          |
 | Tool list (in prompt)         | 8 tools    | 9 tools    |
 | MODE block                    | implicit   | role=`autonomous` or `chat` |
-| YOUR MEMORY / OBSERVATIONS    | ✗ (chat doesn't write) | ✓ |
+| YOUR MEMORY / OBSERVATIONS    | ✗ (chat doesn't write) | ✓ (queries recent D1 rows) |
 | OPERATIONAL REMINDERS         | QUICK FACTS only | full 11-item list |
 | RETRIEVAL DISCIPLINE          | ✓          | ✓          |
 | TRUTHFULNESS — STATE CLAIMS   | ✓          | ✓          |
@@ -331,16 +328,17 @@ hit-rate.
 
 ## Agent state buckets
 
-| Bucket | Storage key | Cap | Semantics |
+| Bucket | Storage key / Store | Cap | Semantics |
 |---|---|---|---|
 | `ai_memory` | DO storage | 100 FIFO | Confirmed long-term facts. Embedded into KNOWLEDGE on write. Memories prefixed with `PINNED:` are exempt from FIFO eviction (architectural facts, presence rules, naming conventions shouldn't be lost to rapid arrival/departure churn). If all 100 slots are pinned, the list grows rather than dropping pinned content. |
-| `ai_observations` | DO storage | 500 FIFO | Hypotheses-in-progress, prefixed with `[topic-tag]`. Embedded into KNOWLEDGE on write. `replaces` prefix-supersede. |
-| `ai_log` | DO storage `ai_log` (last 150 compacted) + in-memory ring (1000) | 1000 in-memory / 150 persisted | Unified timeline: `chat_user`, `chat_reply`, `action`, `action_verified`, `notification`, `decision`, `state_change`, `memory_saved`, `observation_saved`, `vector_*`, errors. Source-tagged. |
+| `ai_observations` | **D1 `observations` table** | Unbounded | Hypotheses-in-progress, prefixed with `[topic-tag]`. Embedded into KNOWLEDGE on write. D1 table handles prefix updates automatically natively via `INSERT OR REPLACE` using `topicTagFor(text)` as PK. *(DO storage key `ai_observations` was retired via migration).* |
+| `ai_log` | **D1 `ai_log` table** + in-memory ring | 30 days D1 / 1000 in-memory | Unified timeline: `chat_user`, `chat_reply`, `action`, `action_verified`, `notification`, `decision`, `state_change`, `memory_saved`, `observation_saved`, `vector_*`, errors. Appended to D1 fire-and-forget. Pruned >30 days via daily cron. *(DO storage keys `ai_log_chunk_*` retired via migration).* |
 | `chat_history:${channelKey}` | DO storage | 10 user turns / 110 KB byte cap per channel | OpenAI-format messages including `tool_calls` and `tool` results — preserves full tool-calling trace across turns. Per-channel: web / Twilio / each Twilio number gets its own slot via `sanitizeChannelKey(from)`. Tool-message `content` is truncated at 4 KB (`TOOL_CONTENT_CAP`) before persisting. |
 | `state_cache_snapshot` | DO storage | 127 KB cap | Hibernation snapshot for cold-start. Filtered to a domain allowlist (`SNAPSHOT_DOMAIN_ALLOWLIST`) + sensor whitelist + battery threshold. Logs `snapshot_oversize` and attempts the put even at over-cap (silent skip is worse than a put-exception we already catch). |
+| `bugs` | DO storage | 200 FIFO | Temporary bucket for user-flagged `report_bug` entries. Cleared by operator during iteration ritual. |
 
 Timeline timestamps are reformatted to **Central time** at prompt-injection
-(`HAWebSocket._formatTimelineTimestamp`). Underlying `ai_log` entries stay
+(`HAWebSocketV2._formatTimelineTimestamp`). Underlying `ai_log` entries stay
 ISO 8601 for parseability.
 
 ---
@@ -351,11 +349,11 @@ ISO 8601 for parseability.
 
 | Binding | Resource | Purpose |
 |---|---|---|
-| `HA_WS` | Durable Object class `HAWebSocket` | Singleton `ha-websocket-singleton` |
+| `HA_WS` | Durable Object class `HAWebSocketV2` | Singleton `ha-websocket-singleton` |
 | `HA_CACHE` | KV namespace | TTL'd cache for HA registries / states between cold starts |
 | `KNOWLEDGE` | Vectorize index `ha-knowledge` | Multi-kind semantic index |
 | `AI` | Workers AI | `@cf/baai/bge-large-en-v1.5` embeddings (cls pooling) |
-| `DB` | D1 database `ha_db` | Relational store for `ai_log`, `observations`, `bugs`. Currently dual-written alongside DO storage on `save_observation`; reads still come from DO storage. Staged migration — read flip lands in a later dispatch. |
+| `DB` | D1 database `ha_db` | Relational store for `ai_log`, `observations`. Replaces DO storage for unbounded history and SQL queryability. |
 
 ### Worker secrets (`wrangler secret`)
 
@@ -377,9 +375,9 @@ Cron triggers:
 - `* * * * *` — `prewarmCache(env)`. Warms KV every minute; heavy
   refresh of all registries every 15 minutes; reconnects the DO if the
   WebSocket is dead.
-- `30 8 * * *` — `dailyKnowledgeResync(env)`. 03:30 CDT (08:30 UTC).
+- `30 8 * * *` — `dailyKnowledgeResync(env)` & `dailyAiLogRetention(env)`. 03:30 CDT (08:30 UTC).
   Resyncs `automation`, `script`, `scene`, `area`, `device`, `service`
-  kinds. Skips unchanged docs by hash.
+  kinds. Skips unchanged docs by hash. Deletes logs older than 30 days from D1.
 
 The `scheduled()` handler dispatches on `event.cron`.
 
@@ -387,13 +385,15 @@ The `scheduled()` handler dispatches on `event.cron`.
 
 ## How a request flows
 
-### Chat (web `/chat` SSE, Twilio webhook, MCP `ai_chat` tool)
+### Chat (web `/chat` SSE, MCP `ai_chat` tool)
+
+*(Note: Twilio webhook logic uses `Promise.race` with a 13-second timeout to meet Twilio's 15-second cutoff, but is currently marked as dormant/non-functional for future re-implementation.)*
 
 ```
 POST /chat (text/event-stream)
   → DO /ai_chat_stream
     → chatWithAgentNative
-       0. SSE `started` event (iOS Safari heartbeat before model latency)
+       0. SSE `started` event (iOS Safari heartbeat before model latency + 3s keepalive interval)
        1. _tryDeterministicFastPath(message)  ── hit? log, persist
           history, emit `reply`, return. No LLM call.
        2. Load chat_history:${channelKey}
@@ -440,7 +440,7 @@ Browser (chat UI mic button) ──multipart audio──► /transcribe
 DO alarm() every 60s
   → if recentEvents.length > 0 || 15-min heartbeat
     → runAIAgentNative
-       1. Load ai_memory, ai_observations
+       1. Load ai_memory (from DO), observations (from D1)
        2. _buildNativeContextEntities(eventQuery)
        3. getNativeAgentSystemPrompt("autonomous", ctx)
        4. runNativeToolLoop(messages, {
@@ -458,7 +458,7 @@ DO alarm() every 60s
 
 ```
 HA event entity_registry_updated  → handleEntityRegistryUpdated  → reembedRefs({ kind: "entity", ... })
-HA event device_registry_updated  → handleDeviceRegistryUpdated  → reembedRefs({ kind: "device", ... }) AND ({ kind: "entity", refIds: [device's entities] })
+HA event device_registry_updated  → handleDeviceRegistryUpdated  → reembedRefs({ kind: "device", ... }) AND ({ kind: "entity", refIds:[device's entities] })
 ```
 
 ---
@@ -466,7 +466,7 @@ HA event device_registry_updated  → handleDeviceRegistryUpdated  → reembedRe
 ## Chat UI surface
 
 `CHAT_HTML` is a single embedded HTML/CSS/JS template in
-[src/worker.js:666–1665](src/worker.js) served at `/chat`. Key
+[src/worker.js](src/worker.js) served at `/chat`. Key
 client-side features:
 
 - **Hero mic button + auto-send.** 3-state machine
@@ -567,7 +567,7 @@ $gw = "https://ha-mcp-gateway.obert-john.workers.dev"
   `wrangler delete` + `wrangler deploy` reset). The class was renamed
   `HAWebSocket` → `HAWebSocketV2` once already as part of this round's
   workaround attempts; storage was preserved, the rename is permanent.
-  See the resolved `#vec-topic-tag-filter` entry in [BUGS.md](BUGS.md)
+  See the resolved `#vec-topic-tag-filter` entry in[BUGS.md](BUGS.md)
   for the full narrative — the actual bug ended up being a missing
   arg-pass-through in the dispatcher, not a stale isolate; the tail-
   with-version-ids check would have caught it on the first probe.
@@ -626,17 +626,10 @@ $gw = "https://ha-mcp-gateway.obert-john.workers.dev"
 Newest first. `git log --oneline` walks back further; anything older than
 9acf9bc is foundational and unlikely to need re-reading.
 
-- **(unreleased — D1 dual-write, step 1–2 of 6)** — wired the existing
-  `ha_db` D1 instance into the worker as `env.DB` and dual-write
-  `save_observation` through to `D1.observations` (PK `topic_tag`,
-  `INSERT OR REPLACE`) alongside the existing DO storage + Vectorize
-  path. DO storage remains the read source during this transition; D1
-  is being populated in parallel so a later dispatch can flip reads
-  safely. Migration `0001_d1_indexes_and_columns.sql` adds indexes on
-  `ai_log(timestamp,type)`, `observations(timestamp)`,
-  `bugs(severity,timestamp_iso)`, plus a nullable `observations.data`
-  column for future structured payloads. D1 write failure is non-fatal
-  (logs `d1_save_observation_failed`); rollback is a one-line comment.
+- **(unreleased — D1 observation & ai_log read/write cutover)** — 
+  `save_observation` now exclusively writes to D1 (`observations` table) and Vectorize, utilizing a shared `topicTagFor(text)` helper to guarantee identical D1 Primary Keys and Vectorize `ref_id`s. DO storage `ai_observations` key retired and purged via one-time migration.
+  `ai_log` exclusively writes to D1. DO storage sharded keys (`ai_log`, `ai_log_chunk_*`) retired and purged via one-time migration. `persistLog` is a shim to keep existing call sites resolving. Added `dailyAiLogRetention` cron to prune logs older than 30 days from D1.
+  The autonomous heartbeat reads recent observations and logs directly from D1 (`_loadObservationsFromD1`, `_loadAiLogFromD1`). Admin endpoints (`/ai_observations`, `/ai_clear_observations`, `/ai_log`, `/ai_clear_log`) upgraded to operate against D1.
 - **(unreleased — vector-search optimization round 1)** — comprehensive
   pass on the `ha-knowledge` index after a probing session uncovered
   duplication, missing battery sensors, and case-sensitive area
@@ -660,7 +653,7 @@ Newest first. `git log --oneline` walks back further; anything older than
   `/admin/index-stats`, `/admin/cleanup-stale-vectors`,
   `/admin/reindex-observations`. DO class renamed
   `HAWebSocket` → `HAWebSocketV2` (v2 migration, state preserved).
-  `compatibility_date` bumped to `2026-05-09`.
+  `compatibility_date` bumped to `2026-05-09`. Fixed `executeNativeTool` arg-threading bug that was silently dropping `topic_tag` and `min_score` before they reached the Vectorize query.
 - **(unreleased)** — `report_bug` native tool (chat-only) +
   `/admin/bugs` GET / `/admin/bugs/clear` POST + `BUGS.md` workflow.
   Natural-language bug capture: when the user explicitly tags an issue
@@ -694,9 +687,9 @@ Newest first. `git log --oneline` walks back further; anything older than
 - **b2771f0** — fix: dispatch native tools through `executeNativeTool`
   (Patch 2.4 regression).
 - **f07c88d** — `started` SSE event + iOS Safari "Load failed"
-  auto-retry.
+  auto-retry. Added 3-second keepalive interval to `/ai_chat_stream` to prevent iOS Safari cellular drops.
 - **37e0a01** — chat/monitor system-prompt split + 45s MiniMax timeout
-  + SSE transport hardening.
+  + SSE transport hardening. Added 13-second `Promise.race` timeout to `/twilio` webhook logic.
 - **b4b2f08** — `CHAT_ALLOWED_TOOL_NAMES` export (chat profile excludes
   `save_memory`, `save_observation`).
 - **d9e7c13** — clear / retry / copy buttons in chat UI.
@@ -802,3 +795,4 @@ If iterating from here, the highest-leverage open items:
 6. **ElevenLabs cost guardrails.** No rate limit on `/transcribe`
    today. If usage scales beyond the household, add a per-channel
    monthly budget cap or move to a self-hosted Whisper.
+```
