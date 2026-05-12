@@ -805,6 +805,11 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
       this._logInitialized = true;
     }
 
+    if (!this._migrationsApplied) {
+      await this._migrateRetireAIObservationsKey();
+      this._migrationsApplied = true;
+    }
+
     if (this.stateCache.size === 0) {
       await this._restoreStateSnapshot();
     }
@@ -979,12 +984,27 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
         }
 
         case "/ai_observations": {
-          const observations = await this.state.storage.get("ai_observations") || [];
+          const observations = await this._loadObservationsFromD1(500);
           return new Response(JSON.stringify(observations), { headers });
         }
         case "/ai_clear_observations": {
-          await this.state.storage.put("ai_observations", []);
-          return new Response(JSON.stringify({ cleared: true }), { headers });
+          let rowsDeleted = 0;
+          if (this.env.DB) {
+            try {
+              const res = await this.env.DB.prepare(`DELETE FROM observations`).run();
+              rowsDeleted = res?.meta?.changes ?? 0;
+            } catch (err) {
+              this.logAI("error", "d1_clear_observations_failed", {
+                error: String(err?.message || err),
+              });
+            }
+          }
+          this.logAI("observations_cleared", `cleared ${rowsDeleted} D1 rows`, { rowsDeleted });
+          return new Response(JSON.stringify({
+            cleared: true,
+            rows_deleted: rowsDeleted,
+            note: "Run /admin/rebuild-knowledge?force=1&kinds=observation to resync the vector index."
+          }), { headers });
         }
 
         case "/bugs": {
@@ -1021,7 +1041,7 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
           const body = await request.json();
           if (!body.text) return new Response(JSON.stringify({ error: "text is required" }), { status: 400, headers });
           await this.executeAIAction({ type: "save_observation", text: body.text, replaces: body.replaces }, "tool_call");
-          const observations = await this.state.storage.get("ai_observations") || [];
+          const observations = await this._loadObservationsFromD1(500);
           return new Response(JSON.stringify({ saved: true, count: observations.length }), { headers });
         }
 
@@ -1897,6 +1917,20 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
         created_at: new Date().toISOString()
       })
     };
+  }
+
+  async _migrateRetireAIObservationsKey() {
+    try {
+      const done = await this.state.storage.get("migration_ai_obs_retired");
+      if (done) return;
+      await this.state.storage.delete("ai_observations");
+      await this.state.storage.put("migration_ai_obs_retired", true);
+      this.logAI("migration", "Retired ai_observations DO storage key — D1 is now authoritative", {});
+    } catch (err) {
+      this.logAI("error", "migration_ai_obs_retired_failed", {
+        error: String(err?.message || err),
+      });
+    }
   }
 
   async _loadObservationsFromD1(limit = 100) {
@@ -2951,24 +2985,11 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
           this.logAI("observation_skipped", "save_observation called with empty text", action, source);
           break;
         }
-        let observations = await this.state.storage.get("ai_observations") || [];
-        // Capture entries removed by `replaces` so we can delete their vectors.
-        let removedTexts = [];
-        if (typeof action.replaces === "string" && action.replaces.length > 0) {
-          const prefix = action.replaces;
-          removedTexts = observations.filter((o) => o.startsWith(prefix));
-          observations = observations.filter((o) => !o.startsWith(prefix));
-        }
-        observations.push(text);
-        let evictedTexts = [];
-        if (observations.length > 500) {
-          evictedTexts = observations.splice(0, observations.length - 500);
-        }
-        await this.state.storage.put("ai_observations", observations);
-
-        // ─── D1 write-through (step 2 of D1 migration) ─────────────────────
-        // Source of truth during this transition is still DO storage; D1 is
-        // populated in parallel so the next dispatch can flip reads safely.
+        // D1 is authoritative for observations. The `replaces` arg on the
+        // action is accepted but ignored — D1's primary key on topic_tag
+        // supersedes any prior row with the same tag natively (via
+        // INSERT OR REPLACE), and the matching Vectorize upsert under the
+        // same topic-tag-derived vector_id overwrites the old vector.
         const topicTag = topicTagFor(text);
         try {
           const ts = new Date().toISOString();
@@ -2985,27 +3006,17 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
             text_preview: String(text).slice(0, 200),
           }, source);
         }
-        // ───────────────────────────────────────────────────────────────────
 
         this.logAI("observation_saved", text.substring(0, 200), { replaces: action.replaces || null, topic_tag: topicTag }, source);
-        // Write-through: embed + upsert the new observation, then delete the
-        // vectors for any prefix-replaced or FIFO-evicted entries.
+        // Write-through: embed + upsert the new observation. Same-tag prior
+        // vectors are overwritten by the upsert (vector_id is keyed on
+        // topicTagFor(text)), so no separate delete-sweep is needed.
         if (this.env.AI && this.env.KNOWLEDGE) {
           try {
             const doc = this._observationDocFor(text);
             if (doc) await this._embedAndUpsertSingle(doc);
           } catch (err) {
             this.logAI("vector_error", "observation upsert: " + err.message, {}, source);
-          }
-          const toDelete = [...removedTexts, ...evictedTexts]
-            .filter((t) => typeof t === "string" && t)
-            .map((t) => vectorIdFor("observation", topicTagFor(t)));
-          if (toDelete.length > 0) {
-            try {
-              await this._deleteVectorIds(toDelete);
-            } catch (err) {
-              this.logAI("vector_error", "observation prefix-delete: " + err.message, {}, source);
-            }
           }
         }
         break;
