@@ -15,7 +15,8 @@ import {
   NOISY_DOMAINS,
   NOISY_SENSOR_DEVICE_CLASSES,
   NOISY_SENSOR_UNITS,
-  extractTopicTag
+  extractTopicTag,
+  topicTagFor
 } from "./vectorize-schema.js";
 
 function sanitizeChannelKey(from) {
@@ -1900,7 +1901,7 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
 
   _observationDocFor(text) {
     if (typeof text !== "string" || !text) return null;
-    const ref_id = fnv1aHex(text);
+    const ref_id = topicTagFor(text);
     const vector_id = vectorIdFor("observation", ref_id);
     const friendly_name = text.slice(0, 80);
     const embedText = buildObservationEmbedText(text);
@@ -2950,11 +2951,7 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
         // ─── D1 write-through (step 2 of D1 migration) ─────────────────────
         // Source of truth during this transition is still DO storage; D1 is
         // populated in parallel so the next dispatch can flip reads safely.
-        let topicTag;
-        {
-          const m = String(text).match(/^\[([a-z0-9_-]+)\]/i);
-          topicTag = m ? m[1].toLowerCase() : fnv1aHex(String(text));
-        }
+        const topicTag = topicTagFor(text);
         try {
           const ts = new Date().toISOString();
           await this.env.DB
@@ -2984,7 +2981,7 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
           }
           const toDelete = [...removedTexts, ...evictedTexts]
             .filter((t) => typeof t === "string" && t)
-            .map((t) => vectorIdFor("observation", fnv1aHex(t)));
+            .map((t) => vectorIdFor("observation", topicTagFor(t)));
           if (toDelete.length > 0) {
             try {
               await this._deleteVectorIds(toDelete);

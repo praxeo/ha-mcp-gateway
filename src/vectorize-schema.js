@@ -196,6 +196,19 @@ export function extractTopicTag(text) {
   return m ? m[1] : "";
 }
 
+/**
+ * Canonical topic-tag derivation for observations.
+ * - If text starts with [bracket-prefix], returns the lowercased prefix
+ *   content (no brackets). Allowed chars: a-z, 0-9, underscore, hyphen.
+ * - Otherwise returns fnv1aHex(text) as a stable fallback key.
+ * Used as BOTH the D1 primary key AND the Vectorize ref_id for observations.
+ */
+export function topicTagFor(text) {
+  const s = typeof text === "string" ? text : "";
+  const m = s.match(/^\[([a-z0-9_-]+)\]/i);
+  return m ? m[1].toLowerCase() : fnv1aHex(s);
+}
+
 // ---------------------------------------------------------------------------
 // Embed-text builders — one per kind. Each returns a single string of at
 // most 2000 characters, suitable for @cf/baai/bge-large-en-v1.5 with cls

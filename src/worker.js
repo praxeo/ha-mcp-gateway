@@ -20,7 +20,8 @@ import {
   flattenServiceFields,
   summarizeTriggers,
   summarizeActions,
-  extractTopicTag
+  extractTopicTag,
+  topicTagFor
 } from "./vectorize-schema.js";
 
 
@@ -3273,7 +3274,7 @@ async function buildObservationDocs(env) {
   const nowIso = new Date().toISOString();
   for (const text of observations) {
     if (typeof text !== "string" || !text) continue;
-    const ref_id = fnv1aHex(text);
+    const ref_id = topicTagFor(text);
     const vector_id = vectorIdFor("observation", ref_id);
     const friendly_name = text.slice(0, 80);
     const embedText = buildObservationEmbedText(text);
