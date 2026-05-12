@@ -807,6 +807,7 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
 
     if (!this._migrationsApplied) {
       await this._migrateRetireAIObservationsKey();
+      await this._migrateRetireAiLogKeys();
       this._migrationsApplied = true;
     }
 
@@ -961,11 +962,24 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
 
         case "/ai_log": {
           const count = parseInt(url.searchParams.get("count") || "50");
+          if (count > HAWebSocketV2.LOG_IN_MEMORY_CAP) {
+            const rows = await this._loadAiLogFromD1(count);
+            return new Response(JSON.stringify(Array.isArray(rows) ? rows : []), { headers });
+          }
           return new Response(JSON.stringify(this.aiLog.slice(-count)), { headers });
         }
 
         case "/ai_clear_log": {
           this.aiLog = [];
+          if (this.env.DB) {
+            try {
+              const r = await this.env.DB.prepare(`DELETE FROM ai_log`).run();
+              const deleted = r?.meta?.changes ?? 0;
+              console.log(`/ai_clear_log: deleted ${deleted} D1 rows`);
+            } catch (err) {
+              console.error("clear D1 ai_log:", err?.message || err);
+            }
+          }
           await this.clearPersistedLog();
           return new Response(JSON.stringify({ cleared: true }), { headers });
         }
@@ -1933,6 +1947,23 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
     }
   }
 
+  async _migrateRetireAiLogKeys() {
+    try {
+      const done = await this.state.storage.get("migration_ai_log_retired");
+      if (done) return;
+      await this.state.storage.delete("ai_log").catch(() => {});
+      await this.state.storage.delete("ai_log_head").catch(() => {});
+      for (let i = 0; i < HAWebSocketV2.LOG_CHUNKS_MAX; i++) {
+        await this.state.storage.delete("ai_log_chunk_" + i).catch(() => {});
+        await this.state.storage.delete("ai_log_chunk_gen_" + i).catch(() => {});
+      }
+      await this.state.storage.put("migration_ai_log_retired", true);
+      this.logAI("migration", "Retired ai_log DO storage keys (simple + chunked) — D1 is now authoritative", {});
+    } catch (err) {
+      console.error("ai_log migration:", err?.message || err);
+    }
+  }
+
   // Single-row write of one ai_log entry to D1. Fire-and-forget; D1 failure
   // pushes a d1_ai_log_write_failed entry directly to the in-memory ring
   // (NOT via logAI — avoids recursion).
@@ -2315,68 +2346,20 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
   }
 
   // ==========================================================================
-  // LOG PERSISTENCE — single DO storage key "ai_log" holding the last 150
-  // compacted entries. The old sharded key approach (ai_log_head / ai_log_chunk_N)
-  // is retained for migration reads only; new writes always use the flat key.
-  //
-  // Storage keys:
-  //   ai_log    = [entry, entry, ...] (last 150 entries, compacted)
+  // LOG PERSISTENCE — D1 table ai_log is now the single source of truth.
+  // Cold-start hydrates the in-memory ring from D1; logAI() writes each entry
+  // to D1 fire-and-forget. The legacy DO-storage shim methods below are
+  // retained so existing call sites (await this.persistLog()) keep resolving.
   // ==========================================================================
   async loadLogFromStorage() {
     const fromD1 = await this._loadAiLogFromD1(HAWebSocketV2.LOG_IN_MEMORY_CAP);
-    if (Array.isArray(fromD1) && fromD1.length > 0) {
-      return fromD1;
-    }
-    return await this._loadAiLogFromDOStorage();
+    return Array.isArray(fromD1) ? fromD1 : [];
   }
 
-  async _loadAiLogFromDOStorage() {
-    // Try single-key format first (current format).
-    const simple = await this.state.storage.get("ai_log");
-    if (Array.isArray(simple)) return simple;
-    // Migration: load from old sharded format if present.
-    try {
-      const head = await this.state.storage.get("ai_log_head") || { current: 0 };
-      const chunks = [];
-      const start = Math.max(0, head.current - (HAWebSocketV2.LOG_CHUNKS_MAX - 1));
-      for (let gen = start; gen <= head.current; gen++) {
-        const slot = gen % HAWebSocketV2.LOG_CHUNKS_MAX;
-        const storedGen = await this.state.storage.get("ai_log_chunk_gen_" + slot);
-        if (storedGen !== gen) continue;
-        const chunk = await this.state.storage.get("ai_log_chunk_" + slot);
-        if (Array.isArray(chunk)) chunks.push(...chunk);
-      }
-      return chunks;
-    } catch {
-      return [];
-    }
-  }
-
-  // Write the last 150 compacted entries to a single DO storage key.
-  // Replaces the old per-entry sharding approach which hit the 128KB limit
-  // when entries contained large inline blobs (full chat replies, reasoning text).
+  // Retired in step 4c. ai_log is fully on D1.
+  // Shim remains so the four `await this.persistLog()` call sites resolve instantly.
   async persistLog() {
-    const PERSIST_CAP = 150;
-    try {
-      const compacted = this.aiLog.slice(-PERSIST_CAP).map(e => {
-        // state_change: message already has entity/old/new/timestamp — drop redundant data blob.
-        if (e.type === 'state_change') {
-          const c = { type: e.type, message: e.message, timestamp: e.timestamp };
-          if (e.source) c.source = e.source;
-          return c;
-        }
-        // chat entries: drop full_reply and duplicate message field from data.
-        if (e.type === 'chat_reply' || e.type === 'chat_user') {
-          const { full_reply, message: _msg, ...rest } = e.data || {};
-          return { ...e, data: rest };
-        }
-        return e;
-      });
-      await this.state.storage.put("ai_log", compacted);
-    } catch (err) {
-      console.error("persistLog failed:", err.message);
-      this.aiLog.push({ type: "log_persist_error", message: err.message, data: {}, timestamp: new Date().toISOString() });
-    }
+    return;
   }
 
   async clearPersistedLog() {

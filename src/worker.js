@@ -3989,6 +3989,7 @@ var worker_default = {
     // daily knowledge resync. event.cron is the matched pattern.
     if (event && event.cron === "30 8 * * *") {
       ctx.waitUntil(this.dailyKnowledgeResync(env));
+      ctx.waitUntil(this.dailyAiLogRetention(env));
       return;
     }
     ctx.waitUntil(this.prewarmCache(env));
@@ -4027,6 +4028,19 @@ var worker_default = {
   // event-driven (entity/device on registry events) or write-through (memory/
   // observation in executeAIAction) updates. Skips unchanged docs by hash so
   // a full daily run typically completes with most docs in the skipped column.
+  async dailyAiLogRetention(env) {
+    if (!env.DB) return;
+    try {
+      const t0 = Date.now();
+      const result = await env.DB.prepare(
+        `DELETE FROM ai_log WHERE timestamp < datetime('now', '-30 days')`
+      ).run();
+      const deleted = result?.meta?.changes ?? 0;
+      console.log(`dailyAiLogRetention: deleted ${deleted} rows older than 30d (${Date.now() - t0}ms)`);
+    } catch (err) {
+      console.error("dailyAiLogRetention failed:", err?.message || err);
+    }
+  },
   async dailyKnowledgeResync(env) {
     if (!env.AI || !env.KNOWLEDGE) {
       console.log("dailyKnowledgeResync: AI or KNOWLEDGE binding missing — skipping");
