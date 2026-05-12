@@ -1933,6 +1933,68 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
     }
   }
 
+  // Single-row write of one ai_log entry to D1. Fire-and-forget; D1 failure
+  // pushes a d1_ai_log_write_failed entry directly to the in-memory ring
+  // (NOT via logAI — avoids recursion).
+  async _writeAiLogEntryToD1(entry) {
+    if (!this.env.DB) return;
+    try {
+      await this.env.DB.prepare(
+        `INSERT INTO ai_log (timestamp, type, message, data, source)
+         VALUES (?1, ?2, ?3, ?4, ?5)`
+      ).bind(
+        entry.timestamp,
+        entry.type,
+        entry.message ?? null,
+        entry.data !== undefined ? JSON.stringify(entry.data) : null,
+        entry.source ?? null,
+      ).run();
+    } catch (err) {
+      this.aiLog.push({
+        type: "d1_ai_log_write_failed",
+        message: String(err?.message || err),
+        data: { original_type: entry.type, original_ts: entry.timestamp },
+        timestamp: new Date().toISOString(),
+      });
+      if (this.aiLog.length > HAWebSocketV2.LOG_IN_MEMORY_CAP) {
+        this.aiLog.splice(0, this.aiLog.length - HAWebSocketV2.LOG_IN_MEMORY_CAP);
+      }
+    }
+  }
+
+  // Load the most-recent N ai_log entries from D1, returned oldest-first to
+  // match the in-memory ring's append order. Returns null on D1 failure so
+  // callers can distinguish "empty table" from "D1 unavailable".
+  async _loadAiLogFromD1(limit = 1000) {
+    if (!this.env.DB) return null;
+    try {
+      const result = await this.env.DB.prepare(
+        `SELECT timestamp, type, message, data, source
+         FROM ai_log
+         ORDER BY id DESC
+         LIMIT ?1`
+      ).bind(limit).all();
+      const rows = result?.results || [];
+      return rows.reverse().map((r) => {
+        const entry = {
+          type: r.type,
+          message: r.message ?? "",
+          timestamp: r.timestamp,
+        };
+        if (r.data) {
+          try { entry.data = JSON.parse(r.data); } catch { entry.data = {}; }
+        } else {
+          entry.data = {};
+        }
+        if (r.source) entry.source = r.source;
+        return entry;
+      });
+    } catch (err) {
+      console.error("_loadAiLogFromD1:", err?.message || err);
+      return null;
+    }
+  }
+
   async _loadObservationsFromD1(limit = 100) {
     if (!this.env.DB) return [];
     try {
@@ -2336,6 +2398,9 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
     }
     console.log("AI LOG [" + type + (source ? "/" + source : "") + "]:", message);
     this.persistLog().catch((err) => console.error("logAI persist:", err.message));
+    this._writeAiLogEntryToD1(entry).catch((err) =>
+      console.error("d1 ai_log write:", err?.message || err)
+    );
   }
 
   // ========================================================================
