@@ -110,11 +110,22 @@ export class HAWebSocketV3 {
       if (isNaN(d.getTime())) return iso;
       return d.toLocaleString("en-US", {
         timeZone: "America/Chicago",
-        month: "short", day: "numeric",
+        year: "numeric", month: "short", day: "numeric",
         hour: "numeric", minute: "2-digit",
         hour12: true
       });
     } catch { return iso; }
+  }
+
+  // Build the three fired_at_* fields from a single millisecond value so all
+  // three stay in sync regardless of which clock source we use.
+  static _tsFromMs(ms) {
+    const isoTs = new Date(ms).toISOString();
+    return {
+      fired_at_ms: ms,
+      fired_at_iso: isoTs,
+      fired_at_central: HAWebSocketV3._formatTimelineTimestamp(isoTs)
+    };
   }
 
   /**
@@ -392,6 +403,10 @@ export class HAWebSocketV3 {
     this._d1WriteFailures = { total: 0, last_error_iso: null, last_error_msg: null };
     this._lastEventSeenMs = null;
     this._lastEventSeenPersistAt = 0;
+
+    // Deadband map: entity_id → last logged numeric value. In-memory only;
+    // lost on isolate reload, which is fine — first write after reload always logs.
+    this._numericDeadbandMap = new Map();
   }
 
   // ==========================================================================
@@ -557,7 +572,7 @@ John does not want this house to be silent. He wants you to notice patterns, ask
 
     save_memory = CONFIRMED facts. 100-slot cap. Long-term, stable. Use for preferences John has validated, events you've witnessed and confirmed, knowledge that won't churn.
 
-    save_observation = HYPOTHESES in progress. 500-slot cap. Always prefix with a [topic-tag]. Use the "replaces" field with the same tag when updating. Examples:
+    save_observation = HYPOTHESES in progress. Stored in D1, deduplicated by topic-tag (same [tag] overwrites the prior entry). Always prefix with a [topic-tag]. Use the "replaces" field with the same tag when updating. Examples:
       - "[bedtime-pattern] Candidate: bedside lamp dim → sound machine on, observed 3× at 22:47, 22:52, 23:12"
       - "[3am-power-anomaly] Unexplained 800W spike at ~03:00 on 4 of last 7 nights"
       - "[attic-temp-gap] John asked about attic temp twice — no sensor, instrumentation candidate"
@@ -1274,27 +1289,27 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
     }
     if (event.event_type === "automation_triggered" && event.data) {
       const ctx = event.context || {};
-      const now = Date.now();
-      const isoTs = new Date(now).toISOString();
+      const { fired_at_ms, fired_at_iso, fired_at_central } =
+        HAWebSocketV3._tsFromMs(Date.parse(event.time_fired) || Date.now());
       this._writeAutomationRunToD1({
         automation_id: event.data.entity_id || null,
         automation_name: event.data.name || null,
-        fired_at_ms: now,
-        fired_at_iso: isoTs,
-        fired_at_central: HAWebSocketV3._formatTimelineTimestamp(isoTs),
+        fired_at_ms,
+        fired_at_iso,
+        fired_at_central,
         trigger_entity_id: this._extractTriggerEntity(event.data.source),
         trigger_description: event.data.source || null,
         context_id: ctx.id || null,
         context_parent_id: ctx.parent_id || null,
         result: "ran"
       }).catch((err) => console.error("automation_run write:", err.message));
-      this._touchLastEventSeen(now);
+      this._touchLastEventSeen(fired_at_ms);
       return;
     }
     if (event.event_type === "call_service" && event.data) {
       const ctx = event.context || {};
-      const now = Date.now();
-      const isoTs = new Date(now).toISOString();
+      const { fired_at_ms, fired_at_iso, fired_at_central } =
+        HAWebSocketV3._tsFromMs(Date.parse(event.time_fired) || Date.now());
       const targets = event.data.service_data ? event.data.service_data.entity_id : null;
       const targetIds = Array.isArray(targets) ? targets.join(",") : (targets || null);
       this._writeServiceCallToD1({
@@ -1302,14 +1317,14 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
         service: event.data.service,
         service_data_json: JSON.stringify(event.data.service_data || {}),
         target_entity_ids: targetIds,
-        fired_at_ms: now,
-        fired_at_iso: isoTs,
-        fired_at_central: HAWebSocketV3._formatTimelineTimestamp(isoTs),
+        fired_at_ms,
+        fired_at_iso,
+        fired_at_central,
         context_id: ctx.id || null,
         context_parent_id: ctx.parent_id || null,
         context_user_id: ctx.user_id || null
       }).catch((err) => console.error("service_call write:", err.message));
-      this._touchLastEventSeen(now);
+      this._touchLastEventSeen(fired_at_ms);
       return;
     }
     if (event.event_type === "state_changed" && event.data) {
@@ -1332,9 +1347,12 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
       // transition. _shouldLogStateChange filters Zigbee/network noise only;
       // every real transition lands in the state_changes table.
       if (newState && oldState && newState.state !== oldState.state) {
+        const { fired_at_ms, fired_at_iso, fired_at_central } =
+          HAWebSocketV3._tsFromMs(
+            Date.parse(newState.last_changed || newState.last_updated) || Date.now()
+          );
+        this._touchLastEventSeen(fired_at_ms);
         if (this._shouldLogStateChange(newState.entity_id, newState)) {
-          const now = Date.now();
-          const isoTs = new Date(now).toISOString();
           const ctx = event.context || event.data.context || {};
           this._writeStateChangeToD1({
             entity_id: newState.entity_id,
@@ -1343,15 +1361,14 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
             old_state: oldState.state,
             new_state: newState.state,
             attributes_json: this._shouldStoreAttributes(newState.entity_id) ? JSON.stringify(newState.attributes || {}) : null,
-            fired_at_ms: now,
-            fired_at_iso: isoTs,
-            fired_at_central: HAWebSocketV3._formatTimelineTimestamp(isoTs),
+            fired_at_ms,
+            fired_at_iso,
+            fired_at_central,
             context_id: ctx.id || null,
             context_parent_id: ctx.parent_id || null,
             context_user_id: ctx.user_id || null,
             source: "ws"
           }).catch((err) => console.error("state_change write:", err.message));
-          this._touchLastEventSeen(now);
         }
       }
     }
@@ -1533,8 +1550,8 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
   }
 
   // Permissive filter for the forensic log: every real state transition is
-  // worth recording, only Zigbee/network noise with no diagnostic value gets
-  // dropped.
+  // worth recording, only Zigbee/network noise and high-frequency power-meter
+  // ticks with no diagnostic value get dropped.
   _shouldLogStateChange(entityId, newState) {
     const attr = newState.attributes || {};
     const deviceClass = attr.device_class || "";
@@ -1552,6 +1569,40 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
     if (deviceClass === "signal_strength") return false;
 
     if (unit === "dbm" || unit === "db" || unit === "lqi") return false;
+
+    // Hard denylist: monotonic counters that belong in InfluxDB, not the
+    // forensic log. Never causally interesting.
+    const HARD_DENY_SUFFIX = ["_summation_delivered", "_summation_received"];
+    if (HARD_DENY_SUFFIX.some((s) => lcId.endsWith(s))) return false;
+
+    // Numeric deadband: suppress high-frequency ticks where the delta is too
+    // small to be causally interesting. Non-numeric states always pass.
+    const rawVal = parseFloat(newState.state);
+    if (isFinite(rawVal)) {
+      let threshold = null;
+      if (deviceClass === "power" || unit === "w") {
+        threshold = 50;
+      } else if (deviceClass === "energy" || unit === "kwh") {
+        threshold = 0.01;
+      } else if (deviceClass === "humidity" || unit === "%") {
+        threshold = 2;
+      } else if (deviceClass === "temperature") {
+        threshold = 0.5;
+      } else if (deviceClass === "illuminance") {
+        // Relative 10% change threshold for illuminance (lux spans wide range).
+        const last = this._numericDeadbandMap.get(entityId);
+        if (last != null) {
+          if (Math.abs(rawVal - last) / Math.max(Math.abs(last), 1) < 0.10) return false;
+        }
+        this._numericDeadbandMap.set(entityId, rawVal);
+        return true;
+      }
+      if (threshold != null) {
+        const last = this._numericDeadbandMap.get(entityId);
+        if (last != null && Math.abs(rawVal - last) < threshold) return false;
+        this._numericDeadbandMap.set(entityId, rawVal);
+      }
+    }
 
     return true;
   }
@@ -1610,7 +1661,7 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
     if (!this.env.DB) return;
     try {
       await this.env.DB.prepare(
-        `INSERT INTO state_changes
+        `INSERT OR IGNORE INTO state_changes
          (entity_id, friendly_name, domain, old_state, new_state, attributes_json,
           fired_at_ms, fired_at_iso, fired_at_central,
           context_id, context_parent_id, context_user_id, source)
@@ -3324,15 +3375,33 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
             const cached = this.stateCache.get(args.entity_id);
             if (cached) return cached;
           }
-          try {
-            const result = await this.sendCommand({ type: "get_states" });
-            if (result && Array.isArray(result.result)) {
-              for (const s of result.result) this.stateCache.set(s.entity_id, s);
+          if (args.force_refresh === "bulk") {
+            // Explicit bulk refresh: repopulate entire stateCache via WS.
+            try {
+              const result = await this.sendCommand({ type: "get_states" });
+              if (result && Array.isArray(result.result)) {
+                for (const s of result.result) this.stateCache.set(s.entity_id, s);
+              }
+              const fresh = this.stateCache.get(args.entity_id);
+              return fresh || { error: "Entity not found: " + args.entity_id };
+            } catch (err) {
+              return { error: "Failed to bulk refresh states: " + err.message };
             }
-            const fresh = this.stateCache.get(args.entity_id);
-            return fresh || { error: "Entity not found: " + args.entity_id };
+          }
+          // Default force_refresh (true or any truthy): single-entity REST call.
+          // Much cheaper than pulling all 1000+ entities via WS get_states.
+          try {
+            const url = `${this.env.HA_URL}/api/states/${encodeURIComponent(args.entity_id)}`;
+            const resp = await fetch(url, {
+              headers: { Authorization: `Bearer ${this.env.HA_TOKEN}` }
+            });
+            if (resp.status === 404) return { error: "Entity not found: " + args.entity_id };
+            if (!resp.ok) throw new Error(`HA REST ${resp.status}`);
+            const state = await resp.json();
+            this.stateCache.set(state.entity_id, state);
+            return state;
           } catch (err) {
-            return { error: "Failed to refresh states: " + err.message };
+            return { error: "Failed to refresh state: " + err.message };
           }
         }
 
@@ -3896,7 +3965,7 @@ TOOLS — attached to this request. Invoke them directly. The turn you emit NO t
 - call_service — execute any HA service (lights, locks, covers, climate, scripts, scenes). Use for destructive/irreversible actions too.
 - ai_send_notification — push to phone AND log to timeline. Reserve for security events, aux heat >5000W sustained, leaks, unexpected entry.
 - save_memory — persist a CONFIRMED fact (100-slot FIFO). CHAT-PATH RULE: see SAVING MEMORIES / OBSERVATIONS below — only on explicit user request.
-- save_observation — persist a pattern or hypothesis prefixed with [topic-tag] (500-slot FIFO). Use replaces="[topic-tag]" to supersede a prior observation. CHAT-PATH RULE: only on explicit user request — see below.
+- save_observation — persist a pattern or hypothesis prefixed with [topic-tag]. Stored in D1; same [tag] overwrites the prior entry. Use replaces="[topic-tag]" to explicitly overwrite. CHAT-PATH RULE: only on explicit user request — see below.
 - get_state — single entity's full state when the snapshot below lacks detail.
 - get_logbook — historical entries. ALWAYS pass tz_offset="-05:00" for Central time.
 - render_template — Jinja2 in HA context (area_name, device_attr, expand, state_attr).
@@ -3949,7 +4018,7 @@ Do NOT call save_memory/save_observation for:
 - Preferences expressed in passing ("I usually like the lights low") — unless paired with an explicit save verb
 - Anything you inferred or hypothesized yourself this turn
 
-save_observation is for patterns / hypotheses prefixed with a [topic-tag] (500-slot FIFO); use replaces="[topic-tag]" to supersede a prior observation under the same tag.
+save_observation is for patterns / hypotheses prefixed with a [topic-tag]; stored in D1, deduplicated by topic-tag (same [tag] overwrites prior). Use replaces="[topic-tag]" to explicitly overwrite under the same tag.
 
 ${this._saveMemoryCriteriaBlock()}
 

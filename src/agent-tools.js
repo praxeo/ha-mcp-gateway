@@ -110,12 +110,13 @@ const ACTION_TOOLS = [
     function: {
       name: "save_observation",
       description:
-        "Save a pattern, hypothesis, or gap-in-progress. 500-slot FIFO cap. ALWAYS prefix " +
-        "the text with a [topic-tag] like [bedtime-pattern], [3am-power-anomaly], " +
-        "[attic-temp-gap], or [suggestion-rejected]. Use the `replaces` field with the " +
-        "SAME tag to supersede a prior observation on that topic — this deletes all " +
-        "entries starting with the prefix before appending the new one. Observations " +
-        "are embedded into the knowledge index so vector_search can surface them by topic.",
+        "Save a pattern, hypothesis, or gap-in-progress. Stored in D1, deduplicated by " +
+        "topic-tag (a new observation with the same [tag] overwrites the prior one). " +
+        "ALWAYS prefix the text with a [topic-tag] like [bedtime-pattern], " +
+        "[3am-power-anomaly], [attic-temp-gap], or [suggestion-rejected]. Use the " +
+        "`replaces` field with the SAME tag to explicitly overwrite a prior observation " +
+        "on that topic. Observations are embedded into the knowledge index so " +
+        "vector_search can surface them by topic.",
       parameters: {
         type: "object",
         properties: {

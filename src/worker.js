@@ -551,7 +551,7 @@ var TOOLS = [
   { name: "ai_clear_observations", description: "Clear the AI agent's observations list.", inputSchema: { type: "object" } },
   {
     name: "ai_chat",
-    description: "Send a message to the autonomous AI home agent and get its response. The agent can see all entity states and take actions like controlling lights, locks, covers, and climate. Use for debugging the agent, getting home status summaries, or issuing commands through the agent.",
+    description: "Send a message to the home agent and get its response. The agent can see all entity states and take actions like controlling lights, locks, covers, and climate. Use for debugging the agent, getting home status summaries, or issuing commands through the agent.",
     inputSchema: {
       type: "object",
       properties: {

@@ -1,0 +1,326 @@
+# Proposed fix: basement_overhead_lights_unified_sync cascade
+#
+# PROBLEM
+# =======
+# One legitimate trigger produced 4 automation fires in ~320ms with ~15
+# redundant service calls. Root cause: mode=restart.
+#
+# When the automation fires and turns on the 4 member entities
+# (shop light, ratgdo x2, zigbee plug), each of those 4 state changes
+# re-triggers the automation. With mode=restart, each new trigger
+# cancels the currently-running instance and starts a fresh one. The
+# fresh instance sees a partially-synced state ("not all_on"), so it
+# calls services again, generating more state changes, repeating the
+# cycle. The cascade stops only when an instance runs to completion
+# with all entities already synced — but not before ~15 service calls.
+#
+# FIX
+# ===
+# Change mode from restart → queued, max: 2.
+#
+# With mode=queued:
+#   - The first run (fire 1) executes to completion without interruption.
+#   - At most one follow-up run is queued (fire 2). All other cascade
+#     triggers are silently dropped.
+#   - The queued run starts after fire 1 completes. By then all entities
+#     are synced, so the choose conditions evaluate to false and it exits
+#     with zero service calls.
+# Net result: 1–2 runs total, 4–6 service calls (one per member entity
+# on fire 1), 0 redundant calls.
+#
+# WHY THIS IS SAFE
+# ================
+# 1. Rapid user toggle (ON then immediately OFF):
+#    - Fire 1 (ON) runs. OFF trigger arrives while running → queued.
+#    - Fire 1 completes, fire 2 (OFF) runs immediately. Everything turns off.
+#    - Behavior is correct; there is a ~100–300ms delay on the OFF, which
+#      is imperceptible.
+#
+# 2. Work Mode Cancel on Manual Off:
+#    - User manually turns off overhead while work mode is ON.
+#    - manual_off_during_work_mode = true → fire 1 cancels timer, turns
+#      off work mode, turns off all entities.
+#    - Member entities' OFF changes re-trigger; 1 queued. Queued run:
+#      work_mode_on = false, all_off = true → all choose conditions
+#      false → exits cleanly.
+#
+# 3. Work Mode ON:
+#    - input_boolean fires automation → all members turned on.
+#    - Member ON changes re-trigger; 1 queued. Queued run: all_on = true
+#      → condition "desired == 'on' and not all_on" = false → no-op.
+#
+# THE ONE TRADE-OFF
+# =================
+# mode=restart allowed: fire 1 turns ON → user toggles OFF 50ms later →
+# fire 2 (OFF) instantly cancels fire 1 mid-execution → everything ends OFF.
+# With mode=queued: fire 1 runs to completion (~100–300ms) before OFF
+# takes effect. Rare in practice; practically imperceptible.
+#
+# HOW TO APPLY
+# ============
+# In HA UI: Settings → Automations → find this automation → YAML editor.
+# Replace only the two mode-related lines (shown in the diff below).
+# Do not change anything else.
+#
+# VERIFICATION (after applying)
+# ==============================
+# From the chat agent or MCP:
+#   query_causal_chain context_id=<context_id_from_next_trigger>
+# Expect: ONE automation_run entry for basement_overhead_lights_unified_sync,
+# possibly a second one with 0 resulting service_calls rows.
+# Previously you would see 4+ automation_runs in <400ms.
+
+# ============================================================
+# CURRENT (triggers cascade)
+# ============================================================
+current_yaml: |
+  id: basement_overhead_lights_unified_sync
+  alias: "Basement Overhead Lights - Unified Sync (One Entity + Work Mode Cancel on Manual Off)"
+  description: >
+    One-entity behavior for:
+      - switch.basement_overhead_light
+      - light.basement_shop_overhead_light
+      - light.ratgdo_left_basement_light
+      - light.ratgdo32_b1e618_light
+      - switch.zigbee_plug_basement
+    Rules:
+      - Work Mode ON => force all ON (heal ratgDO timeouts)
+      - Manual OFF (overhead switch OR shop light) while Work Mode ON => turn all OFF + cancel Work Mode + cancel hold timer
+      - Otherwise: any ON => all ON; any OFF => all OFF
+
+  mode: restart            # <-- THE PROBLEM: cancels current run on re-trigger
+  max_exceeded: silent
+
+  triggers:
+    - entity_id:
+        - switch.basement_overhead_light
+        - light.basement_shop_overhead_light
+        - light.ratgdo_left_basement_light
+        - light.ratgdo32_b1e618_light
+        - switch.zigbee_plug_basement
+      to:
+        - "on"
+        - "off"
+      trigger: state
+    - entity_id: input_boolean.basement_work_mode
+      trigger: state
+
+  variables:
+    overhead: switch.basement_overhead_light
+    shop: light.basement_shop_overhead_light
+    zigbee_overhead: switch.zigbee_plug_basement
+    members_lights:
+      - light.basement_shop_overhead_light
+      - light.ratgdo_left_basement_light
+      - light.ratgdo32_b1e618_light
+    work_mode_on: "{{ is_state('input_boolean.basement_work_mode','on') }}"
+    desired: "{{ trigger.to_state.state if trigger.to_state is not none else 'ignore' }}"
+    manual_off_during_work_mode: >
+      {{ work_mode_on and desired == 'off' and trigger.entity_id in [overhead, shop] }}
+    all_on: >
+      {{ is_state(overhead,'on')
+         and is_state(members_lights[0],'on')
+         and is_state(members_lights[1],'on')
+         and is_state(members_lights[2],'on')
+         and is_state(zigbee_overhead,'on') }}
+    all_off: >
+      {{ is_state(overhead,'off')
+         and is_state(members_lights[0],'off')
+         and is_state(members_lights[1],'off')
+         and is_state(members_lights[2],'off')
+         and is_state(zigbee_overhead,'off') }}
+
+  actions:
+    - choose:
+        - conditions:
+            - condition: template
+              value_template: "{{ manual_off_during_work_mode }}"
+          sequence:
+            - action: timer.cancel
+              target:
+                entity_id: timer.timer_basement_overhead_hold
+            - action: input_boolean.turn_off
+              target:
+                entity_id: input_boolean.basement_work_mode
+            - action: light.turn_off
+              target:
+                entity_id: "{{ members_lights }}"
+            - action: switch.turn_off
+              target:
+                entity_id:
+                  - "{{ overhead }}"
+                  - "{{ zigbee_overhead }}"
+
+        - conditions:
+            - condition: template
+              value_template: "{{ work_mode_on }}"
+          sequence:
+            - action: timer.cancel
+              target:
+                entity_id: timer.timer_basement_overhead_hold
+            - action: switch.turn_on
+              target:
+                entity_id:
+                  - "{{ overhead }}"
+                  - "{{ zigbee_overhead }}"
+            - action: light.turn_on
+              target:
+                entity_id: "{{ members_lights }}"
+
+        - conditions:
+            - condition: template
+              value_template: "{{ desired == 'on' and not all_on }}"
+          sequence:
+            - action: switch.turn_on
+              target:
+                entity_id:
+                  - "{{ overhead }}"
+                  - "{{ zigbee_overhead }}"
+            - action: light.turn_on
+              target:
+                entity_id: "{{ members_lights }}"
+
+        - conditions:
+            - condition: template
+              value_template: "{{ desired == 'off' and not all_off }}"
+          sequence:
+            - action: light.turn_off
+              target:
+                entity_id: "{{ members_lights }}"
+            - action: switch.turn_off
+              target:
+                entity_id:
+                  - "{{ overhead }}"
+                  - "{{ zigbee_overhead }}"
+
+# ============================================================
+# PROPOSED (two-line change — mode only)
+# ============================================================
+# DIFF:
+#   - mode: restart
+#   - max_exceeded: silent
+#   + mode: queued
+#   + max: 2
+#   + max_exceeded: silent
+#
+proposed_yaml: |
+  id: basement_overhead_lights_unified_sync
+  alias: "Basement Overhead Lights - Unified Sync (One Entity + Work Mode Cancel on Manual Off)"
+  description: >
+    One-entity behavior for:
+      - switch.basement_overhead_light
+      - light.basement_shop_overhead_light
+      - light.ratgdo_left_basement_light
+      - light.ratgdo32_b1e618_light
+      - switch.zigbee_plug_basement
+    Rules:
+      - Work Mode ON => force all ON (heal ratgDO timeouts)
+      - Manual OFF (overhead switch OR shop light) while Work Mode ON => turn all OFF + cancel Work Mode + cancel hold timer
+      - Otherwise: any ON => all ON; any OFF => all OFF
+
+  mode: queued             # <-- FIX: let current run finish; queue at most 1 follow-up
+  max: 2
+  max_exceeded: silent
+
+  # (everything else unchanged — triggers, variables, actions are identical)
+  triggers:
+    - entity_id:
+        - switch.basement_overhead_light
+        - light.basement_shop_overhead_light
+        - light.ratgdo_left_basement_light
+        - light.ratgdo32_b1e618_light
+        - switch.zigbee_plug_basement
+      to:
+        - "on"
+        - "off"
+      trigger: state
+    - entity_id: input_boolean.basement_work_mode
+      trigger: state
+
+  variables:
+    overhead: switch.basement_overhead_light
+    shop: light.basement_shop_overhead_light
+    zigbee_overhead: switch.zigbee_plug_basement
+    members_lights:
+      - light.basement_shop_overhead_light
+      - light.ratgdo_left_basement_light
+      - light.ratgdo32_b1e618_light
+    work_mode_on: "{{ is_state('input_boolean.basement_work_mode','on') }}"
+    desired: "{{ trigger.to_state.state if trigger.to_state is not none else 'ignore' }}"
+    manual_off_during_work_mode: >
+      {{ work_mode_on and desired == 'off' and trigger.entity_id in [overhead, shop] }}
+    all_on: >
+      {{ is_state(overhead,'on')
+         and is_state(members_lights[0],'on')
+         and is_state(members_lights[1],'on')
+         and is_state(members_lights[2],'on')
+         and is_state(zigbee_overhead,'on') }}
+    all_off: >
+      {{ is_state(overhead,'off')
+         and is_state(members_lights[0],'off')
+         and is_state(members_lights[1],'off')
+         and is_state(members_lights[2],'off')
+         and is_state(zigbee_overhead,'off') }}
+
+  actions:
+    - choose:
+        - conditions:
+            - condition: template
+              value_template: "{{ manual_off_during_work_mode }}"
+          sequence:
+            - action: timer.cancel
+              target:
+                entity_id: timer.timer_basement_overhead_hold
+            - action: input_boolean.turn_off
+              target:
+                entity_id: input_boolean.basement_work_mode
+            - action: light.turn_off
+              target:
+                entity_id: "{{ members_lights }}"
+            - action: switch.turn_off
+              target:
+                entity_id:
+                  - "{{ overhead }}"
+                  - "{{ zigbee_overhead }}"
+
+        - conditions:
+            - condition: template
+              value_template: "{{ work_mode_on }}"
+          sequence:
+            - action: timer.cancel
+              target:
+                entity_id: timer.timer_basement_overhead_hold
+            - action: switch.turn_on
+              target:
+                entity_id:
+                  - "{{ overhead }}"
+                  - "{{ zigbee_overhead }}"
+            - action: light.turn_on
+              target:
+                entity_id: "{{ members_lights }}"
+
+        - conditions:
+            - condition: template
+              value_template: "{{ desired == 'on' and not all_on }}"
+          sequence:
+            - action: switch.turn_on
+              target:
+                entity_id:
+                  - "{{ overhead }}"
+                  - "{{ zigbee_overhead }}"
+            - action: light.turn_on
+              target:
+                entity_id: "{{ members_lights }}"
+
+        - conditions:
+            - condition: template
+              value_template: "{{ desired == 'off' and not all_off }}"
+          sequence:
+            - action: light.turn_off
+              target:
+                entity_id: "{{ members_lights }}"
+            - action: switch.turn_off
+              target:
+                entity_id:
+                  - "{{ overhead }}"
+                  - "{{ zigbee_overhead }}"

@@ -838,19 +838,15 @@ If iterating from here, the highest-leverage open items:
 3. **Daily / weekly digest cron.** A scheduled chat call once a day that
    queries the forensic log over the last 24 hours and writes a digest
    to push notification or `ai_log`. One model call, narrative output.
-4. **Tool-result reformatting.** `get_logbook` still returns ISO+UTC
-   strings that MiniMax sometimes copies despite Rule 10. Reformat the
-   `tool` message `content` to Central before pushing it back into the
-   loop.
-5. **Backfill of `automation_runs` and `service_calls` on reconnect.**
+4. **Backfill of `automation_runs` and `service_calls` on reconnect.**
    HA REST history doesn't expose these reliably, so today only state
    changes are backfilled. If a long outage matters, dig into HA's
    alternative endpoints.
-6. **Fast-path generalization.** Cover-only today. Lights and locks
+5. **Fast-path generalization.** Cover-only today. Lights and locks
    have similar shapes; each new domain needs its own no-op guard,
    disqualifier list, question-bail tests.
-7. **HOUSE_STATE_SNAPSHOT bytecount.** If the snapshot grows past
+6. **HOUSE_STATE_SNAPSHOT bytecount.** If the snapshot grows past
    ~60 lines, consider per-room trim driven by query intent.
-8. **Service-Auth bypass for ops endpoints.** A service token with Access
+7. **Service-Auth bypass for ops endpoints.** A service token with Access
    policy bypass for `/admin/*` would let ops scripts run without
    `cloudflared`.
