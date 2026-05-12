@@ -355,6 +355,7 @@ ISO 8601 for parseability.
 | `HA_CACHE` | KV namespace | TTL'd cache for HA registries / states between cold starts |
 | `KNOWLEDGE` | Vectorize index `ha-knowledge` | Multi-kind semantic index |
 | `AI` | Workers AI | `@cf/baai/bge-large-en-v1.5` embeddings (cls pooling) |
+| `DB` | D1 database `ha_db` | Relational store for `ai_log`, `observations`, `bugs`. Currently dual-written alongside DO storage on `save_observation`; reads still come from DO storage. Staged migration — read flip lands in a later dispatch. |
 
 ### Worker secrets (`wrangler secret`)
 
@@ -625,6 +626,17 @@ $gw = "https://ha-mcp-gateway.obert-john.workers.dev"
 Newest first. `git log --oneline` walks back further; anything older than
 9acf9bc is foundational and unlikely to need re-reading.
 
+- **(unreleased — D1 dual-write, step 1–2 of 6)** — wired the existing
+  `ha_db` D1 instance into the worker as `env.DB` and dual-write
+  `save_observation` through to `D1.observations` (PK `topic_tag`,
+  `INSERT OR REPLACE`) alongside the existing DO storage + Vectorize
+  path. DO storage remains the read source during this transition; D1
+  is being populated in parallel so a later dispatch can flip reads
+  safely. Migration `0001_d1_indexes_and_columns.sql` adds indexes on
+  `ai_log(timestamp,type)`, `observations(timestamp)`,
+  `bugs(severity,timestamp_iso)`, plus a nullable `observations.data`
+  column for future structured payloads. D1 write failure is non-fatal
+  (logs `d1_save_observation_failed`); rollback is a one-line comment.
 - **(unreleased — vector-search optimization round 1)** — comprehensive
   pass on the `ha-knowledge` index after a probing session uncovered
   duplication, missing battery sensors, and case-sensitive area
