@@ -4302,7 +4302,9 @@ TRUTHFULNESS — STATE CLAIMS:
     // FAST PATH: deterministic cover commands skip the LLM entirely.
     // Sub-500ms response for "open the garage", "close the basement bay", etc.
     // Always uses explicit open_cover or close_cover, never toggle.
+    const _t0 = Date.now();
     const fastResult = await this._tryDeterministicFastPath(message);
+    const _t1 = Date.now();
     if (fastResult) {
       const fpChannelKey = sanitizeChannelKey(from);
       const fpHistoryKey = `chat_history:${fpChannelKey}`;
@@ -4342,6 +4344,7 @@ TRUTHFULNESS — STATE CLAIMS:
         }
         await this.state.storage.put(fpHistoryKey, fpNext);
       } catch (_) {}
+      console.log(JSON.stringify({ chat_timing_ms: { fast_path: true, total: Date.now() - _t0 } }));
       await this.persistLog();
       if (onEvent) onEvent({ type: "reply", text: fastResult.reply });
       return fastResult;
@@ -4357,6 +4360,7 @@ TRUTHFULNESS — STATE CLAIMS:
     this._activeChatFrom = from;
 
     const conversationHistory = await this.state.storage.get(historyKey) || [];
+    const _t2 = Date.now();
     this.logAI("chat_user", `${from}: ${message}`, { from, message, channel: channelKey });
     const timeline = this._buildNativeTimeline();
 
@@ -4370,8 +4374,10 @@ TRUTHFULNESS — STATE CLAIMS:
       devices: semanticDevices,
       services: semanticServices
     } = await this._buildNativeContextEntities(message, { entityTopK: 10 });
+    const _t3 = Date.now();
 
     const climatePreamble = await this._buildClimatePreambleIfNeeded(message, "chat_native");
+    const _t4 = Date.now();
 
     const systemPrompt = this.getChatSystemPrompt({
       timeline,
@@ -4393,6 +4399,7 @@ TRUTHFULNESS — STATE CLAIMS:
 
     try {
       const oldHistoryLen = conversationHistory.length;
+      const _t5 = Date.now();
       const result = await this.runNativeToolLoop(initialMessages, {
         maxIterations: 6,
         onEvent,
@@ -4400,6 +4407,20 @@ TRUTHFULNESS — STATE CLAIMS:
         hallucinationGuard: true,
         maxTokens: 4096
       });
+      const _t6 = Date.now();
+      console.log(JSON.stringify({
+        chat_timing_ms: {
+          fast_path: false,
+          channel: channelKey,
+          storage_read: _t2 - _t1,
+          vectorize_context: _t3 - _t2,
+          climate_preamble: _t4 - _t3,
+          prompt_build: _t5 - _t4,
+          minimax_tool_loop: _t6 - _t5,
+          total: _t6 - _t0,
+          tool_iterations: result.iterations ?? null
+        }
+      }));
       const reply = result.reply && result.reply.trim() || "Done.";
       this.logAI("chat_reply", reply.substring(0, 300), { from, full_reply: reply, channel: channelKey }, "native_loop");
 
@@ -4460,6 +4481,14 @@ TRUTHFULNESS — STATE CLAIMS:
         ...result.error ? { error: result.error } : {}
       };
     } catch (err) {
+      console.log(JSON.stringify({
+        chat_timing_ms: {
+          fast_path: false,
+          channel: channelKey,
+          error: err.message,
+          failed_at_ms: Date.now() - _t0
+        }
+      }));
       this.logAI("chat_error", err.message, { from, channel: channelKey }, "native_loop");
       return { error: "AI failed: " + err.message };
     } finally {
