@@ -51,7 +51,7 @@ binding = "CF_VERSION_METADATA"
 
 [[durable_objects.bindings]]
 name = "HA_WS"
-class_name = "HAWebSocketV6"
+class_name = "HAWebSocketV7"
 
 [[migrations]]
 tag = "v1"
@@ -110,6 +110,16 @@ renamed_classes = [
 tag = "v6"
 renamed_classes = [
   { from = "HAWebSocketV5", to = "HAWebSocketV6" }
+]
+
+# v7 — phase-timing + token + intent_tag instrumentation in chatWithAgentNative
+# and runNativeToolLoop. DO-side changes; persistent HA WS would otherwise pin
+# the live isolate to stale V6 code and the new chat_timing_ms fields would
+# never reach D1. Storage state preserved.
+[[migrations]]
+tag = "v7"
+renamed_classes = [
+  { from = "HAWebSocketV6", to = "HAWebSocketV7" }
 ]
 
 # Two cron triggers:
