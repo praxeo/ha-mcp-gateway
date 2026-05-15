@@ -237,7 +237,7 @@ var TOOLS = [
   },
   {
     name: "update_automation",
-    description: "⚠️ Broken — returns 405 Method Not Allowed on this instance. Do not use. Make automation changes manually via 'Edit in YAML' in the HA UI instead.",
+    description: "Update an existing automation by ID. Accepts automation_id (HA internal config ID or automation.* entity_id) and a full config object (same shape as get_automation_config returns). Triggers automation.reload after write.",
     inputSchema: {
       type: "object",
       properties: { automation_id: { type: "string" }, config: { type: "object" } },

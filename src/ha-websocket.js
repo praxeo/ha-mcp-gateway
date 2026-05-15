@@ -2827,9 +2827,8 @@ CRITICAL RULES:
 4. If unsure which entity, ASK instead of guessing.
 5. Thermostat zones: main level (incl. MBR) = climate.t6_pro_z_wave_programmable_thermostat_2; basement = climate.t6_pro_z_wave_programmable_thermostat.
 6. Smoke/CO detectors are NOT in HA.
-7. update_automation returns 405. Tell John what to change in the UI.
-8. Sensor values come from CURRENT STATE OF ENTITIES above — quote directly or say the sensor isn't listed.
-9. The ONLY valid action types: call_service, send_notification, save_memory, save_observation.
+7. Sensor values come from CURRENT STATE OF ENTITIES above — quote directly or say the sensor isn't listed.
+8. The ONLY valid action types: call_service, send_notification, save_memory, save_observation.
 
 ${this._saveMemoryCriteriaBlock()}
 
@@ -4191,7 +4190,6 @@ QUICK FACTS:
 - climate.t6_pro_z_wave_programmable_thermostat_2 = main level INCLUDING MBR
 - climate.t6_pro_z_wave_programmable_thermostat = basement
 - Smoke/CO detectors are NOT in HA — don't reference their state.
-- Automation editing via call_service returns 405 on this instance — tell John to edit in HA UI (Settings → Automations).
 - All timestamps in your replies MUST be Central, in "H:MM AM/PM" or "MMM D, H:MM AM/PM" format. Tool results are pre-reformatted to Central before they reach you — copy them as-is. Never emit ISO 8601, "Z" suffix, "+00:00", or "UTC" in any reply, even if you think you saw one in a tool result. If you ever see one, that's a bug — paraphrase, don't quote.
 - You are the chat agent. Your always-on memory of the house is the forensic log — see FORENSIC MEMORY above and query it freely. See SAVING MEMORIES / OBSERVATIONS below for when save_memory/save_observation are allowed on this path. For security-sensitive actuations (covers, locks, alarms), follow the CHAT ACTION CONFIRMATION rules above.
 - For automation debugging, call get_automation_config when the user references a specific automation or asks why one did or did not run. Logbook tells you whether it fired; config tells you what it was supposed to do.
