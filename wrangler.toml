@@ -49,10 +49,9 @@ index_name = "ha-knowledge"
 [version_metadata]
 binding = "CF_VERSION_METADATA"
 
-[durable_objects]
-bindings = [
-  { name = "HA_WS", class_name = "HAWebSocketV5" }
-]
+[[durable_objects.bindings]]
+name = "HA_WS"
+class_name = "HAWebSocketV6"
 
 [[migrations]]
 tag = "v1"
@@ -105,6 +104,12 @@ renamed_classes = [
 tag = "v5"
 renamed_classes = [
   { from = "HAWebSocketV4", to = "HAWebSocketV5" }
+]
+
+[[migrations]]
+tag = "v6"
+renamed_classes = [
+  { from = "HAWebSocketV5", to = "HAWebSocketV6" }
 ]
 
 # Two cron triggers:

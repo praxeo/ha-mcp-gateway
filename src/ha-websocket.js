@@ -25,7 +25,7 @@ function sanitizeChannelKey(from) {
   return cleaned.substring(0, 64) || "default";
 }
 
-export class HAWebSocketV5 {
+export class HAWebSocketV6 {
   // Static config for prioritized entity context building
   static CONTEXT_DOMAIN_PRIORITY = [
     "alarm_control_panel", "climate", "lock", "cover", "binary_sensor",
@@ -124,7 +124,7 @@ export class HAWebSocketV5 {
     return {
       fired_at_ms: ms,
       fired_at_iso: isoTs,
-      fired_at_central: HAWebSocketV5._formatTimelineTimestamp(isoTs)
+      fired_at_central: HAWebSocketV6._formatTimelineTimestamp(isoTs)
     };
   }
 
@@ -533,90 +533,7 @@ KEY DEVICES:
 - MBR fan: switch.mbr_light_fan_combo_switch
 - MBR bedside lamp (John's side): light.lamp_dimmer_bedroom_john
 
-WHAT YOU ARE MONITORING:
-- Security: locks, garage doors, exterior doors. These matter. Flag anything unexpected.
-- Climate: two thermostat zones. Know which controls what.
-- Power: watch for aux heat spikes (>5000W sustained).
-- Presence: John and Sabrina person entities reflect home/away state.
-- Patterns: sequences of user actions that repeat across days or imply occupancy transitions.
-
-WHAT YOU ARE NOT MONITORING:
-- If a device doesn't exist, don't make one up. Check memory if you have questions. If unsure, pull entities.
-
-BEHAVIORAL GUIDELINES:
-
-— EXECUTE MODE (reacting to user commands or urgent events) —
-1. Security is priority one. Locks unlocked, doors open, water leaks — flag immediately. You may lock doors proactively if nobody is nearby.
-2. Don't notify for routine single events. Lights cycling, thermostats running, normal motion — that's a house working as designed.
-3. Work Mode means someone wants to be left alone with the lights on. Don't fight it.
-4. The Evening Lamps Schedule handles sunset lighting. Don't duplicate it.
-5. Aux heat above 5000W sustained = worth flagging. Power fluctuations are not.
-6. If you don't know something, say so.
-
-— OBSERVER MODE (your parallel, proactive role) —
-John does not want this house to be silent. He wants you to notice patterns, ask questions, and propose automations. Being thoughtful and curious is encouraged. Speaking up when you notice something worth noticing is your job, not an overreach.
-
-7. Pattern recognition: watch for sequences of user actions that repeat. Example: bedside lamp dimmed → sound machine on → MBR fan on, three nights in a row around 22:50. That's an automation candidate. Note it. If you see it a fourth time, propose it.
-
-8. Transition recognition: certain sequences imply a state change in occupancy — going to bed, leaving the house, winding down. Bedtime signals include the sound machine turning on, the MBR bedside lamp dimming or toggling, the MBR fan turning on. Departure = both persons go not_home. Late-evening lockdown = exterior lock engaged after 20:00. When you believe a transition is happening, audit the perimeter (locks, covers, exterior doors). If anything is unsecured, say so with specifics. If everything is secure, stay silent — don't announce the transition just to be noticed.
-
-9. Gap identification: if John asks you something you can't answer because a sensor is missing (e.g., "what's the attic temperature?" with no attic sensor), note the gap via save_observation. After the second or third time, suggest the instrumentation.
-
-10. Suggestion etiquette:
-    - Suggestions are NOT alerts. Deliver them in chat replies when John is already talking to you, or save_observation them for later, or send as low-priority notifications. NEVER wake him up at 2 AM to propose an automation.
-    - Lead with the observation, then the proposal. "I've noticed X three times this week. Want me to suggest an automation?"
-    - Accept "no" gracefully and save_observation the rejection with a [suggestion-rejected] tag so you don't repeat for at least 30 days.
-    - One suggestion at a time. Don't dump five ideas in one message.
-
-11. Memory vs Observations — two different buckets, two different purposes:
-
-    save_memory = CONFIRMED facts. 100-slot cap. Long-term, stable. Use for preferences John has validated, events you've witnessed and confirmed, knowledge that won't churn.
-
-    save_observation = HYPOTHESES in progress. Stored in D1, deduplicated by topic-tag (same [tag] overwrites the prior entry). Always prefix with a [topic-tag]. Use the "replaces" field with the same tag when updating. Examples:
-      - "[bedtime-pattern] Candidate: bedside lamp dim → sound machine on, observed 3× at 22:47, 22:52, 23:12"
-      - "[3am-power-anomaly] Unexplained 800W spike at ~03:00 on 4 of last 7 nights"
-      - "[attic-temp-gap] John asked about attic temp twice — no sensor, instrumentation candidate"
-      - "[suggestion-rejected] Proposed basement bay automation 2026-04-17, John declined — don't re-propose for 30 days"
-
-    Promotion: once an observation is confirmed (pattern validated, automation built, gap filled), move it to save_memory as a completed fact and let the observation entry expire naturally.
-
-12. You are allowed to be curious. If something surprises you — the basement power meter doing something at 3 AM, a lock cycling three times in a row, a motion sensor firing where nobody should be — note it via save_observation. Ask about it next time John is in chat.
-
-13. Security transitions always override suggestion etiquette. If you detect a transition and find the perimeter unsecured, that's an ALERT (send_notification), not a suggestion.
-
-ARCHITECTURE (how you work):
-You run as a Cloudflare Worker with a Durable Object that maintains persistent state between requests. Your memory, observations, event queue, and conversation history all live in that Durable Object — which is why you remember things across sessions.
-
-You operate in two modes:
-
-AUTONOMOUS LOOP:
-Every 30 seconds, if anything has changed in the house, you wake up and review the batch of state change events. Two jobs run in parallel here:
-  (a) Execute-mode: decide whether to act, notify, save a memory, or do nothing on the immediate events. Doing nothing is often right.
-  (b) Observer-mode: look at the unified timeline (not just the current event batch) for PATTERNS over longer horizons. Build up observations over time. Propose things. Be curious out loud (sparingly).
-
-CHAT MODE:
-When John or Sabrina messages you — via WhatsApp or the web interface at ha-mcp-gateway.obert-john.workers.dev/chat — you process their message with full entity context, conversation history, and long-term memory. You can execute actions (control devices, send notifications, save memories, save observations) as part of a chat reply.
-
-Chat mode is ALSO your best opportunity to deliver observer-mode output. When John is already talking to you, that's a non-intrusive moment to surface an observation you've been building up ("I've noticed you close the basement bay manually most nights around 23:00 — want me to suggest an automation for that?"). Don't force it into every reply, but don't hoard observations either.
-
-HOME ASSISTANT BRIDGE:
-You connect to Home Assistant via a WebSocket. Your tools call HA services directly — lights, locks, covers, thermostats, input booleans, all of it. Entity state is cached and refreshed regularly. If a tool call fails, the WebSocket may have dropped.
-
-WHAT YOU CANNOT DO:
-- Edit automations via the API (returns 405 — John has to do those in the HA UI)
-- See camera feeds or images
-- Access devices that aren't exposed as HA entities
-
-DEBUGGING & AUTOMATIONS:
-You have read access to automations via the HA API. If John reports that something didn't fire or behaved unexpectedly:
-1. Pull the automation config (get_automation_config) to verify the trigger, conditions, and actions as written
-2. Cross-reference against the logbook (get_logbook) to see if the trigger fired at all
-3. Check entity states at the relevant time via get_history if needed
-4. Form a hypothesis: did the trigger not fire, did a condition block it, or did the action fail?
-5. Report what you found — be specific.
-
-KNOWN LIMITATION — AUTOMATION EDITING:
-The update_automation tool currently returns 405 on this instance. Until that's resolved, you cannot edit automations via the API. If John asks you to modify an automation, tell him what the change should be and where to make it in the HA UI (Settings → Automations).`;
+`;
   }
 
   // ==========================================================================
@@ -659,7 +576,7 @@ Exception: when the user explicitly says "remember X" or "save a memory" or equi
 
   static climateTriggerMatches(text) {
     if (!text || typeof text !== "string") return false;
-    return HAWebSocketV5.CLIMATE_TRIGGER_RE.test(text);
+    return HAWebSocketV6.CLIMATE_TRIGGER_RE.test(text);
   }
 
   static _seasonDominant(monthIdx) {
@@ -757,7 +674,7 @@ Exception: when the user explicitly says "remember X" or "save a memory" or equi
 
   async _buildClimatePreambleIfNeeded(triggerText, source = "chat") {
     if (this.env.CLIMATE_PREAMBLE_ENABLED === "false") return null;
-    if (!HAWebSocketV5.climateTriggerMatches(triggerText)) return null;
+    if (!HAWebSocketV6.climateTriggerMatches(triggerText)) return null;
     if (!this.connected || !this.authenticated) return null;
 
     const ok = await this._fetchClimateData();
@@ -769,13 +686,13 @@ Exception: when the user explicitly says "remember X" or "save a memory" or equi
     const nowStr = nowDate.toLocaleString("en-US", { timeZone: "America/Chicago", timeZoneName: "short" });
     const monthFmt = new Intl.DateTimeFormat("en-US", { timeZone: "America/Chicago", month: "numeric" });
     const monthIdx = parseInt(monthFmt.format(nowDate), 10) - 1;
-    const seasonStr = HAWebSocketV5._seasonDominant(monthIdx);
+    const seasonStr = HAWebSocketV6._seasonDominant(monthIdx);
 
     const tempStr = (w.temperature !== null && w.temperature !== undefined) ? `${w.temperature}°F` : "n/a";
     const condStr = w.state || "unknown";
 
-    const hl = HAWebSocketV5._forecastHighLow(w.forecast);
-    const trend = HAWebSocketV5._forecastTrend(w.forecast);
+    const hl = HAWebSocketV6._forecastHighLow(w.forecast);
+    const trend = HAWebSocketV6._forecastTrend(w.forecast);
     const forecastLine = hl
       ? `Forecast next 12h: high ${hl.high}°F, low ${hl.low}°F, trend ${trend || "stable"}`
       : `Forecast next 12h: unavailable (no forecast attribute)`;
@@ -814,8 +731,8 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
 
     if (!this._logInitialized) {
       this.aiLog = await this.loadLogFromStorage();
-      if (this.aiLog.length > HAWebSocketV5.LOG_IN_MEMORY_CAP) {
-        this.aiLog = this.aiLog.slice(-HAWebSocketV5.LOG_IN_MEMORY_CAP);
+      if (this.aiLog.length > HAWebSocketV6.LOG_IN_MEMORY_CAP) {
+        this.aiLog = this.aiLog.slice(-HAWebSocketV6.LOG_IN_MEMORY_CAP);
       }
       this._logInitialized = true;
     }
@@ -968,7 +885,7 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
 
         case "/ai_log": {
           const count = parseInt(url.searchParams.get("count") || "50");
-          if (count > HAWebSocketV5.LOG_IN_MEMORY_CAP) {
+          if (count > HAWebSocketV6.LOG_IN_MEMORY_CAP) {
             const rows = await this._loadAiLogFromD1(count);
             return new Response(JSON.stringify(Array.isArray(rows) ? rows : []), { headers });
           }
@@ -1309,7 +1226,7 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
     if (event.event_type === "automation_triggered" && event.data) {
       const ctx = event.context || {};
       const { fired_at_ms, fired_at_iso, fired_at_central } =
-        HAWebSocketV5._tsFromMs(Date.parse(event.time_fired) || Date.now());
+        HAWebSocketV6._tsFromMs(Date.parse(event.time_fired) || Date.now());
       this._writeAutomationRunToD1({
         automation_id: event.data.entity_id || null,
         automation_name: event.data.name || null,
@@ -1328,7 +1245,7 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
     if (event.event_type === "call_service" && event.data) {
       const ctx = event.context || {};
       const { fired_at_ms, fired_at_iso, fired_at_central } =
-        HAWebSocketV5._tsFromMs(Date.parse(event.time_fired) || Date.now());
+        HAWebSocketV6._tsFromMs(Date.parse(event.time_fired) || Date.now());
       const targets = event.data.service_data ? event.data.service_data.entity_id : null;
       const targetIds = Array.isArray(targets) ? targets.join(",") : (targets || null);
       this._writeServiceCallToD1({
@@ -1367,7 +1284,7 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
       // every real transition lands in the state_changes table.
       if (newState && oldState && newState.state !== oldState.state) {
         const { fired_at_ms, fired_at_iso, fired_at_central } =
-          HAWebSocketV5._tsFromMs(
+          HAWebSocketV6._tsFromMs(
             Date.parse(newState.last_changed || newState.last_updated) || Date.now()
           );
         this._touchLastEventSeen(fired_at_ms);
@@ -1446,25 +1363,25 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
     const out = [];
     for (const [id, s] of this.stateCache) {
       const domain = id.split(".")[0];
-      if (!HAWebSocketV5.SNAPSHOT_DOMAIN_ALLOWLIST.has(domain)) continue;
+      if (!HAWebSocketV6.SNAPSHOT_DOMAIN_ALLOWLIST.has(domain)) continue;
       if (s.state === "unavailable" || s.state === "unknown") continue;
       if (domain === "switch" && isNoisySwitch(id)) continue;
 
       const attrs = s.attributes || {};
       if (domain === "sensor") {
         const deviceClass = attrs.device_class || "";
-        if (HAWebSocketV5.SENSOR_WHITELIST.has(deviceClass)) {
+        if (HAWebSocketV6.SENSOR_WHITELIST.has(deviceClass)) {
           // keep
         } else if (deviceClass === "battery") {
           const pct = parseFloat(s.state);
-          if (isNaN(pct) || pct > HAWebSocketV5.BATTERY_LOW_THRESHOLD) continue;
+          if (isNaN(pct) || pct > HAWebSocketV6.BATTERY_LOW_THRESHOLD) continue;
         } else {
           continue;
         }
       }
 
       const filteredAttrs = {};
-      for (const k of HAWebSocketV5.SNAPSHOT_ATTR_ALLOWLIST) {
+      for (const k of HAWebSocketV6.SNAPSHOT_ATTR_ALLOWLIST) {
         if (attrs[k] !== undefined) {
           filteredAttrs[k] = attrs[k];
         }
@@ -1804,7 +1721,7 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
           attributes_json: this._shouldStoreAttributes(entityId) ? JSON.stringify(curr.attributes || {}) : null,
           fired_at_ms: tsMs,
           fired_at_iso: new Date(tsMs).toISOString(),
-          fired_at_central: HAWebSocketV5._formatTimelineTimestamp(new Date(tsMs).toISOString()),
+          fired_at_central: HAWebSocketV6._formatTimelineTimestamp(new Date(tsMs).toISOString()),
           context_id: null,
           context_parent_id: null,
           context_user_id: null,
@@ -2354,7 +2271,7 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
       if (done) return;
       await this.state.storage.delete("ai_log").catch(() => {});
       await this.state.storage.delete("ai_log_head").catch(() => {});
-      for (let i = 0; i < HAWebSocketV5.LOG_CHUNKS_MAX; i++) {
+      for (let i = 0; i < HAWebSocketV6.LOG_CHUNKS_MAX; i++) {
         await this.state.storage.delete("ai_log_chunk_" + i).catch(() => {});
         await this.state.storage.delete("ai_log_chunk_gen_" + i).catch(() => {});
       }
@@ -2388,8 +2305,8 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
         data: { original_type: entry.type, original_ts: entry.timestamp },
         timestamp: new Date().toISOString(),
       });
-      if (this.aiLog.length > HAWebSocketV5.LOG_IN_MEMORY_CAP) {
-        this.aiLog.splice(0, this.aiLog.length - HAWebSocketV5.LOG_IN_MEMORY_CAP);
+      if (this.aiLog.length > HAWebSocketV6.LOG_IN_MEMORY_CAP) {
+        this.aiLog.splice(0, this.aiLog.length - HAWebSocketV6.LOG_IN_MEMORY_CAP);
       }
     }
   }
@@ -2753,7 +2670,7 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
   // retained so existing call sites (await this.persistLog()) keep resolving.
   // ==========================================================================
   async loadLogFromStorage() {
-    const fromD1 = await this._loadAiLogFromD1(HAWebSocketV5.LOG_IN_MEMORY_CAP);
+    const fromD1 = await this._loadAiLogFromD1(HAWebSocketV6.LOG_IN_MEMORY_CAP);
     return Array.isArray(fromD1) ? fromD1 : [];
   }
 
@@ -2765,7 +2682,7 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
 
   async clearPersistedLog() {
     await this.state.storage.delete("ai_log").catch(() => {});
-    for (let i = 0; i < HAWebSocketV5.LOG_CHUNKS_MAX; i++) {
+    for (let i = 0; i < HAWebSocketV6.LOG_CHUNKS_MAX; i++) {
       await this.state.storage.delete("ai_log_chunk_" + i).catch(() => {});
       await this.state.storage.delete("ai_log_chunk_gen_" + i).catch(() => {});
     }
@@ -2785,8 +2702,8 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
     const entry = { type, message, data, timestamp: new Date().toISOString() };
     if (source) entry.source = source;
     this.aiLog.push(entry);
-    if (this.aiLog.length > HAWebSocketV5.LOG_IN_MEMORY_CAP) {
-      this.aiLog.splice(0, this.aiLog.length - HAWebSocketV5.LOG_IN_MEMORY_CAP);
+    if (this.aiLog.length > HAWebSocketV6.LOG_IN_MEMORY_CAP) {
+      this.aiLog.splice(0, this.aiLog.length - HAWebSocketV6.LOG_IN_MEMORY_CAP);
     }
     console.log("AI LOG [" + type + (source ? "/" + source : "") + "]:", message);
     this.persistLog().catch((err) => console.error("logAI persist:", err.message));
@@ -2819,7 +2736,7 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
     const timeline = persistentLog
       .filter((e) => ["chat_user", "chat_reply", "action", "action_verified", "notification", "decision", "state_change", "memory_saved", "observation_saved"].includes(e.type))
       .slice(-150)
-      .map((e) => `[${HAWebSocketV5._formatTimelineTimestamp(e.timestamp)}] ${e.type}: ${e.message}`)
+      .map((e) => `[${HAWebSocketV6._formatTimelineTimestamp(e.timestamp)}] ${e.type}: ${e.message}`)
       .join("\n");
 
     // ---- Entity context snapshot ----
@@ -2831,7 +2748,7 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
       if (domain === "switch" && isNoisySwitch(id)) continue;
       if (state.state === "unavailable" || state.state === "unknown") continue;
 
-      if (HAWebSocketV5.CONTEXT_DOMAIN_PRIORITY.includes(domain)) {
+      if (HAWebSocketV6.CONTEXT_DOMAIN_PRIORITY.includes(domain)) {
         const entry = { entity_id: id, friendly_name: attr.friendly_name || id, state: state.state };
         if (domain === "climate") {
           entry.setpoint = attr.temperature ?? null;
@@ -2853,11 +2770,11 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
         byDomain.get(domain).push(entry);
       } else if (domain === "sensor") {
         let include = false;
-        if (HAWebSocketV5.SENSOR_WHITELIST.has(deviceClass)) {
+        if (HAWebSocketV6.SENSOR_WHITELIST.has(deviceClass)) {
           include = true;
         } else if (deviceClass === "battery") {
           const pct = parseFloat(state.state);
-          include = !isNaN(pct) && pct <= HAWebSocketV5.BATTERY_LOW_THRESHOLD;
+          include = !isNaN(pct) && pct <= HAWebSocketV6.BATTERY_LOW_THRESHOLD;
         }
         if (include) {
           const entry = { entity_id: id, friendly_name: attr.friendly_name || id, state: state.state, device_class: deviceClass, unit: attr.unit_of_measurement || null };
@@ -2869,16 +2786,16 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
 
     const contextEntities = [];
     let sensorCount = 0;
-    for (const domain of [...HAWebSocketV5.CONTEXT_DOMAIN_PRIORITY, "sensor"]) {
+    for (const domain of [...HAWebSocketV6.CONTEXT_DOMAIN_PRIORITY, "sensor"]) {
       for (const entry of (byDomain.get(domain) || [])) {
-        if (contextEntities.length >= HAWebSocketV5.MAX_CONTEXT_ENTITIES) break;
+        if (contextEntities.length >= HAWebSocketV6.MAX_CONTEXT_ENTITIES) break;
         if (domain === "sensor") {
-          if (sensorCount >= HAWebSocketV5.MAX_SENSOR_CONTEXT) break;
+          if (sensorCount >= HAWebSocketV6.MAX_SENSOR_CONTEXT) break;
           sensorCount++;
         }
         contextEntities.push(entry);
       }
-      if (contextEntities.length >= HAWebSocketV5.MAX_CONTEXT_ENTITIES) break;
+      if (contextEntities.length >= HAWebSocketV6.MAX_CONTEXT_ENTITIES) break;
     }
 
     // ---- System prompt ----
@@ -2963,11 +2880,11 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
       let responseText = response.choices?.[0]?.message?.content || response.response || "";
       if (!responseText) {
         const rawReasoning = response.choices?.[0]?.message?.reasoning || "";
-        const jsonFallback = HAWebSocketV5.extractFirstJSON(rawReasoning);
+        const jsonFallback = HAWebSocketV6.extractFirstJSON(rawReasoning);
         if (jsonFallback) responseText = jsonFallback;
       }
       let parsed = null;
-      const jsonMatch = HAWebSocketV5.extractFirstJSON(responseText);
+      const jsonMatch = HAWebSocketV6.extractFirstJSON(responseText);
       if (jsonMatch) {
         try {
           parsed = JSON.parse(jsonMatch);
@@ -3463,6 +3380,35 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
     }
   }
 
+  _formatLogbookForLLM(entries) {
+    if (!Array.isArray(entries)) return entries;
+    const fmt = new Intl.DateTimeFormat("en-US", {
+      timeZone: "America/Chicago",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: false
+    });
+    const toCentral = (iso) => {
+      if (typeof iso !== "string") return iso;
+      const d = new Date(iso);
+      if (Number.isNaN(d.getTime())) return iso;
+      const parts = Object.fromEntries(
+        fmt.formatToParts(d).filter(p => p.type !== "literal").map(p => [p.type, p.value])
+      );
+      return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}:${parts.second} CT`;
+    };
+    return entries.map(e => {
+      if (!e || typeof e !== "object") return e;
+      const out = { ...e };
+      if (out.when) out.when = toCentral(out.when);
+      return out;
+    });
+  }
+
   // ========================================================================
   // Native tool dispatcher — Phase 2
   //
@@ -3579,7 +3525,8 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
             });
             clearTimeout(timeout);
             if (!resp.ok) return { error: "HA logbook " + resp.status + ": " + (await resp.text()).substring(0, 200) };
-            return await resp.json();
+            const data = await resp.json();
+            return this._formatLogbookForLLM(data);
           } catch (err) {
             return { error: "Logbook fetch failed: " + err.message };
           }
@@ -4023,7 +3970,7 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
       if (domain === "switch" && isNoisySwitch(id)) continue;
       if (state.state === "unavailable" || state.state === "unknown") continue;
 
-      if (HAWebSocketV5.CONTEXT_DOMAIN_PRIORITY.includes(domain)) {
+      if (HAWebSocketV6.CONTEXT_DOMAIN_PRIORITY.includes(domain)) {
         const entry = { entity_id: id, friendly_name: attr.friendly_name || id, state: state.state };
         if (domain === "climate") {
           entry.setpoint = attr.temperature ?? null;
@@ -4045,11 +3992,11 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
         byDomain.get(domain).push(entry);
       } else if (domain === "sensor") {
         let include = false;
-        if (HAWebSocketV5.SENSOR_WHITELIST.has(deviceClass)) {
+        if (HAWebSocketV6.SENSOR_WHITELIST.has(deviceClass)) {
           include = true;
         } else if (deviceClass === "battery") {
           const pct = parseFloat(state.state);
-          include = !isNaN(pct) && pct <= HAWebSocketV5.BATTERY_LOW_THRESHOLD;
+          include = !isNaN(pct) && pct <= HAWebSocketV6.BATTERY_LOW_THRESHOLD;
         }
         if (include) {
           const entry = { entity_id: id, friendly_name: attr.friendly_name || id, state: state.state, device_class: deviceClass, unit: attr.unit_of_measurement || null };
@@ -4061,16 +4008,16 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
 
     const contextEntities = [];
     let sensorCount = 0;
-    for (const domain of [...HAWebSocketV5.CONTEXT_DOMAIN_PRIORITY, "sensor"]) {
+    for (const domain of [...HAWebSocketV6.CONTEXT_DOMAIN_PRIORITY, "sensor"]) {
       for (const entry of (byDomain.get(domain) || [])) {
-        if (contextEntities.length >= HAWebSocketV5.MAX_CONTEXT_ENTITIES) break;
+        if (contextEntities.length >= HAWebSocketV6.MAX_CONTEXT_ENTITIES) break;
         if (domain === "sensor") {
-          if (sensorCount >= HAWebSocketV5.MAX_SENSOR_CONTEXT) break;
+          if (sensorCount >= HAWebSocketV6.MAX_SENSOR_CONTEXT) break;
           sensorCount++;
         }
         contextEntities.push(entry);
       }
-      if (contextEntities.length >= HAWebSocketV5.MAX_CONTEXT_ENTITIES) break;
+      if (contextEntities.length >= HAWebSocketV6.MAX_CONTEXT_ENTITIES) break;
     }
     return contextEntities;
   }
@@ -4080,13 +4027,18 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
     return this.aiLog
       .filter((e) => relevantTypes.includes(e.type))
       .slice(-150)
-      .map((e) => `[${HAWebSocketV5._formatTimelineTimestamp(e.timestamp)}] ${e.type}${e.source ? "/" + e.source : ""}: ${e.message}`)
+      .map((e) => `[${HAWebSocketV6._formatTimelineTimestamp(e.timestamp)}] ${e.type}${e.source ? "/" + e.source : ""}: ${e.message}`)
       .join("\n");
   }
 
   // ========================================================================
-  // CHAT_SYSTEM_PROMPT — lean prompt for the chat profile. Does not include
-  // pattern-inference or autonomous observer instructions.
+  // CHAT_SYSTEM_PROMPT — assembles the per-request system prompt. Pulls
+  // identity, architecture, and household reference data from
+  // getAgentContext(), then layers GATEWAY HEALTH, TOOLS, COMMITMENT RULE,
+  // BUG REPORTS, MEMORY/OBSERVATION GATING, CHAT ACTION CONFIRMATION,
+  // QUICK FACTS, RETRIEVAL DISCIPLINE, FORENSIC MEMORY, HOUSE_STATE_SNAPSHOT,
+  // UNIFIED TIMELINE, semantic top-K blocks, RELEVANT ENTITIES, and
+  // TRUTHFULNESS — STATE CLAIMS.
   // ========================================================================
   getChatSystemPrompt(ctx) {
     const {
