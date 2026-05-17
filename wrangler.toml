@@ -51,7 +51,7 @@ binding = "CF_VERSION_METADATA"
 
 [[durable_objects.bindings]]
 name = "HA_WS"
-class_name = "HAWebSocketV7"
+class_name = "HAWebSocketV8"
 
 [[migrations]]
 tag = "v1"
@@ -120,6 +120,17 @@ renamed_classes = [
 tag = "v7"
 renamed_classes = [
   { from = "HAWebSocketV6", to = "HAWebSocketV7" }
+]
+
+# v8 — Step 0 preflight: DUMP_SYSTEM_PROMPT-gated per-component breakdown of
+# the MiniMax request body in chatWithAgentNative. Used to ground the
+# upcoming system-prompt trim against the literal prompt rather than
+# estimates (V7 data showed per-iter floor at ~30k vs estimated ~18k).
+# DO-side instrumentation; rename forces fresh isolate. State preserved.
+[[migrations]]
+tag = "v8"
+renamed_classes = [
+  { from = "HAWebSocketV7", to = "HAWebSocketV8" }
 ]
 
 # Two cron triggers:
