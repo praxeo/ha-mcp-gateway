@@ -286,6 +286,25 @@ const READ_TOOLS = [
   {
     type: "function",
     function: {
+      name: "get_house_topology",
+      description:
+        "Return the full room-by-room layout of the house (3 levels with walkout basement): " +
+        "basement rooms, main-level rooms, attic, outdoor zones, plus the thermostat zone " +
+        "mapping. Call this when the user asks anything room-specific you can't resolve from " +
+        "RELEVANT ENTITIES or the LOCK/GARAGE MAP in the system prompt — e.g., 'what's on " +
+        "the second floor?' (trick: there is no second floor; there is no upstairs), 'where " +
+        "is the music room?', 'is the office in the basement?'. Do NOT call for entity-state " +
+        "questions — those go to get_state or the snapshot. Zero arguments.",
+      parameters: {
+        type: "object",
+        properties: {},
+        required: []
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
       name: "get_automation_config",
       description:
         "Get the full Home Assistant configuration body for a specific automation, " +
@@ -451,6 +470,7 @@ export const CHAT_ALLOWED_TOOL_NAMES = new Set([
   "render_template",
   "vector_search",
   "get_automation_config",
+  "get_house_topology",
   "report_bug",
   "query_state_history",
   "query_automation_runs",

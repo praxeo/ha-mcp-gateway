@@ -25,7 +25,7 @@ function sanitizeChannelKey(from) {
   return cleaned.substring(0, 64) || "default";
 }
 
-export class HAWebSocketV9 {
+export class HAWebSocketV10 {
   // Static config for prioritized entity context building
   static CONTEXT_DOMAIN_PRIORITY = [
     "alarm_control_panel", "climate", "lock", "cover", "binary_sensor",
@@ -124,7 +124,7 @@ export class HAWebSocketV9 {
     return {
       fired_at_ms: ms,
       fired_at_iso: isoTs,
-      fired_at_central: HAWebSocketV9._formatTimelineTimestamp(isoTs)
+      fired_at_central: HAWebSocketV10._formatTimelineTimestamp(isoTs)
     };
   }
 
@@ -433,41 +433,7 @@ HOUSEHOLD:
 - Sabrina — Pharmacist, works at UAB. Pregnant with a boy, due in October. Uses the house, doesn't need implementation details.
 - Two large dogs: Ollie and Ranger.
 
-THE HOUSE:
-4208 Lakeview Circle, Birmingham, AL 35242. Lakefront property with a dock. Three levels.
-
-BASEMENT (finished, walkout):
-- Office (John's primary workspace — quiet, separated from main living areas)
-- Gym, Guest Room, Full Bathroom
-- Two-car garage bay area with two bay doors
-- Exterior walkout door to outside (Basement Door deadbolt — lock_2, node 258)
-- Porch door to the area under the screened porch (Basement Porch deadbolt — lock_3)
-- Stairs up to main level hallway
-- Thermostat: climate.t6_pro_z_wave_programmable_thermostat — controls the ENTIRE BASEMENT ZONE
-
-MAIN LEVEL:
-- Kitchen — central hub connecting hallway, sunroom, and bar area
-- Sunroom — bright transitional space between kitchen and screened porch
-- Screened Porch — covered outdoor living above the basement walkout
-- Living Room — main gathering space
-- Music Room — hobby room; Home Assistant Green controller lives here
-- Guest Room (main level) — shares a bathroom with Music Room
-- Bar Area — entertaining space near kitchen
-- Laundry Room / Half Bath
-- MBR Wing — private master suite off the kitchen/garage side:
-  * Master Bedroom (sound machine, fan/light combo, bedside lamp)
-  * Master Bathroom (tub, walk-in shower, closet inside bathroom)
-- Hallway — primary junction where garage, basement stairs, and kitchen converge
-- Two-car garage with interior door to hallway and attic stairs inside. Garage Entry deadbolt — lock_1 (node 257)
-- Front Porch / Entry Hallway
-- Back Porch (upstairs) — Back Porch deadbolt — lock_4
-- Thermostat: climate.t6_pro_z_wave_programmable_thermostat_2 — controls the ENTIRE MAIN LEVEL INCLUDING THE MASTER BEDROOM
-
-ATTIC: Unfinished storage above the garage. Accessed via stairs inside the garage.
-
-OUTDOOR:
-- Dock on the lake with accent lighting
-- Front yard, back yard, driveway
+LAYOUT NOTE — non-obvious: 3 levels with walkout basement; there is no upstairs. If asked anything room-specific you can't resolve from RELEVANT ENTITIES or the LOCK/GARAGE MAP below, call get_house_topology before answering.
 
 LOCK MAP (four smart locks total — no smart lock on the front door):
 - lock.home_connect_620_connected_smart_lock   = Garage Entry (node 257)
@@ -502,6 +468,52 @@ KEY DEVICES:
 - MBR bedside lamp (John's side): light.lamp_dimmer_bedroom_john
 
 `;
+  }
+
+  // ==========================================================================
+  // HOUSE TOPOLOGY — full room-by-room layout. Moved behind the
+  // get_house_topology tool in V10 to keep the default system prompt small.
+  // The LOCK MAP, GARAGE/BAY DOOR mappings, and KEY DEVICES disambiguation
+  // tables stay in getAgentContext() since they fire on every cover/lock
+  // command. This text is retrieved on demand when the model needs to
+  // resolve room-specific queries it can't answer from the inline tables.
+  // ==========================================================================
+  _getHouseTopologyText() {
+    return `THE HOUSE:
+4208 Lakeview Circle, Birmingham, AL 35242. Lakefront property with a dock. Three levels.
+
+BASEMENT (finished, walkout):
+- Office (John's primary workspace — quiet, separated from main living areas)
+- Gym, Guest Room, Full Bathroom
+- Two-car garage bay area with two bay doors
+- Exterior walkout door to outside (Basement Door deadbolt — lock_2, node 258)
+- Porch door to the area under the screened porch (Basement Porch deadbolt — lock_3)
+- Stairs up to main level hallway
+- Thermostat: climate.t6_pro_z_wave_programmable_thermostat — controls the ENTIRE BASEMENT ZONE
+
+MAIN LEVEL:
+- Kitchen — central hub connecting hallway, sunroom, and bar area
+- Sunroom — bright transitional space between kitchen and screened porch
+- Screened Porch — covered outdoor living above the basement walkout
+- Living Room — main gathering space
+- Music Room — hobby room; Home Assistant Green controller lives here
+- Guest Room (main level) — shares a bathroom with Music Room
+- Bar Area — entertaining space near kitchen
+- Laundry Room / Half Bath
+- MBR Wing — private master suite off the kitchen/garage side:
+  * Master Bedroom (sound machine, fan/light combo, bedside lamp)
+  * Master Bathroom (tub, walk-in shower, closet inside bathroom)
+- Hallway — primary junction where garage, basement stairs, and kitchen converge
+- Two-car garage with interior door to hallway and attic stairs inside. Garage Entry deadbolt — lock_1 (node 257)
+- Front Porch / Entry Hallway
+- Back Porch (upstairs) — Back Porch deadbolt — lock_4
+- Thermostat: climate.t6_pro_z_wave_programmable_thermostat_2 — controls the ENTIRE MAIN LEVEL INCLUDING THE MASTER BEDROOM
+
+ATTIC: Unfinished storage above the garage. Accessed via stairs inside the garage.
+
+OUTDOOR:
+- Dock on the lake with accent lighting
+- Front yard, back yard, driveway`;
   }
 
   // ==========================================================================
@@ -542,9 +554,23 @@ Exception: when the user explicitly says "remember X" or "save a memory" or equi
   // ==========================================================================
   static CLIMATE_TRIGGER_RE = /\b(ac|a\/c|air\s?cond|cool|cold|chilly|heat(?!er\s+lock)|warm|hot|thermostat|temp(?!late)|temperature|°|degrees?|climate|hvac|freezing|sweating)\b/i;
 
+  // V10: gates HOUSE_STATE_SNAPSHOT (locks / covers / climate / presence /
+  // power / contact sensors / modes). Matches aggregate-state, security,
+  // and presence terms — plus the household's first names so "did Sabrina
+  // leave?" / "is John home?" loads the snapshot without an extra get_state
+  // round-trip. Liberal on purpose: false positive = include snapshot when
+  // maybe not needed (cheap); false negative = model has no presence
+  // context (worse).
+  static HOUSE_STATUS_TRIGGER_RE = /\b(?:house|status|secure|everything|all\s+(?:lock|door|cover|light|window)s?|anything\s+(?:open|unlocked|running|on)|summary|going\s+on|weird|alarm|armed|intrusion|burglar|home|away|gone|left|back|arrived|outside|john|sabrina)\b/i;
+
   static climateTriggerMatches(text) {
     if (!text || typeof text !== "string") return false;
-    return HAWebSocketV9.CLIMATE_TRIGGER_RE.test(text);
+    return HAWebSocketV10.CLIMATE_TRIGGER_RE.test(text);
+  }
+
+  static houseStatusTriggerMatches(text) {
+    if (!text || typeof text !== "string") return false;
+    return HAWebSocketV10.HOUSE_STATUS_TRIGGER_RE.test(text);
   }
 
   static _seasonDominant(monthIdx) {
@@ -642,7 +668,7 @@ Exception: when the user explicitly says "remember X" or "save a memory" or equi
 
   async _buildClimatePreambleIfNeeded(triggerText, source = "chat") {
     if (this.env.CLIMATE_PREAMBLE_ENABLED === "false") return null;
-    if (!HAWebSocketV9.climateTriggerMatches(triggerText)) return null;
+    if (!HAWebSocketV10.climateTriggerMatches(triggerText)) return null;
     if (!this.connected || !this.authenticated) return null;
 
     const ok = await this._fetchClimateData();
@@ -654,13 +680,13 @@ Exception: when the user explicitly says "remember X" or "save a memory" or equi
     const nowStr = nowDate.toLocaleString("en-US", { timeZone: "America/Chicago", timeZoneName: "short" });
     const monthFmt = new Intl.DateTimeFormat("en-US", { timeZone: "America/Chicago", month: "numeric" });
     const monthIdx = parseInt(monthFmt.format(nowDate), 10) - 1;
-    const seasonStr = HAWebSocketV9._seasonDominant(monthIdx);
+    const seasonStr = HAWebSocketV10._seasonDominant(monthIdx);
 
     const tempStr = (w.temperature !== null && w.temperature !== undefined) ? `${w.temperature}°F` : "n/a";
     const condStr = w.state || "unknown";
 
-    const hl = HAWebSocketV9._forecastHighLow(w.forecast);
-    const trend = HAWebSocketV9._forecastTrend(w.forecast);
+    const hl = HAWebSocketV10._forecastHighLow(w.forecast);
+    const trend = HAWebSocketV10._forecastTrend(w.forecast);
     const forecastLine = hl
       ? `Forecast next 12h: high ${hl.high}°F, low ${hl.low}°F, trend ${trend || "stable"}`
       : `Forecast next 12h: unavailable (no forecast attribute)`;
@@ -699,8 +725,8 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
 
     if (!this._logInitialized) {
       this.aiLog = await this.loadLogFromStorage();
-      if (this.aiLog.length > HAWebSocketV9.LOG_IN_MEMORY_CAP) {
-        this.aiLog = this.aiLog.slice(-HAWebSocketV9.LOG_IN_MEMORY_CAP);
+      if (this.aiLog.length > HAWebSocketV10.LOG_IN_MEMORY_CAP) {
+        this.aiLog = this.aiLog.slice(-HAWebSocketV10.LOG_IN_MEMORY_CAP);
       }
       this._logInitialized = true;
     }
@@ -853,7 +879,7 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
 
         case "/ai_log": {
           const count = parseInt(url.searchParams.get("count") || "50");
-          if (count > HAWebSocketV9.LOG_IN_MEMORY_CAP) {
+          if (count > HAWebSocketV10.LOG_IN_MEMORY_CAP) {
             const rows = await this._loadAiLogFromD1(count);
             return new Response(JSON.stringify(Array.isArray(rows) ? rows : []), { headers });
           }
@@ -1194,7 +1220,7 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
     if (event.event_type === "automation_triggered" && event.data) {
       const ctx = event.context || {};
       const { fired_at_ms, fired_at_iso, fired_at_central } =
-        HAWebSocketV9._tsFromMs(Date.parse(event.time_fired) || Date.now());
+        HAWebSocketV10._tsFromMs(Date.parse(event.time_fired) || Date.now());
       this._writeAutomationRunToD1({
         automation_id: event.data.entity_id || null,
         automation_name: event.data.name || null,
@@ -1213,7 +1239,7 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
     if (event.event_type === "call_service" && event.data) {
       const ctx = event.context || {};
       const { fired_at_ms, fired_at_iso, fired_at_central } =
-        HAWebSocketV9._tsFromMs(Date.parse(event.time_fired) || Date.now());
+        HAWebSocketV10._tsFromMs(Date.parse(event.time_fired) || Date.now());
       const targets = event.data.service_data ? event.data.service_data.entity_id : null;
       const targetIds = Array.isArray(targets) ? targets.join(",") : (targets || null);
       this._writeServiceCallToD1({
@@ -1252,7 +1278,7 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
       // every real transition lands in the state_changes table.
       if (newState && oldState && newState.state !== oldState.state) {
         const { fired_at_ms, fired_at_iso, fired_at_central } =
-          HAWebSocketV9._tsFromMs(
+          HAWebSocketV10._tsFromMs(
             Date.parse(newState.last_changed || newState.last_updated) || Date.now()
           );
         this._touchLastEventSeen(fired_at_ms);
@@ -1331,25 +1357,25 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
     const out = [];
     for (const [id, s] of this.stateCache) {
       const domain = id.split(".")[0];
-      if (!HAWebSocketV9.SNAPSHOT_DOMAIN_ALLOWLIST.has(domain)) continue;
+      if (!HAWebSocketV10.SNAPSHOT_DOMAIN_ALLOWLIST.has(domain)) continue;
       if (s.state === "unavailable" || s.state === "unknown") continue;
       if (domain === "switch" && isNoisySwitch(id)) continue;
 
       const attrs = s.attributes || {};
       if (domain === "sensor") {
         const deviceClass = attrs.device_class || "";
-        if (HAWebSocketV9.SENSOR_WHITELIST.has(deviceClass)) {
+        if (HAWebSocketV10.SENSOR_WHITELIST.has(deviceClass)) {
           // keep
         } else if (deviceClass === "battery") {
           const pct = parseFloat(s.state);
-          if (isNaN(pct) || pct > HAWebSocketV9.BATTERY_LOW_THRESHOLD) continue;
+          if (isNaN(pct) || pct > HAWebSocketV10.BATTERY_LOW_THRESHOLD) continue;
         } else {
           continue;
         }
       }
 
       const filteredAttrs = {};
-      for (const k of HAWebSocketV9.SNAPSHOT_ATTR_ALLOWLIST) {
+      for (const k of HAWebSocketV10.SNAPSHOT_ATTR_ALLOWLIST) {
         if (attrs[k] !== undefined) {
           filteredAttrs[k] = attrs[k];
         }
@@ -1689,7 +1715,7 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
           attributes_json: this._shouldStoreAttributes(entityId) ? JSON.stringify(curr.attributes || {}) : null,
           fired_at_ms: tsMs,
           fired_at_iso: new Date(tsMs).toISOString(),
-          fired_at_central: HAWebSocketV9._formatTimelineTimestamp(new Date(tsMs).toISOString()),
+          fired_at_central: HAWebSocketV10._formatTimelineTimestamp(new Date(tsMs).toISOString()),
           context_id: null,
           context_parent_id: null,
           context_user_id: null,
@@ -2239,7 +2265,7 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
       if (done) return;
       await this.state.storage.delete("ai_log").catch(() => {});
       await this.state.storage.delete("ai_log_head").catch(() => {});
-      for (let i = 0; i < HAWebSocketV9.LOG_CHUNKS_MAX; i++) {
+      for (let i = 0; i < HAWebSocketV10.LOG_CHUNKS_MAX; i++) {
         await this.state.storage.delete("ai_log_chunk_" + i).catch(() => {});
         await this.state.storage.delete("ai_log_chunk_gen_" + i).catch(() => {});
       }
@@ -2273,8 +2299,8 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
         data: { original_type: entry.type, original_ts: entry.timestamp },
         timestamp: new Date().toISOString(),
       });
-      if (this.aiLog.length > HAWebSocketV9.LOG_IN_MEMORY_CAP) {
-        this.aiLog.splice(0, this.aiLog.length - HAWebSocketV9.LOG_IN_MEMORY_CAP);
+      if (this.aiLog.length > HAWebSocketV10.LOG_IN_MEMORY_CAP) {
+        this.aiLog.splice(0, this.aiLog.length - HAWebSocketV10.LOG_IN_MEMORY_CAP);
       }
     }
   }
@@ -2638,7 +2664,7 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
   // retained so existing call sites (await this.persistLog()) keep resolving.
   // ==========================================================================
   async loadLogFromStorage() {
-    const fromD1 = await this._loadAiLogFromD1(HAWebSocketV9.LOG_IN_MEMORY_CAP);
+    const fromD1 = await this._loadAiLogFromD1(HAWebSocketV10.LOG_IN_MEMORY_CAP);
     return Array.isArray(fromD1) ? fromD1 : [];
   }
 
@@ -2650,7 +2676,7 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
 
   async clearPersistedLog() {
     await this.state.storage.delete("ai_log").catch(() => {});
-    for (let i = 0; i < HAWebSocketV9.LOG_CHUNKS_MAX; i++) {
+    for (let i = 0; i < HAWebSocketV10.LOG_CHUNKS_MAX; i++) {
       await this.state.storage.delete("ai_log_chunk_" + i).catch(() => {});
       await this.state.storage.delete("ai_log_chunk_gen_" + i).catch(() => {});
     }
@@ -2670,8 +2696,8 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
     const entry = { type, message, data, timestamp: new Date().toISOString() };
     if (source) entry.source = source;
     this.aiLog.push(entry);
-    if (this.aiLog.length > HAWebSocketV9.LOG_IN_MEMORY_CAP) {
-      this.aiLog.splice(0, this.aiLog.length - HAWebSocketV9.LOG_IN_MEMORY_CAP);
+    if (this.aiLog.length > HAWebSocketV10.LOG_IN_MEMORY_CAP) {
+      this.aiLog.splice(0, this.aiLog.length - HAWebSocketV10.LOG_IN_MEMORY_CAP);
     }
     console.log("AI LOG [" + type + (source ? "/" + source : "") + "]:", message);
     this.persistLog().catch((err) => console.error("logAI persist:", err.message));
@@ -2704,7 +2730,7 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
     const timeline = persistentLog
       .filter((e) => ["chat_user", "chat_reply", "action", "action_verified", "notification", "decision", "state_change", "memory_saved", "observation_saved"].includes(e.type))
       .slice(-150)
-      .map((e) => `[${HAWebSocketV9._formatTimelineTimestamp(e.timestamp)}] ${e.type}: ${e.message}`)
+      .map((e) => `[${HAWebSocketV10._formatTimelineTimestamp(e.timestamp)}] ${e.type}: ${e.message}`)
       .join("\n");
 
     // ---- Entity context snapshot ----
@@ -2716,7 +2742,7 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
       if (domain === "switch" && isNoisySwitch(id)) continue;
       if (state.state === "unavailable" || state.state === "unknown") continue;
 
-      if (HAWebSocketV9.CONTEXT_DOMAIN_PRIORITY.includes(domain)) {
+      if (HAWebSocketV10.CONTEXT_DOMAIN_PRIORITY.includes(domain)) {
         const entry = { entity_id: id, friendly_name: attr.friendly_name || id, state: state.state };
         if (domain === "climate") {
           entry.setpoint = attr.temperature ?? null;
@@ -2738,11 +2764,11 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
         byDomain.get(domain).push(entry);
       } else if (domain === "sensor") {
         let include = false;
-        if (HAWebSocketV9.SENSOR_WHITELIST.has(deviceClass)) {
+        if (HAWebSocketV10.SENSOR_WHITELIST.has(deviceClass)) {
           include = true;
         } else if (deviceClass === "battery") {
           const pct = parseFloat(state.state);
-          include = !isNaN(pct) && pct <= HAWebSocketV9.BATTERY_LOW_THRESHOLD;
+          include = !isNaN(pct) && pct <= HAWebSocketV10.BATTERY_LOW_THRESHOLD;
         }
         if (include) {
           const entry = { entity_id: id, friendly_name: attr.friendly_name || id, state: state.state, device_class: deviceClass, unit: attr.unit_of_measurement || null };
@@ -2754,16 +2780,16 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
 
     const contextEntities = [];
     let sensorCount = 0;
-    for (const domain of [...HAWebSocketV9.CONTEXT_DOMAIN_PRIORITY, "sensor"]) {
+    for (const domain of [...HAWebSocketV10.CONTEXT_DOMAIN_PRIORITY, "sensor"]) {
       for (const entry of (byDomain.get(domain) || [])) {
-        if (contextEntities.length >= HAWebSocketV9.MAX_CONTEXT_ENTITIES) break;
+        if (contextEntities.length >= HAWebSocketV10.MAX_CONTEXT_ENTITIES) break;
         if (domain === "sensor") {
-          if (sensorCount >= HAWebSocketV9.MAX_SENSOR_CONTEXT) break;
+          if (sensorCount >= HAWebSocketV10.MAX_SENSOR_CONTEXT) break;
           sensorCount++;
         }
         contextEntities.push(entry);
       }
-      if (contextEntities.length >= HAWebSocketV9.MAX_CONTEXT_ENTITIES) break;
+      if (contextEntities.length >= HAWebSocketV10.MAX_CONTEXT_ENTITIES) break;
     }
 
     // ---- System prompt ----
@@ -2847,11 +2873,11 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
       let responseText = response.choices?.[0]?.message?.content || response.response || "";
       if (!responseText) {
         const rawReasoning = response.choices?.[0]?.message?.reasoning || "";
-        const jsonFallback = HAWebSocketV9.extractFirstJSON(rawReasoning);
+        const jsonFallback = HAWebSocketV10.extractFirstJSON(rawReasoning);
         if (jsonFallback) responseText = jsonFallback;
       }
       let parsed = null;
-      const jsonMatch = HAWebSocketV9.extractFirstJSON(responseText);
+      const jsonMatch = HAWebSocketV10.extractFirstJSON(responseText);
       if (jsonMatch) {
         try {
           parsed = JSON.parse(jsonMatch);
@@ -3499,6 +3525,13 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
           }
         }
 
+        case "get_house_topology": {
+          // V10: on-demand topology — text is large (~2k tokens) so it
+          // doesn't ship in the default system prompt. Returned verbatim
+          // from _getHouseTopologyText(). Zero-arg, no validation.
+          return { topology: this._getHouseTopologyText() };
+        }
+
         case "vector_search": {
           if (typeof args.query !== "string" || !args.query.trim()) {
             return { error: "query is required" };
@@ -3991,7 +4024,7 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
       if (domain === "switch" && isNoisySwitch(id)) continue;
       if (state.state === "unavailable" || state.state === "unknown") continue;
 
-      if (HAWebSocketV9.CONTEXT_DOMAIN_PRIORITY.includes(domain)) {
+      if (HAWebSocketV10.CONTEXT_DOMAIN_PRIORITY.includes(domain)) {
         const entry = { entity_id: id, friendly_name: attr.friendly_name || id, state: state.state };
         if (domain === "climate") {
           entry.setpoint = attr.temperature ?? null;
@@ -4013,11 +4046,11 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
         byDomain.get(domain).push(entry);
       } else if (domain === "sensor") {
         let include = false;
-        if (HAWebSocketV9.SENSOR_WHITELIST.has(deviceClass)) {
+        if (HAWebSocketV10.SENSOR_WHITELIST.has(deviceClass)) {
           include = true;
         } else if (deviceClass === "battery") {
           const pct = parseFloat(state.state);
-          include = !isNaN(pct) && pct <= HAWebSocketV9.BATTERY_LOW_THRESHOLD;
+          include = !isNaN(pct) && pct <= HAWebSocketV10.BATTERY_LOW_THRESHOLD;
         }
         if (include) {
           const entry = { entity_id: id, friendly_name: attr.friendly_name || id, state: state.state, device_class: deviceClass, unit: attr.unit_of_measurement || null };
@@ -4029,16 +4062,16 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
 
     const contextEntities = [];
     let sensorCount = 0;
-    for (const domain of [...HAWebSocketV9.CONTEXT_DOMAIN_PRIORITY, "sensor"]) {
+    for (const domain of [...HAWebSocketV10.CONTEXT_DOMAIN_PRIORITY, "sensor"]) {
       for (const entry of (byDomain.get(domain) || [])) {
-        if (contextEntities.length >= HAWebSocketV9.MAX_CONTEXT_ENTITIES) break;
+        if (contextEntities.length >= HAWebSocketV10.MAX_CONTEXT_ENTITIES) break;
         if (domain === "sensor") {
-          if (sensorCount >= HAWebSocketV9.MAX_SENSOR_CONTEXT) break;
+          if (sensorCount >= HAWebSocketV10.MAX_SENSOR_CONTEXT) break;
           sensorCount++;
         }
         contextEntities.push(entry);
       }
-      if (contextEntities.length >= HAWebSocketV9.MAX_CONTEXT_ENTITIES) break;
+      if (contextEntities.length >= HAWebSocketV10.MAX_CONTEXT_ENTITIES) break;
     }
     return contextEntities;
   }
@@ -4059,7 +4092,7 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
         return isNaN(t) ? true : t >= cutoff;
       })
       .slice(-30)
-      .map((e) => `[${HAWebSocketV9._formatTimelineTimestamp(e.timestamp)}] ${e.type}${e.source ? "/" + e.source : ""}: ${e.message}`)
+      .map((e) => `[${HAWebSocketV10._formatTimelineTimestamp(e.timestamp)}] ${e.type}${e.source ? "/" + e.source : ""}: ${e.message}`)
       .join("\n");
   }
 
@@ -4074,6 +4107,7 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
   // ========================================================================
   getChatSystemPrompt(ctx) {
     const {
+      message = "",
       timeline = "",
       contextEntities = [],
       from = "default",
@@ -4084,7 +4118,21 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
       semanticServices = [],
       climatePreamble = ""
     } = ctx;
-    const snapshot = this._buildHouseStateSnapshot();
+    // V10: HOUSE_STATE_SNAPSHOT is ~830 tokens. Most turns don't need it
+    // ("turn on the dimmer", "play music"). Include when (a) the query
+    // matches the status/presence/security regex, (b) vector retrieval
+    // returned no high-confidence entities (open-ended question, no
+    // specific target), or (c) defensively for legacy callers that didn't
+    // pass the message.
+    const SCORE_FLOOR_FOR_GATE = 0.65;
+    const highConfidenceEntities = contextEntities.filter(
+      (e) => typeof e.score === "number" && e.score >= SCORE_FLOOR_FOR_GATE
+    );
+    const includeSnapshot =
+      !message ||
+      HAWebSocketV10.houseStatusTriggerMatches(message) ||
+      highConfidenceEntities.length === 0;
+    const snapshot = includeSnapshot ? this._buildHouseStateSnapshot() : "";
     // V9: only surface gateway health when something is wrong. Silence on
     // healthy turns saves the noise of confirming "everything green" every prompt.
     const unhealthy = !this.connected || !this.authenticated || !this.statesReady;
@@ -4272,9 +4320,9 @@ ${contextEntities.map((e) => {
 }).join("\n")}
 
 TRUTHFULNESS — STATE CLAIMS:
-- Before asserting the current state of ANY entity in a reply — locks, covers, lights, switches, climate, sensors, power, presence, anything — you must have either (a) the entity in the HOUSE_STATE_SNAPSHOT block above, (b) called get_state on it in this turn, or (c) seen the entity_id and value explicitly in the pre-injected context block. If none of those is true, do NOT state the value.
-- Never aggregate ("all lights off," "everything secure," "all 3 garage doors closed," "nothing running") without per-entity verification. The HOUSE_STATE_SNAPSHOT covers locks, covers, climate, presence, power, and key contact sensors — for those, read the snapshot. For anything else in an aggregate claim, call get_state on each entity in the aggregate this turn.
-- If asked for a house summary or "what's going on," base security/climate/presence claims on the HOUSE_STATE_SNAPSHOT. For lights, switches, or anything outside the snapshot, call get_state for each entity you intend to mention.
+- Before asserting the current state of ANY entity in a reply — locks, covers, lights, switches, climate, sensors, power, presence, anything — you must have either (a) the entity in the HOUSE_STATE_SNAPSHOT block above (when present — it's only injected for status/presence/security/open-ended queries), (b) called get_state on it in this turn, or (c) seen the entity_id and value explicitly in the pre-injected context block. If none of those is true, do NOT state the value.
+- Never aggregate ("all lights off," "everything secure," "all 3 garage doors closed," "nothing running") without per-entity verification. When HOUSE_STATE_SNAPSHOT is present it covers locks, covers, climate, presence, power, and key contact sensors — read it. Otherwise, and for anything else in an aggregate claim, call get_state on each entity this turn.
+- If asked for a house summary or "what's going on" — that query type triggers the snapshot. Base security/climate/presence claims on it. For lights, switches, or anything outside the snapshot, call get_state for each entity you intend to mention.
 - If you don't have a value, say so plainly: "I don't have a current read on the [entity] — let me check" or just omit it. Do NOT fill the gap with inference, vibe, or what was true earlier in this conversation.
 - The unified timeline above shows recent state CHANGES, not current state. An entity not appearing in the timeline does NOT mean its state hasn't changed — it means no event flowed in the recent window. Always verify with snapshot or get_state before reporting.
 - Confident-sounding fabrication is the worst failure mode you have. John would rather hear "I don't know, let me check" than a confident wrong answer.`;
@@ -4316,7 +4364,10 @@ TRUTHFULNESS — STATE CLAIMS:
           { role: "user", content: `[${from}]: ${message}` },
           { role: "assistant", content: fastResult.reply }
         ];
-        const MAX_TURNS = 10;
+        // V10: 10 → 8. Still well above the 2-3 typical follow-up depth;
+        // saves ~1k tokens of history on average. 6 risked breaking the
+        // 5+ turn debugging sessions in the data; 8 is conservative.
+        const MAX_TURNS = 8;
         const fpUserIdxs = [];
         for (let i = 0; i < fpNext.length; i++) {
           if (fpNext[i].role === "user") fpUserIdxs.push(i);
@@ -4381,6 +4432,7 @@ TRUTHFULNESS — STATE CLAIMS:
     const _t4 = Date.now();
 
     const systemPrompt = this.getChatSystemPrompt({
+      message,
       timeline,
       contextEntities,
       semanticMemories,
@@ -4528,7 +4580,8 @@ TRUTHFULNESS — STATE CLAIMS:
         { role: "user", content: `[${from}]: ${message}` },
         ...loopAdditions
       ];
-      const MAX_TURNS = 10;
+      // V10: see fast-path note above.
+      const MAX_TURNS = 8;
       const userIdxs = [];
       for (let i = 0; i < nextHistory.length; i++) {
         if (nextHistory[i].role === "user") userIdxs.push(i);

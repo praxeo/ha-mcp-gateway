@@ -51,7 +51,7 @@ binding = "CF_VERSION_METADATA"
 
 [[durable_objects.bindings]]
 name = "HA_WS"
-class_name = "HAWebSocketV9"
+class_name = "HAWebSocketV10"
 
 [[migrations]]
 tag = "v1"
@@ -141,12 +141,32 @@ renamed_classes = [
 # compressed into the save_memory tool description instead; (5) RELEVANT
 # ENTITIES JSON dump replaced by one-line text per entity, with load-bearing
 # attrs preserved (climate setpoint/action, sensor unit); (6) GATEWAY HEALTH
-# gated to degraded-only. Expected: ~10k token cut, "Entryway lamp" 7s → ~2s,
-# "can you hear me" 5.5s → ~1.5s. Rename forces fresh DO isolate. State preserved.
+# gated to degraded-only. Verified post-deploy: per-iter prompt 30k → 10.8k
+# (~64% cut), zero action_hallucinations, model went from 13 get_state to 1
+# on the status query (trusted the leaner snapshot).
 [[migrations]]
 tag = "v9"
 renamed_classes = [
   { from = "HAWebSocketV8", to = "HAWebSocketV9" }
+]
+
+# v10 — System-prompt slim, deploy 2 (behavioral gating):
+# (7) HOUSE_STATE_SNAPSHOT gated by HOUSE_STATUS_TRIGGER_RE — matches
+# aggregate-state ("house", "status", "secure", "everything"), security
+# ("alarm", "armed"), presence ("home", "away", "gone", "left", "back",
+# "outside"), plus first names ("John", "Sabrina"). Open-ended fallback:
+# include snapshot when vector retrieval surfaces no entities with score
+# >= 0.65 (no specific target). Defensively included for legacy callers
+# that don't pass `message`. (8) House topology (THE HOUSE / BASEMENT /
+# MAIN LEVEL / ATTIC / OUTDOOR room prose) moved behind new
+# `get_house_topology` zero-arg tool; LOCK MAP / GARAGE BAY DOOR /
+# KEY DEVICES disambiguation tables remain in default prompt; persona
+# gains a LAYOUT NOTE cue pointing to the tool. (9) MAX_TURNS reduced
+# 10 → 8 in both fast and regular paths. Rename forces fresh DO isolate.
+[[migrations]]
+tag = "v10"
+renamed_classes = [
+  { from = "HAWebSocketV9", to = "HAWebSocketV10" }
 ]
 
 # Two cron triggers:
