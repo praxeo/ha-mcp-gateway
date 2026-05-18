@@ -51,7 +51,7 @@ binding = "CF_VERSION_METADATA"
 
 [[durable_objects.bindings]]
 name = "HA_WS"
-class_name = "HAWebSocketV11"
+class_name = "HAWebSocketV12"
 
 [[migrations]]
 tag = "v1"
@@ -188,6 +188,21 @@ renamed_classes = [
 tag = "v11"
 renamed_classes = [
   { from = "HAWebSocketV10", to = "HAWebSocketV11" }
+]
+
+# v12 — make quick-action garage buttons feel instant. Fast-path was
+# measured at 133-165ms total but ~30-70ms of that was bookkeeping
+# (logAI / storage.get+put / persistLog) executing BEFORE the SSE
+# reply event fired. The HA service call already completed in step 0
+# — the cover was already moving — so holding the reply for log
+# writes was pure user-visible latency. V12 reorders: onEvent fires
+# first, then logging and history persist happen after. Expected
+# garage-button perceived latency: ~80-100ms (down from ~150ms).
+# No behavior change. Rename forces fresh DO isolate. State preserved.
+[[migrations]]
+tag = "v12"
+renamed_classes = [
+  { from = "HAWebSocketV11", to = "HAWebSocketV12" }
 ]
 
 # Two cron triggers:
