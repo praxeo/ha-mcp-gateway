@@ -51,7 +51,7 @@ binding = "CF_VERSION_METADATA"
 
 [[durable_objects.bindings]]
 name = "HA_WS"
-class_name = "HAWebSocketV10"
+class_name = "HAWebSocketV11"
 
 [[migrations]]
 tag = "v1"
@@ -167,6 +167,27 @@ renamed_classes = [
 tag = "v10"
 renamed_classes = [
   { from = "HAWebSocketV9", to = "HAWebSocketV10" }
+]
+
+# v11 — kill the wrap-up iteration for simple action commands.
+# Two fixes:
+# (1) HOUSE_STATE_SNAPSHOT PRESENCE now includes person.sabrina (was
+# only person.john). "did Sabrina leave" was triggering the snapshot
+# via name match but the snapshot lacked her entity, forcing the
+# model to make a redundant get_state round-trip.
+# (2) Post-tool fast-return in runNativeToolLoop: when a single simple
+# action tool (light/switch/lock/scene + standard verbs) succeeds and
+# the model emitted no accompanying text, synthesize "Done — <friendly>
+# <verb>." server-side and return without the second MiniMax call.
+# Saves ~5s on the most common command pattern (det_candidate turns
+# previously hit 2 iters; now hit 1). Conservative whitelist — cover,
+# climate, media, scripts, save_memory, save_observation, report_bug
+# all keep the LLM wrap-up because their replies benefit from context.
+# Rename forces fresh DO isolate. State preserved.
+[[migrations]]
+tag = "v11"
+renamed_classes = [
+  { from = "HAWebSocketV10", to = "HAWebSocketV11" }
 ]
 
 # Two cron triggers:
