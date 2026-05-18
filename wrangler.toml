@@ -51,7 +51,7 @@ binding = "CF_VERSION_METADATA"
 
 [[durable_objects.bindings]]
 name = "HA_WS"
-class_name = "HAWebSocketV8"
+class_name = "HAWebSocketV9"
 
 [[migrations]]
 tag = "v1"
@@ -131,6 +131,22 @@ renamed_classes = [
 tag = "v8"
 renamed_classes = [
   { from = "HAWebSocketV7", to = "HAWebSocketV8" }
+]
+
+# v9 — System-prompt slim, deploy 1 (low-risk waste & duplication cuts):
+# (1) timeline excludes chat_user/chat_reply (duplicated conversation_history),
+# windowed to last 2h / 30 events; (2) deleted 7-layer architecture prose;
+# (3) CHAT ACTION CONFIRMATION compressed to terse bullets, every invariant
+# preserved; (4) save_memory criteria block removed from system prompt,
+# compressed into the save_memory tool description instead; (5) RELEVANT
+# ENTITIES JSON dump replaced by one-line text per entity, with load-bearing
+# attrs preserved (climate setpoint/action, sensor unit); (6) GATEWAY HEALTH
+# gated to degraded-only. Expected: ~10k token cut, "Entryway lamp" 7s → ~2s,
+# "can you hear me" 5.5s → ~1.5s. Rename forces fresh DO isolate. State preserved.
+[[migrations]]
+tag = "v9"
+renamed_classes = [
+  { from = "HAWebSocketV8", to = "HAWebSocketV9" }
 ]
 
 # Two cron triggers:

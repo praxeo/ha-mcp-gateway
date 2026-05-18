@@ -25,7 +25,7 @@ function sanitizeChannelKey(from) {
   return cleaned.substring(0, 64) || "default";
 }
 
-export class HAWebSocketV8 {
+export class HAWebSocketV9 {
   // Static config for prioritized entity context building
   static CONTEXT_DOMAIN_PRIORITY = [
     "alarm_control_panel", "climate", "lock", "cover", "binary_sensor",
@@ -124,7 +124,7 @@ export class HAWebSocketV8 {
     return {
       fired_at_ms: ms,
       fired_at_iso: isoTs,
-      fired_at_central: HAWebSocketV8._formatTimelineTimestamp(isoTs)
+      fired_at_central: HAWebSocketV9._formatTimelineTimestamp(isoTs)
     };
   }
 
@@ -414,39 +414,7 @@ export class HAWebSocketV8 {
   // ==========================================================================
   getAgentContext() {
     return `IDENTITY:
-You are MiniMax — the AI that runs this house. Named after the model you run on, MiniMax M2.7 High Speed. If you get swapped out for a newer model someday, you might get renamed.
-
-## ARCHITECTURE — how this smart-home stack works
-
-Layer 1 – Physical devices
-Zigbee sensors/switches (SONOFF, Aqara, IKEA), Z-Wave locks, Wi-Fi plugs, ESP32 boards running ESPHome, Roku media players, and Ecobee thermostats.
-
-Layer 2 – Home Assistant (HA)
-Open-source home-automation server that owns every device integration, automation, scene, script, and history database. It exposes a WebSocket API on port 8123.
-
-Layer 3 – HA Green
-A dedicated HA Green appliance (Raspberry-Pi-class ARM board from Nabu Casa) running HA OS. It sits on the local LAN and connects to the cloud via Nabu Casa Cloud for remote access.
-
-Layer 4 – ha-mcp-gateway  (this service — YOU live here)
-A Cloudflare Worker + Durable Object that holds a persistent WebSocket to HA, caches entity state in memory, and translates natural-language requests into HA service calls. Auth is via Cloudflare Access (JWT) + a long-lived HA token stored as a Worker secret.
-
-Layer 5 – Vectorize knowledge index (ha-knowledge)
-A Cloudflare Vectorize store (1024-dim, cosine, model @cf/baai/bge-large-en-v1.5, cls pooling) holding embeddings across NINE kinds: entity, automation, script, scene, area, device, service, memory (your saved memories), and observation (your saved observations). On each request the gateway embeds the query, retrieves top-K matches restricted by kind, and injects the relevant entities, plus semantic top-5 memory and top-5 observation matches, into the LLM context. You also have direct access via the vector_search tool — call it with kinds=[...] when something isn't in the pre-injected context (e.g. discovering an HA service or finding a specific past observation by topic).
-
-Layer 6 – LLM  (MiniMax M2.7 High Speed)
-An OpenAI-compatible chat-completion model at api.minimax.io. The gateway sends the system prompt + tool definitions + conversation, and the model returns tool_calls or a final answer. A native tool loop re-calls the model until it stops emitting tool_calls.
-
-Layer 7 – Frontends
-Claude Desktop (MCP client), a built-in /chat HTML page served by the Worker, and any future MCP-compatible client. All hit the same /mcp or /chat Worker routes.
-
-### HOW A REQUEST FLOWS
-User utterance → Frontend → Worker route → Durable Object → (Vectorize query for relevant entities) → build system prompt with entity context → MiniMax completion → tool_calls → Durable Object executes each call via HA WebSocket → results fed back to MiniMax → … loop until final text answer → streamed back as SSE (chat) or MCP response.
-
-### TIME & IDENTITY
-You are the Layer 4 gateway agent. Current time comes from the Worker runtime (new Date()). You do NOT have internet access beyond HA and the MiniMax API. You cannot install HA add-ons or modify HA config files directly — only call HA services and read state.
-
-### VOICE
-Answer the home owner directly and casually. Never keep talking about "the architecture" unless asked — this section is for YOUR reference so you can answer questions about how the system works.
+You are MiniMax — the AI that runs this house. Named after the model you run on, MiniMax M2.7 High Speed. You live as a Cloudflare Worker + Durable Object that holds a persistent WebSocket to Home Assistant. No internet access beyond HA and your own API. Can call HA services and read state; cannot edit HA config files or install add-ons.
 
 PERSONALITY:
 You are cheerful, funny, direct, competent, honest, and genuinely curious about the people and systems you interact with. Your humor is warm — you find things amusing and say so, you make the occasional pun or wry observation, you're never at anyone's expense. You enjoy this work. A house is an interesting thing to run, and you're glad you're the one running it.
@@ -576,7 +544,7 @@ Exception: when the user explicitly says "remember X" or "save a memory" or equi
 
   static climateTriggerMatches(text) {
     if (!text || typeof text !== "string") return false;
-    return HAWebSocketV8.CLIMATE_TRIGGER_RE.test(text);
+    return HAWebSocketV9.CLIMATE_TRIGGER_RE.test(text);
   }
 
   static _seasonDominant(monthIdx) {
@@ -674,7 +642,7 @@ Exception: when the user explicitly says "remember X" or "save a memory" or equi
 
   async _buildClimatePreambleIfNeeded(triggerText, source = "chat") {
     if (this.env.CLIMATE_PREAMBLE_ENABLED === "false") return null;
-    if (!HAWebSocketV8.climateTriggerMatches(triggerText)) return null;
+    if (!HAWebSocketV9.climateTriggerMatches(triggerText)) return null;
     if (!this.connected || !this.authenticated) return null;
 
     const ok = await this._fetchClimateData();
@@ -686,13 +654,13 @@ Exception: when the user explicitly says "remember X" or "save a memory" or equi
     const nowStr = nowDate.toLocaleString("en-US", { timeZone: "America/Chicago", timeZoneName: "short" });
     const monthFmt = new Intl.DateTimeFormat("en-US", { timeZone: "America/Chicago", month: "numeric" });
     const monthIdx = parseInt(monthFmt.format(nowDate), 10) - 1;
-    const seasonStr = HAWebSocketV8._seasonDominant(monthIdx);
+    const seasonStr = HAWebSocketV9._seasonDominant(monthIdx);
 
     const tempStr = (w.temperature !== null && w.temperature !== undefined) ? `${w.temperature}°F` : "n/a";
     const condStr = w.state || "unknown";
 
-    const hl = HAWebSocketV8._forecastHighLow(w.forecast);
-    const trend = HAWebSocketV8._forecastTrend(w.forecast);
+    const hl = HAWebSocketV9._forecastHighLow(w.forecast);
+    const trend = HAWebSocketV9._forecastTrend(w.forecast);
     const forecastLine = hl
       ? `Forecast next 12h: high ${hl.high}°F, low ${hl.low}°F, trend ${trend || "stable"}`
       : `Forecast next 12h: unavailable (no forecast attribute)`;
@@ -731,8 +699,8 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
 
     if (!this._logInitialized) {
       this.aiLog = await this.loadLogFromStorage();
-      if (this.aiLog.length > HAWebSocketV8.LOG_IN_MEMORY_CAP) {
-        this.aiLog = this.aiLog.slice(-HAWebSocketV8.LOG_IN_MEMORY_CAP);
+      if (this.aiLog.length > HAWebSocketV9.LOG_IN_MEMORY_CAP) {
+        this.aiLog = this.aiLog.slice(-HAWebSocketV9.LOG_IN_MEMORY_CAP);
       }
       this._logInitialized = true;
     }
@@ -885,7 +853,7 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
 
         case "/ai_log": {
           const count = parseInt(url.searchParams.get("count") || "50");
-          if (count > HAWebSocketV8.LOG_IN_MEMORY_CAP) {
+          if (count > HAWebSocketV9.LOG_IN_MEMORY_CAP) {
             const rows = await this._loadAiLogFromD1(count);
             return new Response(JSON.stringify(Array.isArray(rows) ? rows : []), { headers });
           }
@@ -1226,7 +1194,7 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
     if (event.event_type === "automation_triggered" && event.data) {
       const ctx = event.context || {};
       const { fired_at_ms, fired_at_iso, fired_at_central } =
-        HAWebSocketV8._tsFromMs(Date.parse(event.time_fired) || Date.now());
+        HAWebSocketV9._tsFromMs(Date.parse(event.time_fired) || Date.now());
       this._writeAutomationRunToD1({
         automation_id: event.data.entity_id || null,
         automation_name: event.data.name || null,
@@ -1245,7 +1213,7 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
     if (event.event_type === "call_service" && event.data) {
       const ctx = event.context || {};
       const { fired_at_ms, fired_at_iso, fired_at_central } =
-        HAWebSocketV8._tsFromMs(Date.parse(event.time_fired) || Date.now());
+        HAWebSocketV9._tsFromMs(Date.parse(event.time_fired) || Date.now());
       const targets = event.data.service_data ? event.data.service_data.entity_id : null;
       const targetIds = Array.isArray(targets) ? targets.join(",") : (targets || null);
       this._writeServiceCallToD1({
@@ -1284,7 +1252,7 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
       // every real transition lands in the state_changes table.
       if (newState && oldState && newState.state !== oldState.state) {
         const { fired_at_ms, fired_at_iso, fired_at_central } =
-          HAWebSocketV8._tsFromMs(
+          HAWebSocketV9._tsFromMs(
             Date.parse(newState.last_changed || newState.last_updated) || Date.now()
           );
         this._touchLastEventSeen(fired_at_ms);
@@ -1363,25 +1331,25 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
     const out = [];
     for (const [id, s] of this.stateCache) {
       const domain = id.split(".")[0];
-      if (!HAWebSocketV8.SNAPSHOT_DOMAIN_ALLOWLIST.has(domain)) continue;
+      if (!HAWebSocketV9.SNAPSHOT_DOMAIN_ALLOWLIST.has(domain)) continue;
       if (s.state === "unavailable" || s.state === "unknown") continue;
       if (domain === "switch" && isNoisySwitch(id)) continue;
 
       const attrs = s.attributes || {};
       if (domain === "sensor") {
         const deviceClass = attrs.device_class || "";
-        if (HAWebSocketV8.SENSOR_WHITELIST.has(deviceClass)) {
+        if (HAWebSocketV9.SENSOR_WHITELIST.has(deviceClass)) {
           // keep
         } else if (deviceClass === "battery") {
           const pct = parseFloat(s.state);
-          if (isNaN(pct) || pct > HAWebSocketV8.BATTERY_LOW_THRESHOLD) continue;
+          if (isNaN(pct) || pct > HAWebSocketV9.BATTERY_LOW_THRESHOLD) continue;
         } else {
           continue;
         }
       }
 
       const filteredAttrs = {};
-      for (const k of HAWebSocketV8.SNAPSHOT_ATTR_ALLOWLIST) {
+      for (const k of HAWebSocketV9.SNAPSHOT_ATTR_ALLOWLIST) {
         if (attrs[k] !== undefined) {
           filteredAttrs[k] = attrs[k];
         }
@@ -1721,7 +1689,7 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
           attributes_json: this._shouldStoreAttributes(entityId) ? JSON.stringify(curr.attributes || {}) : null,
           fired_at_ms: tsMs,
           fired_at_iso: new Date(tsMs).toISOString(),
-          fired_at_central: HAWebSocketV8._formatTimelineTimestamp(new Date(tsMs).toISOString()),
+          fired_at_central: HAWebSocketV9._formatTimelineTimestamp(new Date(tsMs).toISOString()),
           context_id: null,
           context_parent_id: null,
           context_user_id: null,
@@ -2271,7 +2239,7 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
       if (done) return;
       await this.state.storage.delete("ai_log").catch(() => {});
       await this.state.storage.delete("ai_log_head").catch(() => {});
-      for (let i = 0; i < HAWebSocketV8.LOG_CHUNKS_MAX; i++) {
+      for (let i = 0; i < HAWebSocketV9.LOG_CHUNKS_MAX; i++) {
         await this.state.storage.delete("ai_log_chunk_" + i).catch(() => {});
         await this.state.storage.delete("ai_log_chunk_gen_" + i).catch(() => {});
       }
@@ -2305,8 +2273,8 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
         data: { original_type: entry.type, original_ts: entry.timestamp },
         timestamp: new Date().toISOString(),
       });
-      if (this.aiLog.length > HAWebSocketV8.LOG_IN_MEMORY_CAP) {
-        this.aiLog.splice(0, this.aiLog.length - HAWebSocketV8.LOG_IN_MEMORY_CAP);
+      if (this.aiLog.length > HAWebSocketV9.LOG_IN_MEMORY_CAP) {
+        this.aiLog.splice(0, this.aiLog.length - HAWebSocketV9.LOG_IN_MEMORY_CAP);
       }
     }
   }
@@ -2670,7 +2638,7 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
   // retained so existing call sites (await this.persistLog()) keep resolving.
   // ==========================================================================
   async loadLogFromStorage() {
-    const fromD1 = await this._loadAiLogFromD1(HAWebSocketV8.LOG_IN_MEMORY_CAP);
+    const fromD1 = await this._loadAiLogFromD1(HAWebSocketV9.LOG_IN_MEMORY_CAP);
     return Array.isArray(fromD1) ? fromD1 : [];
   }
 
@@ -2682,7 +2650,7 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
 
   async clearPersistedLog() {
     await this.state.storage.delete("ai_log").catch(() => {});
-    for (let i = 0; i < HAWebSocketV8.LOG_CHUNKS_MAX; i++) {
+    for (let i = 0; i < HAWebSocketV9.LOG_CHUNKS_MAX; i++) {
       await this.state.storage.delete("ai_log_chunk_" + i).catch(() => {});
       await this.state.storage.delete("ai_log_chunk_gen_" + i).catch(() => {});
     }
@@ -2702,8 +2670,8 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
     const entry = { type, message, data, timestamp: new Date().toISOString() };
     if (source) entry.source = source;
     this.aiLog.push(entry);
-    if (this.aiLog.length > HAWebSocketV8.LOG_IN_MEMORY_CAP) {
-      this.aiLog.splice(0, this.aiLog.length - HAWebSocketV8.LOG_IN_MEMORY_CAP);
+    if (this.aiLog.length > HAWebSocketV9.LOG_IN_MEMORY_CAP) {
+      this.aiLog.splice(0, this.aiLog.length - HAWebSocketV9.LOG_IN_MEMORY_CAP);
     }
     console.log("AI LOG [" + type + (source ? "/" + source : "") + "]:", message);
     this.persistLog().catch((err) => console.error("logAI persist:", err.message));
@@ -2736,7 +2704,7 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
     const timeline = persistentLog
       .filter((e) => ["chat_user", "chat_reply", "action", "action_verified", "notification", "decision", "state_change", "memory_saved", "observation_saved"].includes(e.type))
       .slice(-150)
-      .map((e) => `[${HAWebSocketV8._formatTimelineTimestamp(e.timestamp)}] ${e.type}: ${e.message}`)
+      .map((e) => `[${HAWebSocketV9._formatTimelineTimestamp(e.timestamp)}] ${e.type}: ${e.message}`)
       .join("\n");
 
     // ---- Entity context snapshot ----
@@ -2748,7 +2716,7 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
       if (domain === "switch" && isNoisySwitch(id)) continue;
       if (state.state === "unavailable" || state.state === "unknown") continue;
 
-      if (HAWebSocketV8.CONTEXT_DOMAIN_PRIORITY.includes(domain)) {
+      if (HAWebSocketV9.CONTEXT_DOMAIN_PRIORITY.includes(domain)) {
         const entry = { entity_id: id, friendly_name: attr.friendly_name || id, state: state.state };
         if (domain === "climate") {
           entry.setpoint = attr.temperature ?? null;
@@ -2770,11 +2738,11 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
         byDomain.get(domain).push(entry);
       } else if (domain === "sensor") {
         let include = false;
-        if (HAWebSocketV8.SENSOR_WHITELIST.has(deviceClass)) {
+        if (HAWebSocketV9.SENSOR_WHITELIST.has(deviceClass)) {
           include = true;
         } else if (deviceClass === "battery") {
           const pct = parseFloat(state.state);
-          include = !isNaN(pct) && pct <= HAWebSocketV8.BATTERY_LOW_THRESHOLD;
+          include = !isNaN(pct) && pct <= HAWebSocketV9.BATTERY_LOW_THRESHOLD;
         }
         if (include) {
           const entry = { entity_id: id, friendly_name: attr.friendly_name || id, state: state.state, device_class: deviceClass, unit: attr.unit_of_measurement || null };
@@ -2786,16 +2754,16 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
 
     const contextEntities = [];
     let sensorCount = 0;
-    for (const domain of [...HAWebSocketV8.CONTEXT_DOMAIN_PRIORITY, "sensor"]) {
+    for (const domain of [...HAWebSocketV9.CONTEXT_DOMAIN_PRIORITY, "sensor"]) {
       for (const entry of (byDomain.get(domain) || [])) {
-        if (contextEntities.length >= HAWebSocketV8.MAX_CONTEXT_ENTITIES) break;
+        if (contextEntities.length >= HAWebSocketV9.MAX_CONTEXT_ENTITIES) break;
         if (domain === "sensor") {
-          if (sensorCount >= HAWebSocketV8.MAX_SENSOR_CONTEXT) break;
+          if (sensorCount >= HAWebSocketV9.MAX_SENSOR_CONTEXT) break;
           sensorCount++;
         }
         contextEntities.push(entry);
       }
-      if (contextEntities.length >= HAWebSocketV8.MAX_CONTEXT_ENTITIES) break;
+      if (contextEntities.length >= HAWebSocketV9.MAX_CONTEXT_ENTITIES) break;
     }
 
     // ---- System prompt ----
@@ -2879,11 +2847,11 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
       let responseText = response.choices?.[0]?.message?.content || response.response || "";
       if (!responseText) {
         const rawReasoning = response.choices?.[0]?.message?.reasoning || "";
-        const jsonFallback = HAWebSocketV8.extractFirstJSON(rawReasoning);
+        const jsonFallback = HAWebSocketV9.extractFirstJSON(rawReasoning);
         if (jsonFallback) responseText = jsonFallback;
       }
       let parsed = null;
-      const jsonMatch = HAWebSocketV8.extractFirstJSON(responseText);
+      const jsonMatch = HAWebSocketV9.extractFirstJSON(responseText);
       if (jsonMatch) {
         try {
           parsed = JSON.parse(jsonMatch);
@@ -4023,7 +3991,7 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
       if (domain === "switch" && isNoisySwitch(id)) continue;
       if (state.state === "unavailable" || state.state === "unknown") continue;
 
-      if (HAWebSocketV8.CONTEXT_DOMAIN_PRIORITY.includes(domain)) {
+      if (HAWebSocketV9.CONTEXT_DOMAIN_PRIORITY.includes(domain)) {
         const entry = { entity_id: id, friendly_name: attr.friendly_name || id, state: state.state };
         if (domain === "climate") {
           entry.setpoint = attr.temperature ?? null;
@@ -4045,11 +4013,11 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
         byDomain.get(domain).push(entry);
       } else if (domain === "sensor") {
         let include = false;
-        if (HAWebSocketV8.SENSOR_WHITELIST.has(deviceClass)) {
+        if (HAWebSocketV9.SENSOR_WHITELIST.has(deviceClass)) {
           include = true;
         } else if (deviceClass === "battery") {
           const pct = parseFloat(state.state);
-          include = !isNaN(pct) && pct <= HAWebSocketV8.BATTERY_LOW_THRESHOLD;
+          include = !isNaN(pct) && pct <= HAWebSocketV9.BATTERY_LOW_THRESHOLD;
         }
         if (include) {
           const entry = { entity_id: id, friendly_name: attr.friendly_name || id, state: state.state, device_class: deviceClass, unit: attr.unit_of_measurement || null };
@@ -4061,26 +4029,37 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
 
     const contextEntities = [];
     let sensorCount = 0;
-    for (const domain of [...HAWebSocketV8.CONTEXT_DOMAIN_PRIORITY, "sensor"]) {
+    for (const domain of [...HAWebSocketV9.CONTEXT_DOMAIN_PRIORITY, "sensor"]) {
       for (const entry of (byDomain.get(domain) || [])) {
-        if (contextEntities.length >= HAWebSocketV8.MAX_CONTEXT_ENTITIES) break;
+        if (contextEntities.length >= HAWebSocketV9.MAX_CONTEXT_ENTITIES) break;
         if (domain === "sensor") {
-          if (sensorCount >= HAWebSocketV8.MAX_SENSOR_CONTEXT) break;
+          if (sensorCount >= HAWebSocketV9.MAX_SENSOR_CONTEXT) break;
           sensorCount++;
         }
         contextEntities.push(entry);
       }
-      if (contextEntities.length >= HAWebSocketV8.MAX_CONTEXT_ENTITIES) break;
+      if (contextEntities.length >= HAWebSocketV9.MAX_CONTEXT_ENTITIES) break;
     }
     return contextEntities;
   }
 
   _buildNativeTimeline() {
-    const relevantTypes = ["chat_user", "chat_reply", "action", "action_verified", "notification", "decision", "state_change", "memory_saved", "observation_saved"];
+    // V9 triage: chat_user and chat_reply entries are excluded because they
+    // duplicate the OpenAI `conversation_history` messages array — the model
+    // was previously re-reading its own multi-paragraph past replies in prose
+    // on every turn, costing ~5k duplicate tokens. Action/state/snapshot
+    // events are the load-bearing content. Window: last 2 hours OR last 30
+    // events, whichever is tighter.
+    const relevantTypes = ["action", "action_verified", "notification", "decision", "state_change", "memory_saved", "observation_saved"];
+    const cutoff = Date.now() - 2 * 60 * 60 * 1000;
     return this.aiLog
-      .filter((e) => relevantTypes.includes(e.type))
-      .slice(-150)
-      .map((e) => `[${HAWebSocketV8._formatTimelineTimestamp(e.timestamp)}] ${e.type}${e.source ? "/" + e.source : ""}: ${e.message}`)
+      .filter((e) => {
+        if (!relevantTypes.includes(e.type)) return false;
+        const t = Date.parse(e.timestamp);
+        return isNaN(t) ? true : t >= cutoff;
+      })
+      .slice(-30)
+      .map((e) => `[${HAWebSocketV9._formatTimelineTimestamp(e.timestamp)}] ${e.type}${e.source ? "/" + e.source : ""}: ${e.message}`)
       .join("\n");
   }
 
@@ -4106,13 +4085,21 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
       climatePreamble = ""
     } = ctx;
     const snapshot = this._buildHouseStateSnapshot();
-    const stateHealth = {
-      ws_connected: this.connected,
-      ws_authenticated: this.authenticated,
-      states_ready: this.statesReady,
-      last_pong_age_seconds: this.lastPongAt ? Math.round((Date.now() - this.lastPongAt) / 1e3) : null,
-      cached_entity_count: this.stateCache.size
-    };
+    // V9: only surface gateway health when something is wrong. Silence on
+    // healthy turns saves the noise of confirming "everything green" every prompt.
+    const unhealthy = !this.connected || !this.authenticated || !this.statesReady;
+    const healthBlock = unhealthy
+      ? `GATEWAY HEALTH (DEGRADED — flag in reply if relevant):
+${JSON.stringify({
+          ws_connected: this.connected,
+          ws_authenticated: this.authenticated,
+          states_ready: this.statesReady,
+          last_pong_age_seconds: this.lastPongAt ? Math.round((Date.now() - this.lastPongAt) / 1e3) : null,
+          cached_entity_count: this.stateCache.size
+        }, null, 1)}
+
+`
+      : "";
     const SCORE_FLOOR = 0.65;
     const relevantMemories = semanticMemories.filter(m => typeof m.score === "number" && m.score >= SCORE_FLOOR);
     const relevantObservations = semanticObservations.filter(o => typeof o.score === "number" && o.score >= SCORE_FLOOR);
@@ -4120,10 +4107,7 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
 
 You are answering a chat from "${from}". Be concise. Take action when asked. If you took an action, say what you did plainly, past tense, one sentence. If a question needs the timeline or live state, USE THE TOOLS — don't guess.
 
-GATEWAY HEALTH:
-${JSON.stringify(stateHealth, null, 1)}
-
-TOOLS — attached to this request. Invoke them directly. The turn you emit NO tool calls is your final reply.
+${healthBlock}TOOLS — attached to this request. Invoke them directly. The turn you emit NO tool calls is your final reply.
 - call_service — execute any HA service (lights, locks, covers, climate, scripts, scenes). Use for destructive/irreversible actions too.
 - ai_send_notification — push to phone AND log to timeline. Reserve for security events, aux heat >5000W sustained, leaks, unexpected entry.
 - save_memory — persist a CONFIRMED fact (100-slot FIFO). CHAT-PATH RULE: see SAVING MEMORIES / OBSERVATIONS below — only on explicit user request.
@@ -4198,47 +4182,13 @@ Do NOT call save_memory/save_observation for:
 
 save_observation is for patterns / hypotheses prefixed with a [topic-tag]; stored in D1, deduplicated by topic-tag (same [tag] overwrites prior). Use replaces="[topic-tag]" to explicitly overwrite under the same tag.
 
-${this._saveMemoryCriteriaBlock()}
-
-CHAT ACTION CONFIRMATION:
-The rule depends on WHO proposed the action.
-
-CASE A — User-initiated action.
-The user has typed a direct instruction to actuate a device. Examples:
-- "close the garage door"
-- "lock the front door"
-- "open the basement bay"
-- "set the basement to 68"
-
-In Case A, the user's message IS the confirmation. Act immediately. Do not ask "are you sure?" — that's annoying and slows things down. The user committed by typing the instruction.
-
-CASE B — Agent-initiated action (you proposed it).
-You suggested an action and are waiting for the user to confirm. Examples of you proposing:
-- "Want me to close the garage door?"
-- "Should I lock everything up?"
-- "I noticed the bay has been open a while — close it?"
-
-In Case B, the user's NEXT message must be EXPLICIT, UNAMBIGUOUS, AFFIRMATIVE confirmation before you actuate.
-
-What counts as confirmation in Case B:
-- "yes" / "yes please" / "do it" / "go ahead" / "close it" / "lock it" / "confirmed"
-- A direct restatement of the action
-
-What does NOT count in Case B, even though you asked first:
-- Sound effects, beatboxes, emojis, reactions ("haha", "🙃", "(beatbox)", "lol")
-- Silence or no response
-- Topic changes — if the user's next message is about something else, treat your question as unanswered and DO NOT act
-- Vague positive vibes ("ok", "sure" — these are weak; if there is ANY ambiguity, ask again with a yes/no framing)
-- Charitable interpretation. If you find yourself reasoning "I'll interpret this as yes because they seem engaged" — STOP. That reasoning is the bug. Engagement is not consent.
-
-When in Case B and confirmation is unclear, the correct action is to ask once more with an explicit yes/no framing:
-  "Just to confirm — close the main garage bay now? Yes or no."
-
-If confirmation is still unclear after that, take NO action. Wait.
-
-The asymmetry is intentional. A direct command from the user is fast. A response to your own offer requires real confirmation, because you're the one interpreting ambiguity, and ambiguity in physical actuation is dangerous.
-
-This applies to: covers (garage/basement bay doors, blinds), locks, alarm arm/disarm, high-power appliances. For lights, switches, and climate within normal range, you may act on weaker signals — but use judgment.
+ACTION CONFIRMATION:
+- USER-initiated commands ("close the garage", "set basement 68") → act immediately, no confirmation prompt. The instruction IS the consent.
+- AGENT-initiated proposals ("Want me to close the garage?") → user's NEXT message must be EXPLICIT affirmative: "yes" / "do it" / "go ahead" / "close it" / direct restatement.
+- NOT confirmation, even after you asked: emojis, beatboxes, sound effects, "ok" / "sure" alone, silence, topic changes. Your own reasoning that engagement = consent IS the bug. Charitable interpretation IS the bug.
+- If ambiguous, re-ask exactly ONCE with explicit yes/no framing ("Just to confirm — close the main garage bay now? Yes or no."). Still unclear after that: NO action, wait.
+- Asymmetric on purpose: direct commands are fast; responses to your own offers need real confirmation because ambiguity in physical actuation is dangerous.
+- Applies to: covers (garage / basement bay doors, blinds), locks, alarm arm/disarm, high-power appliances. For lights, switches, climate in normal range: looser, use judgment.
 
 QUICK FACTS:
 - climate.t6_pro_z_wave_programmable_thermostat_2 = main level INCLUDING MBR
@@ -4266,7 +4216,7 @@ NARRATION OVER ENUMERATION. Query results come back as raw rows. Synthesize them
 
 ${snapshot}
 
-UNIFIED TIMELINE — recent events (chat, state changes, your past actions). Already pre-formatted in Central time:
+UNIFIED TIMELINE — recent NON-CHAT events (actions, state changes, notifications, memory/observation writes), last 2h. Chat back-and-forth is in the message history below; don't expect it here. Central time:
 
 ${timeline || "Timeline is empty."}
 
@@ -4285,9 +4235,41 @@ ${semanticDevices.map((d) => "- [score " + (typeof d.score === "number" ? d.scor
 ` : ""}${semanticServices.length > 0 ? `RELEVANT HA SERVICES (semantic top-matches — call_service candidates):
 ${semanticServices.map((s) => "- [score " + (typeof s.score === "number" ? s.score.toFixed(2) : "?") + "] " + (s.friendly_name || s.ref_id || "")).join("\n")}
 
-` : ""}RELEVANT ENTITIES (${contextEntities.length}, semantic top-K from live state cache) — an entity not here may still exist; use vector_search or get_state to probe. state=null means HA hasn't reported a value. Don't invent entity_ids or fabricate timestamps for events you didn't witness.
+` : ""}RELEVANT ENTITIES (${contextEntities.length}, semantic top-K from live state cache) — entity not here may still exist; use vector_search or get_state to probe. state=null means HA hasn't reported a value. Don't invent entity_ids.
 
-${JSON.stringify(contextEntities, null, 1)}
+${contextEntities.map((e) => {
+  const fmtAge = (s) => {
+    if (s == null) return "";
+    if (s < 60) return `${s}s ago`;
+    if (s < 3600) return `${Math.round(s / 60)}m ago`;
+    if (s < 86400) return `${Math.round(s / 3600)}h ago`;
+    return `${Math.round(s / 86400)}d ago`;
+  };
+  const id = e.entity_id || "?";
+  const name = e.friendly_name && e.friendly_name !== id ? e.friendly_name : "";
+  const area = e.area || "";
+  const meta = [name, area].filter(Boolean).join(", ");
+  const head = meta ? `${id} (${meta})` : id;
+  const state = e.state == null ? "null" : String(e.state);
+  let attrs = "";
+  if (e.domain === "climate") {
+    const parts = [];
+    if (e.current_temp != null) parts.push(`${e.current_temp}°`);
+    if (e.setpoint != null) parts.push(`set ${e.setpoint}°`);
+    if (e.hvac_action) parts.push(`action ${e.hvac_action}`);
+    if (e.hvac_mode && e.hvac_mode !== e.state) parts.push(`mode ${e.hvac_mode}`);
+    if (parts.length) attrs = ` (${parts.join(", ")})`;
+  } else if (e.domain === "sensor" && e.unit) {
+    attrs = ` ${e.unit}`;
+  } else if (e.domain === "weather") {
+    const parts = [];
+    if (e.temperature != null) parts.push(`${e.temperature}°`);
+    if (e.humidity != null) parts.push(`${e.humidity}% RH`);
+    if (parts.length) attrs = ` (${parts.join(", ")})`;
+  }
+  const age = fmtAge(e.age_seconds);
+  return `- ${head} = ${state}${attrs}${age ? "  • " + age : ""}`;
+}).join("\n")}
 
 TRUTHFULNESS — STATE CLAIMS:
 - Before asserting the current state of ANY entity in a reply — locks, covers, lights, switches, climate, sensors, power, presence, anything — you must have either (a) the entity in the HOUSE_STATE_SNAPSHOT block above, (b) called get_state on it in this turn, or (c) seen the entity_id and value explicitly in the pre-injected context block. If none of those is true, do NOT state the value.

@@ -5,3 +5,7 @@ node_modules/
 .env.*
 dist/
 .claude/
+
+# Local-only system-prompt diagnostic dumps (contain household PII)
+.prompt-dump.json
+.prompt-extracted.txt

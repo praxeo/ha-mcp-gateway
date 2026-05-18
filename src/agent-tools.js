@@ -87,12 +87,16 @@ const ACTION_TOOLS = [
     function: {
       name: "save_memory",
       description:
-        "Save a CONFIRMED fact for long-term reference. 100-slot FIFO cap. Use only for " +
-        "stable, validated facts — preferences John has confirmed, events you've witnessed " +
-        "and verified, knowledge that won't churn. Do NOT use for hypotheses, patterns in " +
-        "progress, or speculative observations — those go to save_observation. Once a " +
-        "memory is saved, it persists across sessions until FIFO eviction. Memories are " +
-        "also embedded into the knowledge index so vector_search can surface them by topic.",
+        "Persist a durable household fact in the 100-slot FIFO ai_memory store. " +
+        "SAVE: rules / aliases ('office light' = X), user preferences, authorization grants, " +
+        "inference rules, identity facts about people/pets/visitors, structural facts that won't change soon. " +
+        "DO NOT SAVE: timestamped events, sensor readings, transient state, single-occurrence observations " +
+        "(use save_observation), anything obsolete in ~30 days, anything ai_log already captures. " +
+        "Disambiguation test: 'useful in 30 days AND user would explicitly want this remembered?' " +
+        "If either no, don't save. EXCEPTION: when user explicitly says 'remember X' / 'save this' / equivalent, " +
+        "save regardless of the criteria and confirm verbatim in your reply. " +
+        "Memories are embedded into the vector index — vector_search surfaces them by topic. " +
+        "Hypotheses / patterns-in-progress go to save_observation, not here.",
       parameters: {
         type: "object",
         properties: {
