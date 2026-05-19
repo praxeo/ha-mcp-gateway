@@ -807,8 +807,10 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
             service: body.service,
             service_data: body.data || {},
             target: body.target || {},
+            return_response: body.return_response === true
           });
-          return new Response(JSON.stringify(result), { headers });
+          const payload = body.return_response === true ? (result?.result?.response ?? null) : result;
+          return new Response(JSON.stringify(payload), { headers });
         }
 
         case "/entity_registry": {
@@ -3039,7 +3041,8 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
           domain: action.domain,
           service: action.service,
           service_data: action.data || {},
-          target: action.target || {}
+          target: action.target || {},
+          return_response: action.return_response === true
         });
         this.logAI("action", "Called " + action.domain + "." + action.service, action.data || {}, source);
         const entityId = action.data && action.data.entity_id || action.target && action.target.entity_id;
@@ -3075,7 +3078,7 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
             );
           }
         }
-        return result;
+        return action.return_response === true ? (result?.result?.response ?? null) : result;
       }
       case "send_notification": {
         console.log("AI sending notification:", action.message);
@@ -3427,7 +3430,8 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
             domain: args.domain,
             service: args.service,
             data: args.data || {},
-            target: args.target || {}
+            target: args.target || {},
+            return_response: args.return_response === true
           }, "native_loop");
 
         case "ai_send_notification":

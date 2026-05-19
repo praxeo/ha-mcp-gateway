@@ -24,7 +24,8 @@ const ACTION_TOOLS = [
         "media players — anything you need to actually DO in the house. The domain and " +
         "service are separate strings (e.g., domain='light', service='turn_on'). Put " +
         "entity_id and any service-specific parameters (brightness, temperature, etc.) " +
-        "inside the `data` object.",
+        "inside the `data` object. " +
+        "For services that return data (e.g. weather.get_forecasts), set return_response: true.",
       parameters: {
         type: "object",
         properties: {
@@ -45,6 +46,15 @@ const ACTION_TOOLS = [
             type: "object",
             description: "Optional HA target object. Usually leave empty and put entity_id in data instead.",
             additionalProperties: true
+          },
+          return_response: {
+            type: "boolean",
+            description:
+              "Set to true for services that return data instead of (or in addition to) " +
+              "mutating state — e.g. weather.get_forecasts (daily/hourly forecast), " +
+              "calendar.get_events, conversation.process. When true, the tool result is " +
+              "the service's response payload (e.g. { 'weather.forecast_home': { forecast: [...] } }). " +
+              "Default false; leave unset for normal state-mutating services."
           }
         },
         required: ["domain", "service"]
