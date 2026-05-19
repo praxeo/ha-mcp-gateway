@@ -3678,15 +3678,37 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
     }
   }
 
-  _getHomeLatLon() {
+  async _getHomeLatLon() {
+    // Preferred: the home weather entity's static lat/lon attrs.
     const home = this.stateCache.get("weather.forecast_home");
-    if (!home) return { error: "weather.forecast_home not in state cache" };
-    const lat = home.attributes?.latitude;
-    const lon = home.attributes?.longitude;
-    if (typeof lat !== "number" || typeof lon !== "number") {
-      return { error: "weather.forecast_home has no latitude/longitude attributes" };
+    if (home) {
+      const lat = home.attributes?.latitude;
+      const lon = home.attributes?.longitude;
+      if (typeof lat === "number" && typeof lon === "number") {
+        return { lat: Number(lat.toFixed(4)), lon: Number(lon.toFixed(4)) };
+      }
     }
-    return { lat: Number(lat.toFixed(4)), lon: Number(lon.toFixed(4)) };
+    // Fallback: HA core config — always carries the home's lat/lon regardless
+    // of whether any weather entity is healthy.
+    try {
+      const haUrl = this.env.HA_URL.replace(/\/$/, "");
+      const resp = await fetch(haUrl + "/api/config", {
+        headers: { Authorization: "Bearer " + this.env.HA_TOKEN }
+      });
+      if (resp.ok) {
+        const cfg = await resp.json();
+        if (typeof cfg.latitude === "number" && typeof cfg.longitude === "number") {
+          return {
+            lat: Number(cfg.latitude.toFixed(4)),
+            lon: Number(cfg.longitude.toFixed(4))
+          };
+        }
+      }
+    } catch {}
+    return {
+      error:
+        "Could not resolve home lat/lon — weather.forecast_home attributes missing and HA /api/config unavailable."
+    };
   }
 
   async _nwsGetPoint(lat, lon) {
@@ -3710,7 +3732,7 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
 
   async _executeGetNwsWeather(args) {
     try {
-      const home = this._getHomeLatLon();
+      const home = await this._getHomeLatLon();
       if (home.error) return home;
       const { lat, lon } = home;
 
@@ -3782,7 +3804,7 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
 
   async _executeGetNwsDiscussion(args) {
     try {
-      const home = this._getHomeLatLon();
+      const home = await this._getHomeLatLon();
       if (home.error) return home;
       const point = await this._nwsGetPoint(home.lat, home.lon);
 
