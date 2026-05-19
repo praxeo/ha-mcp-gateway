@@ -448,6 +448,51 @@ const READ_TOOLS = [
         }
       }
     }
+  },
+  {
+    type: "function",
+    function: {
+      name: "get_nws_weather",
+      description:
+        "Get the official NWS forecast for the home location: active alerts, next 24h hourly " +
+        "(temperature, probability of precipitation, wind, short summary), and the 7-day daily " +
+        "outlook (highs/lows, PoP, detailed forecast). Use for questions about temperature, " +
+        "rain timing, wind, or any active watches/warnings. Lat/lon is read automatically from " +
+        "weather.forecast_home attributes; no parameters required. Response is cached ~1 hour. " +
+        "When alerts are present or you need meteorologist nuance (frontal timing, confidence, " +
+        "severe potential), follow up with get_nws_discussion.",
+      parameters: {
+        type: "object",
+        properties: {
+          force_refresh: {
+            type: "boolean",
+            description: "Bypass the ~1h cache and fetch live from api.weather.gov. Default false."
+          }
+        }
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "get_nws_discussion",
+      description:
+        "Get the latest NWS Area Forecast Discussion (AFD) for the home's forecast office — " +
+        "the meteorologist-written narrative covering synoptic setup, model agreement/disagreement, " +
+        "confidence, frontal timing, and severe weather outlook. Use when get_nws_weather shows " +
+        "alerts or high PoP and the user asks 'why', 'how confident', or 'is severe weather " +
+        "coming'. Office (CWA) is auto-derived from weather.forecast_home (e.g. BMX for " +
+        "Birmingham). Response is cached ~4 hours (matches AFD issuance cadence).",
+      parameters: {
+        type: "object",
+        properties: {
+          force_refresh: {
+            type: "boolean",
+            description: "Bypass the ~4h cache and fetch live from api.weather.gov. Default false."
+          }
+        }
+      }
+    }
   }
 ];
 
@@ -484,5 +529,7 @@ export const CHAT_ALLOWED_TOOL_NAMES = new Set([
   "report_bug",
   "query_state_history",
   "query_automation_runs",
-  "query_causal_chain"
+  "query_causal_chain",
+  "get_nws_weather",
+  "get_nws_discussion"
 ]);

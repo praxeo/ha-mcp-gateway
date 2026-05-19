@@ -3630,11 +3630,200 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
           }
         }
 
+        case "get_nws_weather":
+          return await this._executeGetNwsWeather(args);
+
+        case "get_nws_discussion":
+          return await this._executeGetNwsDiscussion(args);
+
         default:
           return { error: "Unknown native tool: " + name };
       }
     } catch (err) {
       return { error: err.message || String(err) };
+    }
+  }
+
+  // ========================================================================
+  // NWS (api.weather.gov) — public, key-free forecast API.
+  //
+  // Tools: get_nws_weather (alerts + hourly 24h + daily 7-day) and
+  // get_nws_discussion (latest Area Forecast Discussion prose).
+  //
+  // Caching lives in DO storage:
+  //   nws:point:{lat},{lon} → gridpoint metadata, ~30d (immutable in practice)
+  //   nws:weather:{lat},{lon} → bundled forecast, ~1h
+  //   nws:afd:{cwa} → latest AFD text + issued time, ~4h
+  //
+  // Lat/lon is read from weather.forecast_home so the user doesn't have to
+  // configure anything; the home entity already carries this from HA.
+  // ========================================================================
+  async _nwsFetch(url) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 12000);
+    try {
+      const resp = await fetch(url, {
+        headers: {
+          "User-Agent": "ha-mcp-gateway (https://github.com/praxeo/ha-mcp-gateway)",
+          "Accept": "application/geo+json, application/ld+json, application/json"
+        },
+        signal: controller.signal
+      });
+      if (!resp.ok) {
+        throw new Error(`NWS ${resp.status}: ${(await resp.text()).slice(0, 200)}`);
+      }
+      return await resp.json();
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  _getHomeLatLon() {
+    const home = this.stateCache.get("weather.forecast_home");
+    if (!home) return { error: "weather.forecast_home not in state cache" };
+    const lat = home.attributes?.latitude;
+    const lon = home.attributes?.longitude;
+    if (typeof lat !== "number" || typeof lon !== "number") {
+      return { error: "weather.forecast_home has no latitude/longitude attributes" };
+    }
+    return { lat: Number(lat.toFixed(4)), lon: Number(lon.toFixed(4)) };
+  }
+
+  async _nwsGetPoint(lat, lon) {
+    const key = `nws:point:${lat},${lon}`;
+    const cached = await this.state.storage.get(key);
+    if (cached && (Date.now() - cached.ts) < 30 * 24 * 60 * 60 * 1000) {
+      return cached.data;
+    }
+    const res = await this._nwsFetch(`https://api.weather.gov/points/${lat},${lon}`);
+    if (!res?.properties) throw new Error("NWS /points returned no properties");
+    const data = {
+      cwa: res.properties.cwa,
+      gridX: res.properties.gridX,
+      gridY: res.properties.gridY,
+      forecastUrl: res.properties.forecast,
+      forecastHourlyUrl: res.properties.forecastHourly
+    };
+    await this.state.storage.put(key, { ts: Date.now(), data });
+    return data;
+  }
+
+  async _executeGetNwsWeather(args) {
+    try {
+      const home = this._getHomeLatLon();
+      if (home.error) return home;
+      const { lat, lon } = home;
+
+      const cacheKey = `nws:weather:${lat},${lon}`;
+      if (!args.force_refresh) {
+        const cached = await this.state.storage.get(cacheKey);
+        if (cached && (Date.now() - cached.ts) < 60 * 60 * 1000) {
+          return {
+            ...cached.data,
+            cached: true,
+            cache_age_min: Math.round((Date.now() - cached.ts) / 60000)
+          };
+        }
+      }
+
+      const point = await this._nwsGetPoint(lat, lon);
+
+      const [alertsRes, hourlyRes, dailyRes] = await Promise.all([
+        this._nwsFetch(`https://api.weather.gov/alerts/active?point=${lat},${lon}`),
+        this._nwsFetch(point.forecastHourlyUrl),
+        this._nwsFetch(point.forecastUrl)
+      ]);
+
+      const alerts = (alertsRes?.features || []).map((f) => ({
+        event: f.properties.event,
+        severity: f.properties.severity,
+        urgency: f.properties.urgency,
+        certainty: f.properties.certainty,
+        headline: f.properties.headline,
+        onset: f.properties.onset,
+        ends: f.properties.ends,
+        description: f.properties.description?.slice(0, 1200) || ""
+      }));
+
+      const hourly = (hourlyRes?.properties?.periods || []).slice(0, 24).map((p) => ({
+        time: p.startTime,
+        temp_f: p.temperature,
+        pop: p.probabilityOfPrecipitation?.value ?? 0,
+        wind: p.windSpeed,
+        wind_dir: p.windDirection,
+        short: p.shortForecast
+      }));
+
+      const daily = (dailyRes?.properties?.periods || []).map((p) => ({
+        name: p.name,
+        is_daytime: p.isDaytime,
+        temp_f: p.temperature,
+        temp_label: p.isDaytime ? "high" : "low",
+        pop: p.probabilityOfPrecipitation?.value ?? 0,
+        wind: p.windSpeed,
+        short: p.shortForecast,
+        detailed: p.detailedForecast
+      }));
+
+      const result = {
+        location: { lat, lon, cwa: point.cwa, grid: `${point.gridX},${point.gridY}` },
+        alerts,
+        hourly_24h: hourly,
+        daily_7day: daily,
+        generated_at: new Date().toISOString()
+      };
+
+      await this.state.storage.put(cacheKey, { ts: Date.now(), data: result });
+      return result;
+    } catch (err) {
+      return { error: "NWS weather fetch failed: " + err.message };
+    }
+  }
+
+  async _executeGetNwsDiscussion(args) {
+    try {
+      const home = this._getHomeLatLon();
+      if (home.error) return home;
+      const point = await this._nwsGetPoint(home.lat, home.lon);
+
+      const cacheKey = `nws:afd:${point.cwa}`;
+      if (!args.force_refresh) {
+        const cached = await this.state.storage.get(cacheKey);
+        if (cached && (Date.now() - cached.ts) < 4 * 60 * 60 * 1000) {
+          return {
+            ...cached.data,
+            cached: true,
+            cache_age_min: Math.round((Date.now() - cached.ts) / 60000)
+          };
+        }
+      }
+
+      const listRes = await this._nwsFetch(
+        `https://api.weather.gov/products/types/AFD/locations/${point.cwa}`
+      );
+      const products = listRes?.["@graph"] || [];
+      if (!products.length) {
+        return { error: "No AFD products found for office " + point.cwa };
+      }
+      // Most recent first; sort defensively by issuanceTime desc.
+      products.sort((a, b) => (b.issuanceTime || "").localeCompare(a.issuanceTime || ""));
+      const latest = products[0];
+
+      const productRes = await this._nwsFetch(
+        `https://api.weather.gov/products/${latest.id}`
+      );
+
+      const data = {
+        office: point.cwa,
+        product_id: latest.id,
+        issued: productRes?.issuanceTime || latest.issuanceTime,
+        text: productRes?.productText || ""
+      };
+
+      await this.state.storage.put(cacheKey, { ts: Date.now(), data });
+      return data;
+    } catch (err) {
+      return { error: "NWS AFD fetch failed: " + err.message };
     }
   }
 
