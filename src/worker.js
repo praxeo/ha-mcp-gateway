@@ -1198,9 +1198,9 @@ const CHAT_HTML = `<!DOCTYPE html>
   .quick-actions {
     display: flex;
     flex-wrap: wrap;
-    gap: 12px;
+    gap: 16px;
     justify-content: center;
-    margin-top: 12px;
+    margin-top: 16px;
     padding: 0 8px;
   }
 
@@ -1208,21 +1208,34 @@ const CHAT_HTML = `<!DOCTYPE html>
     background: var(--surface-hover);
     border: 1px solid var(--border);
     color: var(--text);
-    padding: 14px 22px;
-    border-radius: 14px;
-    font-size: 14px;
+    padding: 20px 32px;
+    border-radius: 16px;
+    font-size: 16px;
     font-weight: 500;
     cursor: pointer;
     font-family: inherit;
     transition: all 0.15s;
-    min-height: 48px;
+    min-height: 64px;
     -webkit-tap-highlight-color: transparent;
+  }
+
+  .quick-btn.garage {
+    padding: 24px 36px;
+    font-size: 18px;
+    font-weight: 600;
+    min-height: 80px;
+    border-color: var(--accent);
+    background: var(--accent-dim);
   }
 
   .quick-btn:hover {
     color: var(--text);
     border-color: var(--accent);
     background: var(--accent-dim);
+  }
+
+  .quick-btn.garage:active {
+    transform: scale(0.97);
   }
 
   /* ── Markdown-ish formatting ── */
@@ -1408,10 +1421,10 @@ const CHAT_HTML = `<!DOCTYPE html>
       <p>Chat with your smart home. Ask about status, control devices, or just say hello.</p>
       <div class="quick-actions">
         <button class="quick-btn" onclick="sendQuick('What is the status of the house?')">House status</button>
-        <button class="quick-btn" onclick="sendQuick('Open the main garage door')">Open main garage</button>
-        <button class="quick-btn" onclick="sendQuick('Close the main garage door')">Close main garage</button>
-        <button class="quick-btn" onclick="sendQuick('Open the basement bay door')">Open basement</button>
-        <button class="quick-btn" onclick="sendQuick('Close the basement bay door')">Close basement</button>
+        <button class="quick-btn garage" onclick="sendQuick('Open the main garage door')">Open main garage</button>
+        <button class="quick-btn garage" onclick="sendQuick('Close the main garage door')">Close main garage</button>
+        <button class="quick-btn garage" onclick="sendQuick('Open the basement bay door')">Open basement</button>
+        <button class="quick-btn garage" onclick="sendQuick('Close the basement bay door')">Close basement</button>
         <button class="quick-btn" onclick="sendQuick(&quot;What's the climate? Inside temp, AC status, outside temp, today's high and low&quot;)">Climate</button>
       </div>
     </div>
