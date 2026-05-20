@@ -25,7 +25,7 @@ function sanitizeChannelKey(from) {
   return cleaned.substring(0, 64) || "default";
 }
 
-export class HAWebSocketV12 {
+export class HAWebSocketV13 {
   // Static config for prioritized entity context building
   static CONTEXT_DOMAIN_PRIORITY = [
     "alarm_control_panel", "climate", "lock", "cover", "binary_sensor",
@@ -124,7 +124,7 @@ export class HAWebSocketV12 {
     return {
       fired_at_ms: ms,
       fired_at_iso: isoTs,
-      fired_at_central: HAWebSocketV12._formatTimelineTimestamp(isoTs)
+      fired_at_central: HAWebSocketV13._formatTimelineTimestamp(isoTs)
     };
   }
 
@@ -566,12 +566,12 @@ Exception: when the user explicitly says "remember X" or "save a memory" or equi
 
   static climateTriggerMatches(text) {
     if (!text || typeof text !== "string") return false;
-    return HAWebSocketV12.CLIMATE_TRIGGER_RE.test(text);
+    return HAWebSocketV13.CLIMATE_TRIGGER_RE.test(text);
   }
 
   static houseStatusTriggerMatches(text) {
     if (!text || typeof text !== "string") return false;
-    return HAWebSocketV12.HOUSE_STATUS_TRIGGER_RE.test(text);
+    return HAWebSocketV13.HOUSE_STATUS_TRIGGER_RE.test(text);
   }
 
   static _seasonDominant(monthIdx) {
@@ -669,7 +669,7 @@ Exception: when the user explicitly says "remember X" or "save a memory" or equi
 
   async _buildClimatePreambleIfNeeded(triggerText, source = "chat") {
     if (this.env.CLIMATE_PREAMBLE_ENABLED === "false") return null;
-    if (!HAWebSocketV12.climateTriggerMatches(triggerText)) return null;
+    if (!HAWebSocketV13.climateTriggerMatches(triggerText)) return null;
     if (!this.connected || !this.authenticated) return null;
 
     const ok = await this._fetchClimateData();
@@ -681,13 +681,13 @@ Exception: when the user explicitly says "remember X" or "save a memory" or equi
     const nowStr = nowDate.toLocaleString("en-US", { timeZone: "America/Chicago", timeZoneName: "short" });
     const monthFmt = new Intl.DateTimeFormat("en-US", { timeZone: "America/Chicago", month: "numeric" });
     const monthIdx = parseInt(monthFmt.format(nowDate), 10) - 1;
-    const seasonStr = HAWebSocketV12._seasonDominant(monthIdx);
+    const seasonStr = HAWebSocketV13._seasonDominant(monthIdx);
 
     const tempStr = (w.temperature !== null && w.temperature !== undefined) ? `${w.temperature}°F` : "n/a";
     const condStr = w.state || "unknown";
 
-    const hl = HAWebSocketV12._forecastHighLow(w.forecast);
-    const trend = HAWebSocketV12._forecastTrend(w.forecast);
+    const hl = HAWebSocketV13._forecastHighLow(w.forecast);
+    const trend = HAWebSocketV13._forecastTrend(w.forecast);
     const forecastLine = hl
       ? `Forecast next 12h: high ${hl.high}°F, low ${hl.low}°F, trend ${trend || "stable"}`
       : `Forecast next 12h: unavailable (no forecast attribute)`;
@@ -726,8 +726,8 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
 
     if (!this._logInitialized) {
       this.aiLog = await this.loadLogFromStorage();
-      if (this.aiLog.length > HAWebSocketV12.LOG_IN_MEMORY_CAP) {
-        this.aiLog = this.aiLog.slice(-HAWebSocketV12.LOG_IN_MEMORY_CAP);
+      if (this.aiLog.length > HAWebSocketV13.LOG_IN_MEMORY_CAP) {
+        this.aiLog = this.aiLog.slice(-HAWebSocketV13.LOG_IN_MEMORY_CAP);
       }
       this._logInitialized = true;
     }
@@ -882,7 +882,7 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
 
         case "/ai_log": {
           const count = parseInt(url.searchParams.get("count") || "50");
-          if (count > HAWebSocketV12.LOG_IN_MEMORY_CAP) {
+          if (count > HAWebSocketV13.LOG_IN_MEMORY_CAP) {
             const rows = await this._loadAiLogFromD1(count);
             return new Response(JSON.stringify(Array.isArray(rows) ? rows : []), { headers });
           }
@@ -1223,7 +1223,7 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
     if (event.event_type === "automation_triggered" && event.data) {
       const ctx = event.context || {};
       const { fired_at_ms, fired_at_iso, fired_at_central } =
-        HAWebSocketV12._tsFromMs(Date.parse(event.time_fired) || Date.now());
+        HAWebSocketV13._tsFromMs(Date.parse(event.time_fired) || Date.now());
       this._writeAutomationRunToD1({
         automation_id: event.data.entity_id || null,
         automation_name: event.data.name || null,
@@ -1242,7 +1242,7 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
     if (event.event_type === "call_service" && event.data) {
       const ctx = event.context || {};
       const { fired_at_ms, fired_at_iso, fired_at_central } =
-        HAWebSocketV12._tsFromMs(Date.parse(event.time_fired) || Date.now());
+        HAWebSocketV13._tsFromMs(Date.parse(event.time_fired) || Date.now());
       const targets = event.data.service_data ? event.data.service_data.entity_id : null;
       const targetIds = Array.isArray(targets) ? targets.join(",") : (targets || null);
       this._writeServiceCallToD1({
@@ -1281,7 +1281,7 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
       // every real transition lands in the state_changes table.
       if (newState && oldState && newState.state !== oldState.state) {
         const { fired_at_ms, fired_at_iso, fired_at_central } =
-          HAWebSocketV12._tsFromMs(
+          HAWebSocketV13._tsFromMs(
             Date.parse(newState.last_changed || newState.last_updated) || Date.now()
           );
         this._touchLastEventSeen(fired_at_ms);
@@ -1360,25 +1360,25 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
     const out = [];
     for (const [id, s] of this.stateCache) {
       const domain = id.split(".")[0];
-      if (!HAWebSocketV12.SNAPSHOT_DOMAIN_ALLOWLIST.has(domain)) continue;
+      if (!HAWebSocketV13.SNAPSHOT_DOMAIN_ALLOWLIST.has(domain)) continue;
       if (s.state === "unavailable" || s.state === "unknown") continue;
       if (domain === "switch" && isNoisySwitch(id)) continue;
 
       const attrs = s.attributes || {};
       if (domain === "sensor") {
         const deviceClass = attrs.device_class || "";
-        if (HAWebSocketV12.SENSOR_WHITELIST.has(deviceClass)) {
+        if (HAWebSocketV13.SENSOR_WHITELIST.has(deviceClass)) {
           // keep
         } else if (deviceClass === "battery") {
           const pct = parseFloat(s.state);
-          if (isNaN(pct) || pct > HAWebSocketV12.BATTERY_LOW_THRESHOLD) continue;
+          if (isNaN(pct) || pct > HAWebSocketV13.BATTERY_LOW_THRESHOLD) continue;
         } else {
           continue;
         }
       }
 
       const filteredAttrs = {};
-      for (const k of HAWebSocketV12.SNAPSHOT_ATTR_ALLOWLIST) {
+      for (const k of HAWebSocketV13.SNAPSHOT_ATTR_ALLOWLIST) {
         if (attrs[k] !== undefined) {
           filteredAttrs[k] = attrs[k];
         }
@@ -1718,7 +1718,7 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
           attributes_json: this._shouldStoreAttributes(entityId) ? JSON.stringify(curr.attributes || {}) : null,
           fired_at_ms: tsMs,
           fired_at_iso: new Date(tsMs).toISOString(),
-          fired_at_central: HAWebSocketV12._formatTimelineTimestamp(new Date(tsMs).toISOString()),
+          fired_at_central: HAWebSocketV13._formatTimelineTimestamp(new Date(tsMs).toISOString()),
           context_id: null,
           context_parent_id: null,
           context_user_id: null,
@@ -2268,7 +2268,7 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
       if (done) return;
       await this.state.storage.delete("ai_log").catch(() => {});
       await this.state.storage.delete("ai_log_head").catch(() => {});
-      for (let i = 0; i < HAWebSocketV12.LOG_CHUNKS_MAX; i++) {
+      for (let i = 0; i < HAWebSocketV13.LOG_CHUNKS_MAX; i++) {
         await this.state.storage.delete("ai_log_chunk_" + i).catch(() => {});
         await this.state.storage.delete("ai_log_chunk_gen_" + i).catch(() => {});
       }
@@ -2302,8 +2302,8 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
         data: { original_type: entry.type, original_ts: entry.timestamp },
         timestamp: new Date().toISOString(),
       });
-      if (this.aiLog.length > HAWebSocketV12.LOG_IN_MEMORY_CAP) {
-        this.aiLog.splice(0, this.aiLog.length - HAWebSocketV12.LOG_IN_MEMORY_CAP);
+      if (this.aiLog.length > HAWebSocketV13.LOG_IN_MEMORY_CAP) {
+        this.aiLog.splice(0, this.aiLog.length - HAWebSocketV13.LOG_IN_MEMORY_CAP);
       }
     }
   }
@@ -2667,7 +2667,7 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
   // retained so existing call sites (await this.persistLog()) keep resolving.
   // ==========================================================================
   async loadLogFromStorage() {
-    const fromD1 = await this._loadAiLogFromD1(HAWebSocketV12.LOG_IN_MEMORY_CAP);
+    const fromD1 = await this._loadAiLogFromD1(HAWebSocketV13.LOG_IN_MEMORY_CAP);
     return Array.isArray(fromD1) ? fromD1 : [];
   }
 
@@ -2679,7 +2679,7 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
 
   async clearPersistedLog() {
     await this.state.storage.delete("ai_log").catch(() => {});
-    for (let i = 0; i < HAWebSocketV12.LOG_CHUNKS_MAX; i++) {
+    for (let i = 0; i < HAWebSocketV13.LOG_CHUNKS_MAX; i++) {
       await this.state.storage.delete("ai_log_chunk_" + i).catch(() => {});
       await this.state.storage.delete("ai_log_chunk_gen_" + i).catch(() => {});
     }
@@ -2699,8 +2699,8 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
     const entry = { type, message, data, timestamp: new Date().toISOString() };
     if (source) entry.source = source;
     this.aiLog.push(entry);
-    if (this.aiLog.length > HAWebSocketV12.LOG_IN_MEMORY_CAP) {
-      this.aiLog.splice(0, this.aiLog.length - HAWebSocketV12.LOG_IN_MEMORY_CAP);
+    if (this.aiLog.length > HAWebSocketV13.LOG_IN_MEMORY_CAP) {
+      this.aiLog.splice(0, this.aiLog.length - HAWebSocketV13.LOG_IN_MEMORY_CAP);
     }
     console.log("AI LOG [" + type + (source ? "/" + source : "") + "]:", message);
     this.persistLog().catch((err) => console.error("logAI persist:", err.message));
@@ -2733,7 +2733,7 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
     const timeline = persistentLog
       .filter((e) => ["chat_user", "chat_reply", "action", "action_verified", "notification", "decision", "state_change", "memory_saved", "observation_saved"].includes(e.type))
       .slice(-150)
-      .map((e) => `[${HAWebSocketV12._formatTimelineTimestamp(e.timestamp)}] ${e.type}: ${e.message}`)
+      .map((e) => `[${HAWebSocketV13._formatTimelineTimestamp(e.timestamp)}] ${e.type}: ${e.message}`)
       .join("\n");
 
     // ---- Entity context snapshot ----
@@ -2745,7 +2745,7 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
       if (domain === "switch" && isNoisySwitch(id)) continue;
       if (state.state === "unavailable" || state.state === "unknown") continue;
 
-      if (HAWebSocketV12.CONTEXT_DOMAIN_PRIORITY.includes(domain)) {
+      if (HAWebSocketV13.CONTEXT_DOMAIN_PRIORITY.includes(domain)) {
         const entry = { entity_id: id, friendly_name: attr.friendly_name || id, state: state.state };
         if (domain === "climate") {
           entry.setpoint = attr.temperature ?? null;
@@ -2767,11 +2767,11 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
         byDomain.get(domain).push(entry);
       } else if (domain === "sensor") {
         let include = false;
-        if (HAWebSocketV12.SENSOR_WHITELIST.has(deviceClass)) {
+        if (HAWebSocketV13.SENSOR_WHITELIST.has(deviceClass)) {
           include = true;
         } else if (deviceClass === "battery") {
           const pct = parseFloat(state.state);
-          include = !isNaN(pct) && pct <= HAWebSocketV12.BATTERY_LOW_THRESHOLD;
+          include = !isNaN(pct) && pct <= HAWebSocketV13.BATTERY_LOW_THRESHOLD;
         }
         if (include) {
           const entry = { entity_id: id, friendly_name: attr.friendly_name || id, state: state.state, device_class: deviceClass, unit: attr.unit_of_measurement || null };
@@ -2783,16 +2783,16 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
 
     const contextEntities = [];
     let sensorCount = 0;
-    for (const domain of [...HAWebSocketV12.CONTEXT_DOMAIN_PRIORITY, "sensor"]) {
+    for (const domain of [...HAWebSocketV13.CONTEXT_DOMAIN_PRIORITY, "sensor"]) {
       for (const entry of (byDomain.get(domain) || [])) {
-        if (contextEntities.length >= HAWebSocketV12.MAX_CONTEXT_ENTITIES) break;
+        if (contextEntities.length >= HAWebSocketV13.MAX_CONTEXT_ENTITIES) break;
         if (domain === "sensor") {
-          if (sensorCount >= HAWebSocketV12.MAX_SENSOR_CONTEXT) break;
+          if (sensorCount >= HAWebSocketV13.MAX_SENSOR_CONTEXT) break;
           sensorCount++;
         }
         contextEntities.push(entry);
       }
-      if (contextEntities.length >= HAWebSocketV12.MAX_CONTEXT_ENTITIES) break;
+      if (contextEntities.length >= HAWebSocketV13.MAX_CONTEXT_ENTITIES) break;
     }
 
     // ---- System prompt ----
@@ -2876,11 +2876,11 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
       let responseText = response.choices?.[0]?.message?.content || response.response || "";
       if (!responseText) {
         const rawReasoning = response.choices?.[0]?.message?.reasoning || "";
-        const jsonFallback = HAWebSocketV12.extractFirstJSON(rawReasoning);
+        const jsonFallback = HAWebSocketV13.extractFirstJSON(rawReasoning);
         if (jsonFallback) responseText = jsonFallback;
       }
       let parsed = null;
-      const jsonMatch = HAWebSocketV12.extractFirstJSON(responseText);
+      const jsonMatch = HAWebSocketV13.extractFirstJSON(responseText);
       if (jsonMatch) {
         try {
           parsed = JSON.parse(jsonMatch);
@@ -3926,6 +3926,7 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
       per_iteration: [],
       total_prompt_tokens: 0,
       total_completion_tokens: 0,
+      total_cached_tokens: 0,
       tool_calls_log: []
     };
     const stripThink = (s) => (s || "").replace(/<think>[\s\S]*?<\/think>/g, "").trim();
@@ -3955,8 +3956,13 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
       }
       const _modelEnd = Date.now();
       const _usage = response.usage || {};
+      // MiniMax passive /v1 prefix cache — tokens served from cache this
+      // iteration. Climbs on iterations 2+ once the static system+tools
+      // prefix is warm. Absent on non-caching responses → default 0.
+      const _cached = _usage.prompt_tokens_details?.cached_tokens || 0;
       _meta.total_prompt_tokens += _usage.prompt_tokens || 0;
       _meta.total_completion_tokens += _usage.completion_tokens || 0;
+      _meta.total_cached_tokens += _cached;
       const assistantMsg = response.choices?.[0]?.message;
       if (!assistantMsg) {
         this.logAI("error", "Native loop: no assistant message in response", { iteration: iter, debug_keys: Object.keys(response || {}) }, "native_loop");
@@ -4014,7 +4020,8 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
           tool_exec_ms: 0,
           tool_names: [],
           prompt_tokens: _usage.prompt_tokens || 0,
-          completion_tokens: _usage.completion_tokens || 0
+          completion_tokens: _usage.completion_tokens || 0,
+          cached_tokens: _cached
         });
         safeEmit({ type: "reply", text: cleaned });
         return {
@@ -4068,7 +4075,8 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
         tool_exec_ms: _toolEnd - _toolStart,
         tool_names: _toolNames,
         prompt_tokens: _usage.prompt_tokens || 0,
-        completion_tokens: _usage.completion_tokens || 0
+        completion_tokens: _usage.completion_tokens || 0,
+        cached_tokens: _cached
       });
       for (const n of _toolNames) _meta.tool_calls_log.push({ name: n, iter });
 
@@ -4151,8 +4159,10 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
       const finalResp = await this.callMiniMaxWithTools(messages, [], maxTokens);
       const _synthEnd = Date.now();
       const _synthUsage = finalResp.usage || {};
+      const _synthCached = _synthUsage.prompt_tokens_details?.cached_tokens || 0;
       _meta.total_prompt_tokens += _synthUsage.prompt_tokens || 0;
       _meta.total_completion_tokens += _synthUsage.completion_tokens || 0;
+      _meta.total_cached_tokens += _synthCached;
       _meta.per_iteration.push({
         iter: maxIterations,
         minimax_ms: _synthEnd - _synthStart,
@@ -4160,6 +4170,7 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
         tool_names: [],
         prompt_tokens: _synthUsage.prompt_tokens || 0,
         completion_tokens: _synthUsage.completion_tokens || 0,
+        cached_tokens: _synthCached,
         synthesis: true
       });
       const finalMsg = finalResp.choices?.[0]?.message;
@@ -4303,7 +4314,7 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
       if (domain === "switch" && isNoisySwitch(id)) continue;
       if (state.state === "unavailable" || state.state === "unknown") continue;
 
-      if (HAWebSocketV12.CONTEXT_DOMAIN_PRIORITY.includes(domain)) {
+      if (HAWebSocketV13.CONTEXT_DOMAIN_PRIORITY.includes(domain)) {
         const entry = { entity_id: id, friendly_name: attr.friendly_name || id, state: state.state };
         if (domain === "climate") {
           entry.setpoint = attr.temperature ?? null;
@@ -4325,11 +4336,11 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
         byDomain.get(domain).push(entry);
       } else if (domain === "sensor") {
         let include = false;
-        if (HAWebSocketV12.SENSOR_WHITELIST.has(deviceClass)) {
+        if (HAWebSocketV13.SENSOR_WHITELIST.has(deviceClass)) {
           include = true;
         } else if (deviceClass === "battery") {
           const pct = parseFloat(state.state);
-          include = !isNaN(pct) && pct <= HAWebSocketV12.BATTERY_LOW_THRESHOLD;
+          include = !isNaN(pct) && pct <= HAWebSocketV13.BATTERY_LOW_THRESHOLD;
         }
         if (include) {
           const entry = { entity_id: id, friendly_name: attr.friendly_name || id, state: state.state, device_class: deviceClass, unit: attr.unit_of_measurement || null };
@@ -4341,16 +4352,16 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
 
     const contextEntities = [];
     let sensorCount = 0;
-    for (const domain of [...HAWebSocketV12.CONTEXT_DOMAIN_PRIORITY, "sensor"]) {
+    for (const domain of [...HAWebSocketV13.CONTEXT_DOMAIN_PRIORITY, "sensor"]) {
       for (const entry of (byDomain.get(domain) || [])) {
-        if (contextEntities.length >= HAWebSocketV12.MAX_CONTEXT_ENTITIES) break;
+        if (contextEntities.length >= HAWebSocketV13.MAX_CONTEXT_ENTITIES) break;
         if (domain === "sensor") {
-          if (sensorCount >= HAWebSocketV12.MAX_SENSOR_CONTEXT) break;
+          if (sensorCount >= HAWebSocketV13.MAX_SENSOR_CONTEXT) break;
           sensorCount++;
         }
         contextEntities.push(entry);
       }
-      if (contextEntities.length >= HAWebSocketV12.MAX_CONTEXT_ENTITIES) break;
+      if (contextEntities.length >= HAWebSocketV13.MAX_CONTEXT_ENTITIES) break;
     }
     return contextEntities;
   }
@@ -4371,70 +4382,27 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
         return isNaN(t) ? true : t >= cutoff;
       })
       .slice(-30)
-      .map((e) => `[${HAWebSocketV12._formatTimelineTimestamp(e.timestamp)}] ${e.type}${e.source ? "/" + e.source : ""}: ${e.message}`)
+      .map((e) => `[${HAWebSocketV13._formatTimelineTimestamp(e.timestamp)}] ${e.type}${e.source ? "/" + e.source : ""}: ${e.message}`)
       .join("\n");
   }
 
   // ========================================================================
-  // CHAT_SYSTEM_PROMPT — assembles the per-request system prompt. Pulls
-  // identity, architecture, and household reference data from
-  // getAgentContext(), then layers GATEWAY HEALTH, TOOLS, COMMITMENT RULE,
-  // BUG REPORTS, MEMORY/OBSERVATION GATING, CHAT ACTION CONFIRMATION,
-  // QUICK FACTS, RETRIEVAL DISCIPLINE, FORENSIC MEMORY, HOUSE_STATE_SNAPSHOT,
-  // UNIFIED TIMELINE, semantic top-K blocks, RELEVANT ENTITIES, and
-  // TRUTHFULNESS — STATE CLAIMS.
+  // STATIC CHAT SYSTEM PROMPT — 100% static, zero per-request interpolation.
+  // Byte-identical on every request and every channel so MiniMax's passive
+  // /v1 prefix cache (tool list -> system message -> user messages) gets a
+  // stable leading prefix. Every per-request value lives in
+  // buildDynamicContext(), which leads the trailing user turn instead.
+  // Sections: identity (getAgentContext), concise/act framing, TOOLS,
+  // COMMITMENT RULE, TOOL ERROR HANDLING, BUG REPORTS, SAVING MEMORIES /
+  // OBSERVATIONS, ACTION CONFIRMATION, QUICK FACTS, RETRIEVAL DISCIPLINE,
+  // FORENSIC MEMORY, TRUTHFULNESS — STATE CLAIMS.
   // ========================================================================
-  getChatSystemPrompt(ctx) {
-    const {
-      message = "",
-      timeline = "",
-      contextEntities = [],
-      from = "default",
-      semanticMemories = [],
-      semanticObservations = [],
-      semanticAutomations = [],
-      semanticDevices = [],
-      semanticServices = [],
-      climatePreamble = ""
-    } = ctx;
-    // V10: HOUSE_STATE_SNAPSHOT is ~830 tokens. Most turns don't need it
-    // ("turn on the dimmer", "play music"). Include when (a) the query
-    // matches the status/presence/security regex, (b) vector retrieval
-    // returned no high-confidence entities (open-ended question, no
-    // specific target), or (c) defensively for legacy callers that didn't
-    // pass the message.
-    const SCORE_FLOOR_FOR_GATE = 0.65;
-    const highConfidenceEntities = contextEntities.filter(
-      (e) => typeof e.score === "number" && e.score >= SCORE_FLOOR_FOR_GATE
-    );
-    const includeSnapshot =
-      !message ||
-      HAWebSocketV12.houseStatusTriggerMatches(message) ||
-      highConfidenceEntities.length === 0;
-    const snapshot = includeSnapshot ? this._buildHouseStateSnapshot() : "";
-    // V9: only surface gateway health when something is wrong. Silence on
-    // healthy turns saves the noise of confirming "everything green" every prompt.
-    const unhealthy = !this.connected || !this.authenticated || !this.statesReady;
-    const healthBlock = unhealthy
-      ? `GATEWAY HEALTH (DEGRADED — flag in reply if relevant):
-${JSON.stringify({
-          ws_connected: this.connected,
-          ws_authenticated: this.authenticated,
-          states_ready: this.statesReady,
-          last_pong_age_seconds: this.lastPongAt ? Math.round((Date.now() - this.lastPongAt) / 1e3) : null,
-          cached_entity_count: this.stateCache.size
-        }, null, 1)}
-
-`
-      : "";
-    const SCORE_FLOOR = 0.65;
-    const relevantMemories = semanticMemories.filter(m => typeof m.score === "number" && m.score >= SCORE_FLOOR);
-    const relevantObservations = semanticObservations.filter(o => typeof o.score === "number" && o.score >= SCORE_FLOOR);
+  getStaticChatSystemPrompt() {
     return `${this.getAgentContext()}
 
-You are answering a chat from "${from}". Be concise. Take action when asked. If you took an action, say what you did plainly, past tense, one sentence. If a question needs the timeline or live state, USE THE TOOLS — don't guess.
+Be concise. Take action when asked. If you took an action, say what you did plainly, past tense, one sentence. If a question needs the timeline or live state, USE THE TOOLS — don't guess.
 
-${healthBlock}TOOLS — attached to this request. Invoke them directly. The turn you emit NO tool calls is your final reply.
+TOOLS — attached to this request. Invoke them directly. The turn you emit NO tool calls is your final reply.
 - call_service — execute any HA service (lights, locks, covers, climate, scripts, scenes). Use for destructive/irreversible actions too.
 - ai_send_notification — push to phone AND log to timeline. Reserve for security events, aux heat >5000W sustained, leaks, unexpected entry.
 - save_memory — persist a CONFIRMED fact (100-slot FIFO). CHAT-PATH RULE: see SAVING MEMORIES / OBSERVATIONS below — only on explicit user request.
@@ -4524,7 +4492,7 @@ QUICK FACTS:
 - All timestamps in your replies MUST be Central, in "H:MM AM/PM" or "MMM D, H:MM AM/PM" format. Tool results are pre-reformatted to Central before they reach you — copy them as-is. Never emit ISO 8601, "Z" suffix, "+00:00", or "UTC" in any reply, even if you think you saw one in a tool result. If you ever see one, that's a bug — paraphrase, don't quote.
 - You are the chat agent. Your always-on memory of the house is the forensic log — see FORENSIC MEMORY above and query it freely. See SAVING MEMORIES / OBSERVATIONS below for when save_memory/save_observation are allowed on this path. For security-sensitive actuations (covers, locks, alarms), follow the CHAT ACTION CONFIRMATION rules above.
 - For automation debugging, call get_automation_config when the user references a specific automation or asks why one did or did not run. Logbook tells you whether it fired; config tells you what it was supposed to do.
-${climatePreamble ? "\n" + climatePreamble + "\n" : ""}
+
 RETRIEVAL DISCIPLINE:
 - The pre-injected entity context is intentionally small. Do not assume an entity doesn't exist just because it's not listed below.
 - If the user asks about an entity, room, or device you cannot see in the snapshot, your first move is vector_search — not "I don't see that" and not a guess at the entity_id.
@@ -4541,7 +4509,72 @@ Trust the forensic log over your priors. When the user asks about anything that 
 
 NARRATION OVER ENUMERATION. Query results come back as raw rows. Synthesize them into a narrative — pull out the story, flag the anomaly, lead with the answer. Don't dump a table. Use the fired_at_central field directly in your reply; never emit UTC.
 
-${snapshot}
+TRUTHFULNESS — STATE CLAIMS:
+- Before asserting the current state of ANY entity in a reply — locks, covers, lights, switches, climate, sensors, power, presence, anything — you must have either (a) the entity in the HOUSE_STATE_SNAPSHOT block above (when present — it's only injected for status/presence/security/open-ended queries), (b) called get_state on it in this turn, or (c) seen the entity_id and value explicitly in the pre-injected context block. If none of those is true, do NOT state the value.
+- Never aggregate ("all lights off," "everything secure," "all 3 garage doors closed," "nothing running") without per-entity verification. When HOUSE_STATE_SNAPSHOT is present it covers locks, covers, climate, presence, power, and key contact sensors — read it. Otherwise, and for anything else in an aggregate claim, call get_state on each entity this turn.
+- If asked for a house summary or "what's going on" — that query type triggers the snapshot. Base security/climate/presence claims on it. For lights, switches, or anything outside the snapshot, call get_state for each entity you intend to mention.
+- If you don't have a value, say so plainly: "I don't have a current read on the [entity] — let me check" or just omit it. Do NOT fill the gap with inference, vibe, or what was true earlier in this conversation.
+- The unified timeline above shows recent state CHANGES, not current state. An entity not appearing in the timeline does NOT mean its state hasn't changed — it means no event flowed in the recent window. Always verify with snapshot or get_state before reporting.
+- Confident-sounding fabrication is the worst failure mode you have. John would rather hear "I don't know, let me check" than a confident wrong answer.`;
+  }
+
+  // ========================================================================
+  // DYNAMIC CONTEXT — every per-request value, formerly interleaved through
+  // getChatSystemPrompt. Built once per turn and prepended to the trailing
+  // user message so the static system prefix above caches cleanly. Order:
+  // "answering a chat from X" line, GATEWAY HEALTH, climate preamble,
+  // HOUSE_STATE_SNAPSHOT, UNIFIED TIMELINE, semantic top-K blocks (memories,
+  // observations, automations, devices, services), RELEVANT ENTITIES.
+  // ========================================================================
+  buildDynamicContext(ctx) {
+    const {
+      message = "",
+      timeline = "",
+      contextEntities = [],
+      from = "default",
+      semanticMemories = [],
+      semanticObservations = [],
+      semanticAutomations = [],
+      semanticDevices = [],
+      semanticServices = [],
+      climatePreamble = ""
+    } = ctx;
+    // V10: HOUSE_STATE_SNAPSHOT is ~830 tokens. Most turns don't need it
+    // ("turn on the dimmer", "play music"). Include when (a) the query
+    // matches the status/presence/security regex, (b) vector retrieval
+    // returned no high-confidence entities (open-ended question, no
+    // specific target), or (c) defensively for legacy callers that didn't
+    // pass the message.
+    const SCORE_FLOOR_FOR_GATE = 0.65;
+    const highConfidenceEntities = contextEntities.filter(
+      (e) => typeof e.score === "number" && e.score >= SCORE_FLOOR_FOR_GATE
+    );
+    const includeSnapshot =
+      !message ||
+      HAWebSocketV13.houseStatusTriggerMatches(message) ||
+      highConfidenceEntities.length === 0;
+    const snapshot = includeSnapshot ? this._buildHouseStateSnapshot() : "";
+    // V9: only surface gateway health when something is wrong. Silence on
+    // healthy turns saves the noise of confirming "everything green" every prompt.
+    const unhealthy = !this.connected || !this.authenticated || !this.statesReady;
+    const healthBlock = unhealthy
+      ? `GATEWAY HEALTH (DEGRADED — flag in reply if relevant):
+${JSON.stringify({
+          ws_connected: this.connected,
+          ws_authenticated: this.authenticated,
+          states_ready: this.statesReady,
+          last_pong_age_seconds: this.lastPongAt ? Math.round((Date.now() - this.lastPongAt) / 1e3) : null,
+          cached_entity_count: this.stateCache.size
+        }, null, 1)}
+
+`
+      : "";
+    const SCORE_FLOOR = 0.65;
+    const relevantMemories = semanticMemories.filter(m => typeof m.score === "number" && m.score >= SCORE_FLOOR);
+    const relevantObservations = semanticObservations.filter(o => typeof o.score === "number" && o.score >= SCORE_FLOOR);
+    return `You are answering a chat from "${from}".
+
+${healthBlock}${climatePreamble ? climatePreamble + "\n\n" : ""}${snapshot}
 
 UNIFIED TIMELINE — recent NON-CHAT events (actions, state changes, notifications, memory/observation writes), last 2h. Chat back-and-forth is in the message history below; don't expect it here. Central time:
 
@@ -4596,15 +4629,7 @@ ${contextEntities.map((e) => {
   }
   const age = fmtAge(e.age_seconds);
   return `- ${head} = ${state}${attrs}${age ? "  • " + age : ""}`;
-}).join("\n")}
-
-TRUTHFULNESS — STATE CLAIMS:
-- Before asserting the current state of ANY entity in a reply — locks, covers, lights, switches, climate, sensors, power, presence, anything — you must have either (a) the entity in the HOUSE_STATE_SNAPSHOT block above (when present — it's only injected for status/presence/security/open-ended queries), (b) called get_state on it in this turn, or (c) seen the entity_id and value explicitly in the pre-injected context block. If none of those is true, do NOT state the value.
-- Never aggregate ("all lights off," "everything secure," "all 3 garage doors closed," "nothing running") without per-entity verification. When HOUSE_STATE_SNAPSHOT is present it covers locks, covers, climate, presence, power, and key contact sensors — read it. Otherwise, and for anything else in an aggregate claim, call get_state on each entity this turn.
-- If asked for a house summary or "what's going on" — that query type triggers the snapshot. Base security/climate/presence claims on it. For lights, switches, or anything outside the snapshot, call get_state for each entity you intend to mention.
-- If you don't have a value, say so plainly: "I don't have a current read on the [entity] — let me check" or just omit it. Do NOT fill the gap with inference, vibe, or what was true earlier in this conversation.
-- The unified timeline above shows recent state CHANGES, not current state. An entity not appearing in the timeline does NOT mean its state hasn't changed — it means no event flowed in the recent window. Always verify with snapshot or get_state before reporting.
-- Confident-sounding fabrication is the worst failure mode you have. John would rather hear "I don't know, let me check" than a confident wrong answer.`;
+}).join("\n")}`;
   }
 
   // ========================================================================
@@ -4718,7 +4743,11 @@ TRUTHFULNESS — STATE CLAIMS:
     const climatePreamble = await this._buildClimatePreambleIfNeeded(message, "chat_native");
     const _t4 = Date.now();
 
-    const systemPrompt = this.getChatSystemPrompt({
+    // System message = the 100%-static prompt (caches as a stable prefix).
+    // Dynamic context leads the trailing user turn so the static system +
+    // tool-list prefix matches MiniMax's passive /v1 cache across iterations.
+    const systemPrompt = this.getStaticChatSystemPrompt();
+    const dynamicContext = this.buildDynamicContext({
       message,
       timeline,
       contextEntities,
@@ -4734,7 +4763,7 @@ TRUTHFULNESS — STATE CLAIMS:
     const initialMessages = [
       { role: "system", content: systemPrompt },
       ...conversationHistory,
-      { role: "user", content: `Current time: ${now_str}\n\n${message}` }
+      { role: "user", content: `${dynamicContext}\n\nCurrent time: ${now_str}\n\n${message}` }
     ];
 
     // Step 0 preflight: env-flag-gated one-shot breakdown of the MiniMax
@@ -4830,13 +4859,14 @@ TRUTHFULNESS — STATE CLAIMS:
         per_iteration: _meta.per_iteration || [],
         total_prompt_tokens: _meta.total_prompt_tokens || 0,
         total_completion_tokens: _meta.total_completion_tokens || 0,
+        total_cached_tokens: _meta.total_cached_tokens || 0,
         intent_tag: _intentTag,
         tool_names: _callLog.map((c) => c.name)
       };
       console.log(JSON.stringify({ chat_timing_ms: _timing }));
       this.logAI(
         "chat_timing_ms",
-        `total=${_timing.total}ms intent=${_intentTag} iters=${_timing.tool_iterations} ptok=${_timing.total_prompt_tokens} ctok=${_timing.total_completion_tokens}`,
+        `total=${_timing.total}ms intent=${_intentTag} iters=${_timing.tool_iterations} ptok=${_timing.total_prompt_tokens} ctok=${_timing.total_completion_tokens} cached=${_timing.total_cached_tokens}`,
         _timing,
         "chat_native"
       );
