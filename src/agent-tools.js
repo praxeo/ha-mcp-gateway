@@ -1,12 +1,12 @@
-// agent-tools.js — Native tool-calling schema for MiniMax (Phase 2)
+// agent-tools.js — Native tool-calling schema for the chat agent (Phase 2)
 //
-// These OpenAI-compatible function-tool definitions are passed to MiniMax on
-// every agent turn when USE_NATIVE_TOOL_LOOP === "true". MiniMax returns
+// These OpenAI-compatible function-tool definitions are passed to the model on
+// every agent turn when USE_NATIVE_TOOL_LOOP === "true". The model returns
 // tool_calls which the dispatcher (executeNativeTool on HAWebSocket) maps to
 // the same underlying logic the legacy JSON-action parser uses — no duplicate
 // action implementations.
 //
-// Shape reference (OpenAI / MiniMax M2.7-highspeed):
+// Shape reference (OpenAI / Groq gpt-oss-120b):
 //   Request:  tools: [{type: "function", function: {name, description, parameters}}]
 //   Response: choices[0].message.tool_calls[] = [{id, type: "function",
 //             function: {name, arguments: "<json string>"}}]
@@ -509,7 +509,7 @@ export const NATIVE_ACTION_TOOL_NAMES = new Set(
   ACTION_TOOLS.map((t) => t.function.name)
 );
 
-// Names of tools the CHAT profile is allowed to expose to MiniMax.
+// Names of tools the CHAT profile is allowed to expose to the model.
 // save_memory and save_observation are gated by a prompt-level rule (only on
 // explicit user request), not by tool absence — the user can now say "remember
 // X" or "note that Y" and have it written immediately, rather than waiting on

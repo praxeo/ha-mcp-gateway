@@ -3,7 +3,7 @@
 A Cloudflare Worker + Durable Object that bridges Home Assistant to LLMs. It
 holds a persistent WebSocket to HA, mirrors live state in memory, streams
 every meaningful event into a queryable D1 forensic log, and exposes the
-whole surface as an MCP server. A built-in chat agent (MiniMax, native
+whole surface as an MCP server. A built-in chat agent (gpt-oss-120b on Groq, native
 tool-calling loop) answers questions on demand and acts on user commands.
 Deterministic cover commands short-circuit the LLM via a sub-500ms fast path.
 A Cloudflare Vectorize index over nine entity-kinds backs semantic retrieval.
@@ -157,7 +157,7 @@ Durable Object: HAWebSocketV5 (ha-websocket.js)
    │               state_changes, automation_runs, service_calls
    ├──► Cloudflare Vectorize "ha-knowledge"  (env.KNOWLEDGE)
    ├──► Cloudflare Workers AI                (env.AI, bge-large-en-v1.5)
-   ├──► MiniMax M2.7-highspeed at api.minimax.io  (OpenAI-compatible)
+   ├──► gpt-oss-120b on Groq at api.groq.com  (OpenAI-compatible)
    └──► ElevenLabs Scribe at api.elevenlabs.io       (speech-to-text)
 ```
 
@@ -169,7 +169,7 @@ Layer-by-layer:
 4. **ha-mcp-gateway (this repo)** — Worker + DO. Translates natural language into HA service calls and answers historical questions from the forensic log. Auth: Cloudflare Access JWT for browser users; long-lived HA token in worker secret.
 5. **Vectorize knowledge index (`ha-knowledge`)** — see [Knowledge index](#knowledge-index-ha-knowledge).
 6. **Cloudflare D1 (`ha_db`)** — relational store. `ai_log` keeps chat/action history; `observations` keeps tagged hypotheses; `bugs` is the iteration capture bucket; `state_changes` / `automation_runs` / `service_calls` are the [forensic log](#forensic-event-log).
-7. **MiniMax M2.7-highspeed** — chat completions + native tool calls. The DO drives the loop, not MiniMax. 45s timeout per call with `AbortError` handling.
+7. **gpt-oss-120b (Groq)** — chat completions + native tool calls. The DO drives the loop, not the model. 45s timeout per call with `AbortError` handling.
 8. **ElevenLabs Scribe** — `scribe_v1` speech-to-text. Worker proxies the chat UI's audio blobs through `/transcribe`.
 9. **Frontends** — Claude Desktop and Claude Code (MCP), `/chat` HTML UI served by the Worker (SSE-streaming, hero mic button, collapsible reasoning panel). Twilio (WhatsApp) is currently dormant.
 
@@ -181,7 +181,7 @@ Layer-by-layer:
 |---|---|
 | `src/worker.js` | Cloudflare Worker entry. Owns the MCP handler (`TOOLS` list + `handleTool` dispatch), HTTP routes including `/admin/recent_activity`, the embedded `CHAT_HTML` UI, the ElevenLabs STT proxy, the `formatBugsAsMarkdown` helper, KV cache helpers, the multi-kind `backfillKnowledge`, and the `scheduled()` cron handler with daily knowledge resync, 30-day `ai_log` retention, and 90-day forensic-log retention (`dailyForensicLogRetention`). |
 | `src/ha-websocket.js` | Durable Object class `HAWebSocketV5` (renamed forward through the persistent-WS refresh dance — see [Operational notes](#operational-notes)). Holds the persistent HA WebSocket and in-memory `stateCache`. Subscribes to five HA event types: `state_changed`, `entity_registry_updated`, `device_registry_updated`, `automation_triggered`, `call_service`. Writes every meaningful event fire-and-forget to D1 via `_writeStateChangeToD1` / `_writeAutomationRunToD1` / `_writeServiceCallToD1`, gated by `_shouldLogStateChange` for the state path (Zigbee/network-noise denylist). Reconnect backfill from HA history via `_backfillStateChangesFromHA`. One system prompt: `getChatSystemPrompt`, including a `FORENSIC MEMORY` section pointing the agent at the three query tools. One execution path: `chatWithAgentNative` (user-driven, SSE), preceded by `_tryDeterministicFastPath` for cover commands. Native tool loop in `runNativeToolLoop`, action executor in `executeAIAction`, tool dispatcher in `executeNativeTool` (now includes `query_state_history` / `query_automation_runs` / `query_causal_chain` cases). `alarm()` is WS keepalive only — ping/pong, reconnect on no-pong, mandatory reschedule. |
-| `src/agent-tools.js` | OpenAI-format tool schemas passed to MiniMax. 4 action tools (`call_service`, `ai_send_notification`, `save_memory`, `save_observation`) + 9 read tools (`get_state`, `get_logbook`, `render_template`, `vector_search`, `get_automation_config`, `report_bug`, `query_state_history`, `query_automation_runs`, `query_causal_chain`) = 13 total. `CHAT_ALLOWED_TOOL_NAMES` includes all 13 — the chat agent has the full surface. |
+| `src/agent-tools.js` | OpenAI-format tool schemas passed to the model. 4 action tools (`call_service`, `ai_send_notification`, `save_memory`, `save_observation`) + 9 read tools (`get_state`, `get_logbook`, `render_template`, `vector_search`, `get_automation_config`, `report_bug`, `query_state_history`, `query_automation_runs`, `query_causal_chain`) = 13 total. `CHAT_ALLOWED_TOOL_NAMES` includes all 13 — the chat agent has the full surface. |
 | `src/vectorize-schema.js` | Canonical metadata schema, `vectorIdFor(kind, refId)`, FNV-1a hash, `topicTagFor(text)`, per-kind embed-text builders, `isNoisyEntity` / `isNoisyService` / `entityCategoryFor` helpers, `buildMetadata` (lowercase-coerces `area`, string-coerces `is_noisy`, propagates `created_at`). |
 | `migrations/0001_d1_indexes_and_columns.sql` | Indexes on the legacy `ai_log` / `observations` / `bugs` tables. Also adds the nullable `data` JSON column to `observations`. |
 | `migrations/0002_forensic_log.sql` | Creates `state_changes`, `automation_runs`, `service_calls` and their context-chain indexes. |
@@ -373,7 +373,7 @@ inline when present.
 
 Why it exists:
 
-- **Authoritative for the listed entities.** The prompt tells MiniMax to
+- **Authoritative for the listed entities.** The prompt tells the model to
   trust the snapshot — it's regenerated every turn from live cache. This
   is what makes the TRUTHFULNESS rule enforceable.
 - **Aggregation guard.** Claims like "everything secure" are forbidden
@@ -390,20 +390,20 @@ Anything not in the snapshot is fair game for `get_state` /
 
 ## Native tool loop
 
-MiniMax is given OpenAI-format tool schemas (`NATIVE_AGENT_TOOLS` in
+The model is given OpenAI-format tool schemas (`NATIVE_AGENT_TOOLS` in
 `agent-tools.js`). The DO drives the loop: send messages, read
 `tool_calls`, dispatch via `executeNativeTool`, push tool results back,
-repeat until MiniMax emits no `tool_calls`. Each MiniMax call has a 45s
+repeat until the model emits no `tool_calls`. Each model call has a 45s
 timeout with `AbortError` handling.
 
 Caps:
 
 - **Chat path** (`chatWithAgentNative`): `maxIterations: 6`,
-  `maxTokens: 4096`, `hallucinationGuard: true`. Tool set is the full
+  `maxTokens: 8192`, `hallucinationGuard: true`. Tool set is the full
   13-tool surface filtered through `CHAT_ALLOWED_TOOL_NAMES` (defensive
   no-op now that all 13 are allowed; kept for future flexibility).
   Synthesis fallback on overflow — pushes a "stop using tools, compose
-  now" message and re-calls MiniMax with `tools:[]`.
+  now" message and re-calls the model with `tools:[]`.
 
 Tool surface (13 total):
 
@@ -520,7 +520,7 @@ stay ISO 8601 for parseability.
 |---|---|
 | `HA_URL` | HA base URL (Nabu Casa cloud-relayed) |
 | `HA_TOKEN` | Long-lived HA access token |
-| `MINIMAX_API_KEY` | api.minimax.io bearer |
+| `GROQ_API_KEY` | api.groq.com bearer |
 | `USE_NATIVE_TOOL_LOOP` | `"true"` — the chat path; legacy JSON-action fallback dormant |
 | `USE_VECTOR_ENTITY_RETRIEVAL` | `"true"` flips context build to vector retrieval. Falls back to flat-list on failure. |
 | `MCP_AUTH_TOKEN` | (optional) Bearer for `/mcp`. Cloudflare Access sits in front anyway. |
@@ -565,11 +565,11 @@ POST /chat (text/event-stream)
             maxIterations: 6,
             allowedTools: 13-tool surface,
             hallucinationGuard: true,
-            maxTokens: 4096,
+            maxTokens: 8192,
             onEvent
           })
-            loop: callMiniMaxWithTools (45s timeout)
-                  → emit `reasoning` from `reasoning_content`
+            loop: callLLMWithTools (45s timeout)
+                  → emit `reasoning` from the model's reasoning output
                   → dispatch tool_calls (including query_state_history etc.)
                   → push results
        7. Save preserved tool-calling trace to chat_history:${channelKey}
@@ -641,7 +641,7 @@ served at `/chat`. Features:
   populates the input box, auto-submits.
 - **Collapsible reasoning panel.** A `<details>` element above each
   assistant bubble surfaces the `reasoning` SSE stream
-  (MiniMax `reasoning_content`). Collapsed by default.
+  (the model's reasoning output). Collapsed by default.
 - **Per-message buttons.** Copy, retry (on error bubbles), clear.
 - **iOS Safari "Load failed" auto-retry.** Catches the iOS-specific
   error and silently retries once.
@@ -733,14 +733,14 @@ wrangler d1 execute ha_db --remote --command="SELECT 'state_changes' AS t, COUNT
   entries with `source: "fast_path"`. To audit hit-rate or false
   positives, query `ai_log` by source.
 - **Time-format leak.** Timeline timestamps are pre-formatted Central
-  in the prompt. If user-facing replies show UTC/Z-suffix, MiniMax is
+  in the prompt. If user-facing replies show UTC/Z-suffix, the model is
   copying timestamps from a tool result mid-loop (most likely
   `get_logbook`, which still returns ISO+UTC). Rule 10 in the chat
   prompt forbids this; the long-term fix is reformatting `get_logbook`
   output before pushing it back as a tool message.
-- **MiniMax timeout.** Each call has a 45s `AbortController` timeout.
+- **Model timeout.** Each call has a 45s `AbortController` timeout.
   Errors land in `ai_log` as `minimax_timeout`. Persistent timeouts
-  usually mean api.minimax.io is degraded.
+  usually mean api.groq.com is degraded.
 - **D1 write observability.** `_d1WriteFailures` counter on the DO
   surfaces forensic-log write failures via `/status` and the
   `cache_status` MCP tool. Spot-check periodically — silent loss of

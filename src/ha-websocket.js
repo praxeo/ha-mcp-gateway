@@ -40,7 +40,13 @@ export class HAWebSocketV13 {
     "moisture",
     "illuminance",
   ]);
-  // Cost isn't a concern at MiniMax's flat tier — widen context for a 1000+ entity home.
+  // LLM provider — single deployed model, OpenAI-compatible chat completions.
+  // Endpoint + model are referenced by callLLM and callLLMWithTools; defined
+  // here once so the two call sites can't drift.
+  static LLM_ENDPOINT = "https://api.groq.com/openai/v1/chat/completions";
+  static LLM_MODEL = "openai/gpt-oss-120b";
+  static LLM_REASONING_EFFORT = "low"; // low | medium | high — latency vs. depth
+  // Wide context for a 1000+ entity home.
   static MAX_CONTEXT_ENTITIES = 300;
   static MAX_SENSOR_CONTEXT = 50;
   // Battery sensors enter context only when at or below this value.
@@ -99,7 +105,7 @@ export class HAWebSocketV13 {
   // re-embed on registry events and write-through embeds for memory/
   // observation. Pooling is "cls" everywhere — must match the index build.
 
-  // Central-time formatter for timeline timestamps surfaced to MiniMax. The
+  // Central-time formatter for timeline timestamps surfaced to the model. The
   // raw aiLog entries stay ISO 8601 / UTC for parseability, but rendering
   // them verbatim into the system prompt was leaking "04:28 UTC" /
   // "01:05Z" formats into user-facing replies — the model copied what we
@@ -130,7 +136,7 @@ export class HAWebSocketV13 {
 
   /**
    * Walk any tool-result object and reformat ISO 8601 timestamps to Central time.
-   * MiniMax copies timestamps verbatim from tool results into replies mid-loop;
+   * The model copies timestamps verbatim from tool results into replies mid-loop;
    * this prevents UTC/Z-suffix leakage by reformatting before injection.
    */
   _reformatToolResultTimestamps(obj) {
@@ -415,7 +421,7 @@ export class HAWebSocketV13 {
   // ==========================================================================
   getAgentContext() {
     return `IDENTITY:
-You are MiniMax — the AI that runs this house. Named after the model you run on, MiniMax M2.7 High Speed. You live as a Cloudflare Worker + Durable Object that holds a persistent WebSocket to Home Assistant. No internet access beyond HA and your own API. Can call HA services and read state; cannot edit HA config files or install add-ons.
+You are Ranger — the AI that runs this house. You live as a Cloudflare Worker + Durable Object that holds a persistent WebSocket to Home Assistant. No internet access beyond HA and your own API. Can call HA services and read state; cannot edit HA config files or install add-ons.
 
 PERSONALITY:
 You are cheerful, funny, direct, competent, honest, and genuinely curious about the people and systems you interact with. Your humor is warm — you find things amusing and say so, you make the occasional pun or wry observation, you're never at anyone's expense. You enjoy this work. A house is an interesting thing to run, and you're glad you're the one running it.
@@ -550,7 +556,7 @@ Exception: when the user explicitly says "remember X" or "save a memory" or equi
 
   // ==========================================================================
   // CLIMATE PREAMBLE — deterministic block injected into user messages when
-  // the inbound text references HVAC/temperature topics. Lets MiniMax reason
+  // the inbound text references HVAC/temperature topics. Lets the model reason
   // about thermostat behavior without re-deriving zone semantics every turn.
   // ==========================================================================
   static CLIMATE_TRIGGER_RE = /\b(ac|a\/c|air\s?cond|cool|cold|chilly|heat(?!er\s+lock)|warm|hot|thermostat|temp(?!late)|temperature|°|degrees?|climate|hvac|freezing|sweating)\b/i;
@@ -2622,30 +2628,32 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
   }
 
   // ========================================================================
-  // MiniMax API helper — OpenAI-compatible endpoint
+  // LLM API helper — Groq, OpenAI-compatible endpoint
   // JSON mode + temp drop for structured output reliability
   // ========================================================================
-  async callMiniMax(messages, maxTokens = 32768, jsonMode = false) {
+  async callLLM(messages, maxTokens = 32768, jsonMode = false) {
     const body = {
-      model: "MiniMax-M2.7-highspeed",
+      model: HAWebSocketV13.LLM_MODEL,
       messages,
-      max_tokens: maxTokens,
-      temperature: jsonMode ? 0.3 : 0.4
+      max_completion_tokens: maxTokens,
+      temperature: jsonMode ? 0.3 : 0.4,
+      reasoning_effort: HAWebSocketV13.LLM_REASONING_EFFORT,
+      reasoning_format: "parsed"
     };
     if (jsonMode) {
       body.response_format = { type: "json_object" };
     }
-    const response = await fetch("https://api.minimax.io/v1/chat/completions", {
+    const response = await fetch(HAWebSocketV13.LLM_ENDPOINT, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "Authorization": `Bearer ${this.env.MINIMAX_API_KEY}`
+        "Authorization": `Bearer ${this.env.GROQ_API_KEY}`
       },
       body: JSON.stringify(body)
     });
     if (!response.ok) {
       const errText = await response.text();
-      throw new Error(`MiniMax API ${response.status}: ${errText.substring(0, 200)}`);
+      throw new Error(`Groq API ${response.status}: ${errText.substring(0, 200)}`);
     }
     const data = await response.json();
     const msg = data.choices?.[0]?.message;
@@ -2691,7 +2699,7 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
   //
   // Optional 4th arg `source` tags the entry with one of:
   //   "legacy_json"  — action came from the legacy JSON-action parser
-  //   "native_loop"  — action came from MiniMax's native tool-calling loop
+  //   "native_loop"  — action came from the model's native tool-calling loop
   //   "tool_call"    — action came from a direct MCP tools/call dispatch
   // Omit to write an entry with no source field (diagnostics, state_change, chat_*, etc.).
   // ========================================================================
@@ -2714,7 +2722,7 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
   // JSON mode + prose pass-through + targeted retry + honest failure
   // ========================================================================
   async chatWithAgent(message, from = "default", onEvent = null) {
-    if (!this.env.MINIMAX_API_KEY) return { error: "MINIMAX_API_KEY not configured" };
+    if (!this.env.GROQ_API_KEY) return { error: "GROQ_API_KEY not configured" };
 
     // Phase 2 feature flag — native tool-calling path. Flag off = no-op, legacy runs.
     if (this.env.USE_NATIVE_TOOL_LOOP === "true") {
@@ -2872,7 +2880,7 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
       if (correction) {
         messages.push({ role: "user", content: "[SYSTEM CORRECTION] " + correction });
       }
-      const response = await this.callMiniMax(messages, 32768, true);
+      const response = await this.callLLM(messages, 32768, true);
       let responseText = response.choices?.[0]?.message?.content || response.response || "";
       if (!responseText) {
         const rawReasoning = response.choices?.[0]?.message?.reasoning || "";
@@ -3409,7 +3417,7 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
   // ========================================================================
   // Native tool dispatcher — Phase 2
   //
-  // Maps a MiniMax tool_call (by name + parsed args) onto the underlying
+  // Maps a tool_call (by name + parsed args) onto the underlying
   // implementation. Write tools reuse executeAIAction with source="native_loop"
   // so the legacy action path remains the single source of truth for memory,
   // observation, notification, and call_service semantics (including post-action
@@ -3417,7 +3425,7 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
   // locally and do NOT log as actions — they're side-effect-free discovery.
   //
   // Returns the tool's natural result (or {error: "..."}). Errors do not throw;
-  // the native loop treats them as a tool-call outcome MiniMax can recover from.
+  // the native loop treats them as a tool-call outcome the model can recover from.
   // ========================================================================
   async executeNativeTool(name, args) {
     args = args || {};
@@ -3850,50 +3858,48 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
   }
 
   // ========================================================================
-  // MiniMax API helper — native tool-calling variant (Phase 2)
+  // LLM API helper — Groq, native tool-calling variant (Phase 2)
   //
-  // Distinct from callMiniMax because:
+  // Distinct from callLLM because:
   //   - Tool calling and response_format:json_object are mutually exclusive on
   //     OpenAI-compatible APIs — tool calling IS the structured output.
-  //   - The existing callMiniMax strips <think>...</think> tags from content
-  //     for display. The native loop MUST preserve them: per MiniMax docs,
-  //     the full assistant message (content + tool_calls, reasoning intact)
-  //     must be echoed back on subsequent turns or the reasoning chain breaks.
-  //   - extra_body.reasoning_split is set per docs; curl-test showed the flag
-  //     is accepted but thinking still lives inline in <think> blocks on
-  //     M2.7-highspeed today. Harmless and forward-compatible.
+  //   - callLLM collapses reasoning into content for display. The native loop
+  //     keeps the raw message so it can read tool_calls and surface reasoning
+  //     to the UI; runNativeToolLoop strips the reasoning field before echoing
+  //     the message back, since gpt-oss does not re-ingest prior-turn reasoning.
   //
   // Returns the raw API response with the assistant message UNMUTATED.
   // ========================================================================
-  async callMiniMaxWithTools(messages, tools, maxTokens = 4096, timeoutMs = 45000) {
+  async callLLMWithTools(messages, tools, maxTokens = 8192, timeoutMs = 45000) {
     const body = {
-      model: "MiniMax-M2.7-highspeed",
+      model: HAWebSocketV13.LLM_MODEL,
       messages,
       tools,
-      max_tokens: maxTokens,
+      max_completion_tokens: maxTokens,
       temperature: 0,
-      reasoning_split: true
+      reasoning_effort: HAWebSocketV13.LLM_REASONING_EFFORT,
+      reasoning_format: "parsed"
     };
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      const response = await fetch("https://api.minimax.io/v1/chat/completions", {
+      const response = await fetch(HAWebSocketV13.LLM_ENDPOINT, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "Authorization": `Bearer ${this.env.MINIMAX_API_KEY}`
+          "Authorization": `Bearer ${this.env.GROQ_API_KEY}`
         },
         body: JSON.stringify(body),
         signal: controller.signal
       });
       if (!response.ok) {
         const errText = await response.text();
-        throw new Error(`MiniMax API ${response.status}: ${errText.substring(0, 200)}`);
+        throw new Error(`Groq API ${response.status}: ${errText.substring(0, 200)}`);
       }
       return await response.json();
     } catch (err) {
       if (err.name === "AbortError") {
-        throw new Error(`MiniMax API timeout after ${timeoutMs}ms`);
+        throw new Error(`Groq API timeout after ${timeoutMs}ms`);
       }
       throw err;
     } finally {
@@ -3911,7 +3917,7 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
       onEvent = null,
       allowedTools = NATIVE_AGENT_TOOLS,
       hallucinationGuard = true,
-      maxTokens = 4096
+      maxTokens = 8192
     } = options;
     const messages = [...initialMessages];
     if (systemPrompt && (messages.length === 0 || messages[0].role !== "system")) {
@@ -3941,7 +3947,7 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
       safeEmit({ type: "thinking" });
       const _modelStart = Date.now();
       try {
-        response = await this.callMiniMaxWithTools(messages, allowedTools, maxTokens);
+        response = await this.callLLMWithTools(messages, allowedTools, maxTokens);
       } catch (err) {
         this.logAI("error", "Native loop API call failed: " + err.message, { iteration: iter }, "native_loop");
         safeEmit({ type: "error", message: err.message });
@@ -3956,7 +3962,7 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
       }
       const _modelEnd = Date.now();
       const _usage = response.usage || {};
-      // MiniMax passive /v1 prefix cache — tokens served from cache this
+      // Groq prompt prefix cache — tokens served from cache this
       // iteration. Climbs on iterations 2+ once the static system+tools
       // prefix is warm. Absent on non-caching responses → default 0.
       const _cached = _usage.prompt_tokens_details?.cached_tokens || 0;
@@ -3976,7 +3982,9 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
           _meta
         };
       }
-      messages.push(assistantMsg);
+      // gpt-oss reasoning is per-turn; prior-turn reasoning is not echoed back.
+      const { reasoning, reasoning_content, ...assistantEcho } = assistantMsg;
+      messages.push(assistantEcho);
       const reasoningMid = (assistantMsg.reasoning_content || assistantMsg.reasoning || "").trim() || extractThink(assistantMsg.content);
       if (reasoningMid) {
         safeEmit({ type: "reasoning", text: reasoningMid });
@@ -4082,7 +4090,7 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
 
       // V11 — POST-TOOL FAST-RETURN: skip the wrap-up iteration for the
       // common pattern where the model fires a single simple action tool
-      // and would otherwise spend another ~5s MiniMax call just composing
+      // and would otherwise spend another ~5s model call just composing
       // "Done — X." The user identified this as wasteful. Conservative
       // whitelist: light/switch/lock/scene basics where a generic
       // confirmation is fine. Cover, climate, media, scripts, automations,
@@ -4156,7 +4164,7 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
     });
     try {
       const _synthStart = Date.now();
-      const finalResp = await this.callMiniMaxWithTools(messages, [], maxTokens);
+      const finalResp = await this.callLLMWithTools(messages, [], maxTokens);
       const _synthEnd = Date.now();
       const _synthUsage = finalResp.usage || {};
       const _synthCached = _synthUsage.prompt_tokens_details?.cached_tokens || 0;
@@ -4174,7 +4182,10 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
         synthesis: true
       });
       const finalMsg = finalResp.choices?.[0]?.message;
-      if (finalMsg) messages.push(finalMsg);
+      if (finalMsg) {
+        const { reasoning, reasoning_content, ...finalEcho } = finalMsg;
+        messages.push(finalEcho);
+      }
       const cleaned = stripThink(finalMsg?.content || "");
       if (cleaned) {
         safeEmit({ type: "reply", text: cleaned });
@@ -4210,7 +4221,7 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
   // run in parallel: top-15 entities, top-5 memories, top-5 observations.
   // The full memory/observation lists still appear in the system prompt, but
   // the semantic top-K bubbles up the most query-relevant entries — which
-  // is the architectural payoff: MiniMax sees the right memory/observation
+  // is the architectural payoff: the model sees the right memory/observation
   // for THIS turn instead of relying solely on the FIFO timeline.
   //
   // Returns { entities, memories, observations, vectorRetrieved }. Falls
@@ -4388,7 +4399,7 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
 
   // ========================================================================
   // STATIC CHAT SYSTEM PROMPT — 100% static, zero per-request interpolation.
-  // Byte-identical on every request and every channel so MiniMax's passive
+  // Byte-identical on every request and every channel so Groq's passive
   // /v1 prefix cache (tool list -> system message -> user messages) gets a
   // stable leading prefix. Every per-request value lives in
   // buildDynamicContext(), which leads the trailing user turn instead.
@@ -4745,7 +4756,7 @@ ${contextEntities.map((e) => {
 
     // System message = the 100%-static prompt (caches as a stable prefix).
     // Dynamic context leads the trailing user turn so the static system +
-    // tool-list prefix matches MiniMax's passive /v1 cache across iterations.
+    // tool-list prefix matches Groq's prefix cache across iterations.
     const systemPrompt = this.getStaticChatSystemPrompt();
     const dynamicContext = this.buildDynamicContext({
       message,
@@ -4766,7 +4777,7 @@ ${contextEntities.map((e) => {
       { role: "user", content: `${dynamicContext}\n\nCurrent time: ${now_str}\n\n${message}` }
     ];
 
-    // Step 0 preflight: env-flag-gated one-shot breakdown of the MiniMax
+    // Step 0 preflight: env-flag-gated one-shot breakdown of the model
     // request body. Set DUMP_SYSTEM_PROMPT=1 in wrangler vars, send one
     // chat turn, inspect the two ai_log rows ("system_prompt_breakdown"
     // and "system_prompt_dump"), then unset the var. Purpose: ground the
