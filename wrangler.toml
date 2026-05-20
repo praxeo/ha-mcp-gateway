@@ -51,7 +51,7 @@ binding = "CF_VERSION_METADATA"
 
 [[durable_objects.bindings]]
 name = "HA_WS"
-class_name = "HAWebSocketV13"
+class_name = "HAWebSocketV14"
 
 [[migrations]]
 tag = "v1"
@@ -222,6 +222,20 @@ renamed_classes = [
 tag = "v13"
 renamed_classes = [
   { from = "HAWebSocketV12", to = "HAWebSocketV13" }
+]
+
+# v14 — Groq input-validation fix. callLLMWithTools echoed Groq response
+# messages back into the request on every tool-loop iteration; those
+# messages carry response-only fields (audio_content, reasoning, ...) and
+# Groq's strict input validation 400'd ("property 'audio_content' is
+# unsupported"). sanitizeMessagesForLLM now reduces assistant messages to
+# OpenAI input fields (role, content, tool_calls) before every call.
+# DO-side code; the persistent HA WS pins the live isolate to stale V13,
+# so the rename forces a fresh isolate. DO storage state preserved.
+[[migrations]]
+tag = "v14"
+renamed_classes = [
+  { from = "HAWebSocketV13", to = "HAWebSocketV14" }
 ]
 
 # Two cron triggers:
