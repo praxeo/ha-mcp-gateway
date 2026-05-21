@@ -51,7 +51,7 @@ binding = "CF_VERSION_METADATA"
 
 [[durable_objects.bindings]]
 name = "HA_WS"
-class_name = "HAWebSocketV15"
+class_name = "HAWebSocketV16"
 
 [[migrations]]
 tag = "v1"
@@ -246,6 +246,18 @@ renamed_classes = [
 tag = "v15"
 renamed_classes = [
   { from = "HAWebSocketV14", to = "HAWebSocketV15" }
+]
+
+# v16 — revert to MiniMax-M2.7-highspeed. GPT-OSS-120b on Groq produced
+# poor tool-loop behavior: fabricated entity states, reasoning paralysis,
+# premature synthesis fallback. MiniMax handles multi-step agentic tool
+# calling significantly better. Auth switches back to MINIMAX_API_KEY.
+# reasoning_effort/reasoning_format removed; reasoning_split: true added.
+# DO-side changes; rename forces fresh isolate. Storage preserved.
+[[migrations]]
+tag = "v16"
+renamed_classes = [
+  { from = "HAWebSocketV15", to = "HAWebSocketV16" }
 ]
 
 # Two cron triggers:
