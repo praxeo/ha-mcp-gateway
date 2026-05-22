@@ -1,4 +1,4 @@
-import { HAWebSocketV20 } from "./ha-websocket.js";
+import { HAWebSocketV21 } from "./ha-websocket.js";
 import {
   ALL_KINDS,
   fnv1aHex,
@@ -4263,6 +4263,6 @@ var worker_default = {
   }
 };
 export {
-  HAWebSocketV20,
+  HAWebSocketV21,
   worker_default as default
 };

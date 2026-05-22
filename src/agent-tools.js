@@ -181,14 +181,11 @@ const READ_TOOLS = [
     function: {
       name: "get_logbook",
       description:
-        "Fetch Home Assistant logbook entries for event attribution and pattern verification. " +
-        "Use to check WHO or WHAT triggered a state change, to verify an automation fired " +
-        "(or didn't), or to confirm a pattern across a time window. Prefer narrow windows " +
-        "— this can return a lot of data. CRITICAL: start_time and end_time MUST include an " +
-        "explicit timezone offset (e.g., '-05:00' for CDT, '-06:00' for CST). A naive ISO " +
-        "string like '2026-04-17T20:00:00' may be interpreted as UTC and shift your window " +
-        "5–6 hours into a quiet period, returning empty results. When in doubt, use '-05:00' " +
-        "(this household is America/Chicago).",
+        "Fetch Home Assistant logbook entries for event attribution — who/what triggered " +
+        "a state change, whether an automation fired. Prefer narrow windows. CRITICAL: " +
+        "start_time/end_time MUST include an explicit timezone offset — use '-05:00' (this " +
+        "household is America/Chicago); a naive ISO string is read as UTC and shifts the " +
+        "window 5–6h into a quiet period.",
       parameters: {
         type: "object",
         properties: {
@@ -236,19 +233,11 @@ const READ_TOOLS = [
     function: {
       name: "vector_search",
       description:
-        "Semantic search across the unified home knowledge index. Returns ranked matches " +
-        "across entities, automations, scripts, scenes, areas, devices, HA services, your " +
-        "saved memories, and your saved observations. ALWAYS pass kinds=[…] — never call " +
-        "without it; mixed-kind queries can be dominated by services or duplicates. The " +
-        "area filter is case-insensitive but must match an HA area name (e.g., 'MBR' for " +
-        "the master bedroom — NOT 'Master Bedroom'). The domain filter is entity-only and " +
-        "returns nothing for non-entity kinds. Pass include_noisy: true for diagnostic / " +
-        "battery / mesh / signal / LQI / RSSI queries; battery sensors specifically remain " +
-        "visible without that flag. Use topic_tag to retrieve observations under a specific " +
-        "[bracket-prefix]. Default min_score floor is 0.50 (empirical noise floor); pass " +
-        "min_score: 0.6 to tighten. Observations time-decay automatically; entities " +
-        "currently active or recently changed get a small live-state boost. top_k defaults " +
-        "to 15, max 50.",
+        "Semantic search over the unified home knowledge index — entities, automations, " +
+        "scripts, scenes, areas, devices, HA services, your saved memories and " +
+        "observations. The pre-injected context is only a small slice; this covers the " +
+        "full knowledge base. ALWAYS pass kinds=[…] — omitting it yields service-dominated " +
+        "or duplicate-heavy results. Per-parameter notes are in the schema below.",
       parameters: {
         type: "object",
         properties: {
@@ -345,19 +334,12 @@ const READ_TOOLS = [
     function: {
       name: "report_bug",
       description:
-        "Capture a user-flagged issue to the debug log for review at the next iteration " +
-        "session. Call this when the user is explicitly asking you to record / save / log / " +
-        "report / note something as a bug, problem, broken behavior, or debug entry. The " +
-        "trigger is the combination of a recording verb (save, log, report, record, note, " +
-        "capture, remember-as) plus an issue noun (bug, debug, problem, broken, issue). " +
-        "Examples: \"that's a bug\", \"save to debug log\", \"save as bug report\", \"log " +
-        "this as broken\", \"report this as a bug\", \"make a note of this — it's broken\". " +
-        "Do NOT call for general venting (\"this is annoying\"), corrections (\"no, " +
-        "actually...\"), questions (\"why is X on?\"), preference setting (\"save 60% as " +
-        "my preference\"), or normal task flow. If the user's intent is unclear, ask " +
-        "\"Want me to log that as a bug?\" and only call on explicit confirmation. After " +
-        "calling, reply briefly that it's logged. Do NOT attempt to fix the bug — fixes " +
-        "happen in code on the next iteration.",
+        "Capture a user-flagged issue to the debug log for review next iteration. Call " +
+        "when the user explicitly asks to record/save/log/report/note something as a bug, " +
+        "problem, or broken behavior — a recording verb plus an issue noun. Do NOT call " +
+        "for venting, corrections, questions, preference-setting, or normal task flow. If " +
+        "intent is unclear, ask \"Want me to log that as a bug?\" and call only on explicit " +
+        "confirmation. After calling, reply briefly that it's logged; do not attempt a fix.",
       parameters: {
         type: "object",
         properties: {
