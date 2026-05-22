@@ -51,7 +51,7 @@ binding = "CF_VERSION_METADATA"
 
 [[durable_objects.bindings]]
 name = "HA_WS"
-class_name = "HAWebSocketV19"
+class_name = "HAWebSocketV20"
 
 [[migrations]]
 tag = "v1"
@@ -288,6 +288,16 @@ renamed_classes = [
 tag = "v19"
 renamed_classes = [
   { from = "HAWebSocketV18", to = "HAWebSocketV19" }
+]
+
+# v20 — preserve reasoning_content across tool-call rounds. Fireworks
+# requires prior-turn reasoning_content echoed back for interleaved
+# thinking; sanitizeMessagesForLLM + runNativeToolLoop no longer strip
+# it. DO-side code; rename forces a fresh isolate. Storage preserved.
+[[migrations]]
+tag = "v20"
+renamed_classes = [
+  { from = "HAWebSocketV19", to = "HAWebSocketV20" }
 ]
 
 # Two cron triggers:
