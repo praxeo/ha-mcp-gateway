@@ -551,7 +551,7 @@ into the chat agent). `handleTool` is the dispatcher; many tools delegate
 to the DO over HTTP, and the forensic query tools share single helper
 implementations with the chat agent's `executeNativeTool`.
 
-`getAgentToolset` filters out a `DANGEROUS_TOOLS` set (11 tools —
+`getAgentToolset` filters out a `DANGEROUS_TOOLS` set (12 tools —
 `restart_ha`, `create/update/delete_automation`, `bulk_disable/enable_entities`,
 `disable/enable_entity`, `update_entity_registry`, `update_dashboard_config`,
 `clear_cache`, `fire_event`) for non-external roles. External MCP clients

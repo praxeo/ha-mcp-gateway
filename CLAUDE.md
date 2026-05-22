@@ -166,7 +166,7 @@ These are distinct and should not be conflated:
   labels, automations, scripts, scenes, dashboards, calendars, todos, input
   helpers, services) plus agent-state tools, the three forensic query tools,
   `report_bug`, and `ai_chat`. `getAgentToolset` filters out `DANGEROUS_TOOLS`
-  (11 tools — `restart_ha`, automation create/update/delete, bulk
+  (12 tools — `restart_ha`, automation create/update/delete, bulk
   enable/disable, etc.) for non-external roles; external MCP clients get the
   full set. `handleTool` is the dispatcher.
 - **Chat agent native surface** — `NATIVE_AGENT_TOOLS` in `src/agent-tools.js`,
