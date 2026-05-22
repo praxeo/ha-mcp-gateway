@@ -24,8 +24,8 @@ Assistant smart home to LLMs. It:
   fast path that skips the LLM entirely.
 
 It is a single-household production deployment — the author's home. There is no
-staging environment; `wrangler deploy` ships to the live house. Treat changes
-with appropriate care.
+staging environment, and a push to `main` deploys to the live house (see
+Build, test, deploy below). Treat changes with appropriate care.
 
 The autonomous "heartbeat" agent that once ran every 60 seconds has been
 removed — see the Story section in `README.md`. There is exactly one execution
@@ -41,16 +41,21 @@ Windows**.
 ```powershell
 npm install          # dependencies (only devDependency is vitest)
 npm test             # vitest run — currently one suite (forensic filter)
-wrangler deploy      # build + deploy to the live Worker
 ```
 
-- **Build** is implicit in `wrangler deploy`: the `[build]` directive runs
-  `npx esbuild src/worker.js --bundle --outdir=dist --format=esm --outbase=src`,
-  producing `dist/worker.js`.
+- **Deploy is git-driven.** A push to `main` triggers a **Cloudflare Workers
+  Builds** pipeline (set up in the Cloudflare dashboard, so it leaves no
+  artifact in the repo) that runs the build and deploys. A merged commit goes
+  live — treat `git push` to `main` as a production deploy.
+- `wrangler deploy` from the repo root is the manual / local alternative; it
+  runs the same build.
+- **Build** (either path) runs the `wrangler.toml` `[build]` directive —
+  `npx esbuild src/worker.js --bundle --outdir=dist --format=esm --outbase=src`
+  — producing `dist/worker.js`.
 - **`dist/worker.js` is a build artifact. Never edit it by hand** — it is
   overwritten on every build. All source lives in `src/`.
-- `wrangler deploy` also reconciles bindings, cron triggers, and Durable Object
-  migrations with Cloudflare.
+- A deploy reconciles bindings, cron triggers, and Durable Object migrations
+  with Cloudflare.
 - Tests run with `vitest`. The only current suite is
   `test/should-log-state-change.test.js` (the forensic noise filter). Add tests
   alongside it when changing pure, testable logic.
@@ -61,7 +66,7 @@ wrangler deploy      # build + deploy to the live Worker
 
 1. **Durable Object isolate staleness.** The persistent HA WebSocket keeps the
    DO's V8 isolate resident across deploys — Cloudflare never hibernates it, so
-   it never reloads new code on a plain `wrangler deploy`. **Worker-side changes
+   it never reloads new code on an ordinary deploy. **Worker-side changes
    (`src/worker.js`) take effect immediately. DO-side changes
    (`src/ha-websocket.js`) do not.** To force a fresh DO isolate you must rename
    the DO class via a `renamed_classes` migration in `wrangler.toml` and update
@@ -94,8 +99,9 @@ wrangler deploy      # build + deploy to the live Worker
    temp file and use `--data-binary "@file"`. Inline JSON on the PowerShell
    command line gets mangled. See the smoke-test snippets in `README.md`.
 
-6. **Production is live.** There is no staging. A deploy changes the behavior of
-   a real, occupied house. Don't deploy speculative changes.
+6. **Production is live.** There is no staging. A deploy — including a `git
+   push` to `main` — changes the behavior of a real, occupied house. Don't
+   push speculative changes to `main`.
 
 7. **Commit hygiene.** Commit messages in this repo follow
    `type(scope): VNN — summary` (e.g. `feat(do): V21 — trim chat prompt`). The

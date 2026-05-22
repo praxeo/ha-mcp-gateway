@@ -737,14 +737,19 @@ served at `/chat`. Features:
 
 ## Deploy
 
+Deploys are git-driven: a push to `main` triggers a **Cloudflare Workers
+Builds** pipeline (configured in the Cloudflare dashboard) that runs the
+`[build]` step and deploys. A merged commit goes live — treat a push to
+`main` as a production deploy.
+
 ```powershell
-# From C:\Users\obert\ha-mcp-gateway
+# Manual / local deploy from C:\Users\obert\ha-mcp-gateway
 wrangler deploy
 ```
 
-esbuild bundles `src/worker.js` → `dist/worker.js` automatically per the
-`[build]` directive. Bindings + crons + DO migrations reconcile with
-Cloudflare on each deploy.
+Either path runs the `[build]` directive — esbuild bundles `src/worker.js` →
+`dist/worker.js` — and reconciles bindings, crons, and DO migrations with
+Cloudflare.
 
 ```powershell
 # Unit tests (vitest)
@@ -793,8 +798,8 @@ wrangler d1 execute ha_db --remote --command="SELECT 'state_changes' AS t, COUNT
   long stretches without the DO picking it up. Symptoms: worker-side
   endpoints work immediately on deploy, DO-side method-body changes
   don't. **Diagnostic playbook**: `wrangler tail --format json` and
-  inspect per-event `scriptVersion.id` against the latest `wrangler
-  deploy` version id; or compare `/admin/version` (worker) against the
+  inspect per-event `scriptVersion.id` against the latest deployed
+  version id; or compare `/admin/version` (worker) against the
   DO `/version` route. **Fix**: rename the DO class via a
   `renamed_classes` migration. The class has been renamed twenty times
   for exactly this reason (`HAWebSocket` → `HAWebSocketV2` → … →
@@ -807,9 +812,6 @@ wrangler d1 execute ha_db --remote --command="SELECT 'state_changes' AS t, COUNT
 - **Pooling discipline.** Every Workers AI embedding call uses
   `pooling: "cls"`. Mixing pooling between backfill and query produces
   near-random rankings.
-- **`update_automation` returns 405 on this HA instance.** The MCP tool
-  description and the chat system prompt both warn. Edits go through the
-  HA UI manually.
 - **Cloudflare Access fronts the worker.** Direct curl/Invoke-RestMethod
   hits the Access login page. Use `cloudflared access curl` or a service
   token.
