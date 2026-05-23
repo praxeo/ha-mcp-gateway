@@ -51,7 +51,7 @@ binding = "CF_VERSION_METADATA"
 
 [[durable_objects.bindings]]
 name = "HA_WS"
-class_name = "HAWebSocketV21"
+class_name = "HAWebSocketV22"
 
 [[migrations]]
 tag = "v1"
@@ -308,6 +308,24 @@ renamed_classes = [
 tag = "v21"
 renamed_classes = [
   { from = "HAWebSocketV20", to = "HAWebSocketV21" }
+]
+
+# v22 — light service-data sanitizer. light.turn_on / light.toggle accepts
+# at most one color descriptor and each requires a matching mode in
+# attributes.supported_color_modes; DeepSeek V4 Flash repeatedly fails the
+# call by sending multiple or unsupported descriptors alongside
+# brightness_pct. _sanitizeLightServiceData reads supported_color_modes
+# from stateCache and strips bad descriptors before the call reaches HA,
+# keeping one by priority if multiple compatible ones remain. Wired into
+# both executeAIAction (chat path) and the DO /call_service route (MCP
+# path). Light entity context now includes brightness, supported_color_modes,
+# color_mode so the model can see the capability up front. Static prompt
+# gains one QUICK FACTS bullet about the constraint. DO-side code; rename
+# forces a fresh isolate. Storage preserved.
+[[migrations]]
+tag = "v22"
+renamed_classes = [
+  { from = "HAWebSocketV21", to = "HAWebSocketV22" }
 ]
 
 # Two cron triggers:

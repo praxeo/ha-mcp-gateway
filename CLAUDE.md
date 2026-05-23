@@ -71,13 +71,13 @@ npm test             # vitest run — currently one suite (forensic filter)
    (`src/ha-websocket.js`) do not.** To force a fresh DO isolate you must rename
    the DO class via a `renamed_classes` migration in `wrangler.toml` and update
    `class_name` in the `durable_objects.bindings`. The class is currently
-   `HAWebSocketV21` — it has been renamed 20 times for exactly this reason.
+   `HAWebSocketV22` — it has been renamed 21 times for exactly this reason.
    Procedure for any DO-side change you need live:
-   - bump the class name (`HAWebSocketV21` → `HAWebSocketV22`) in the `export
-     class` line in `src/ha-websocket.js`, every `HAWebSocketV21.` static
+   - bump the class name (`HAWebSocketV22` → `HAWebSocketV23`) in the `export
+     class` line in `src/ha-websocket.js`, every `HAWebSocketV22.` static
      reference, the `export {}` at the file end, and the `worker.js` import;
-   - add a `[[migrations]]` block with `tag = "v22"` and
-     `renamed_classes = [{ from = "HAWebSocketV21", to = "HAWebSocketV22" }]`;
+   - add a `[[migrations]]` block with `tag = "v23"` and
+     `renamed_classes = [{ from = "HAWebSocketV22", to = "HAWebSocketV23" }]`;
    - update `class_name` in `[[durable_objects.bindings]]`.
    DO storage (snapshot, chat history, memory, cursors) is preserved across
    renames. Diagnose staleness with `wrangler tail --format json` (compare
@@ -104,7 +104,7 @@ npm test             # vitest run — currently one suite (forensic filter)
    push speculative changes to `main`.
 
 7. **Commit hygiene.** Commit messages in this repo follow
-   `type(scope): VNN — summary` (e.g. `feat(do): V21 — trim chat prompt`). The
+   `type(scope): VNN — summary` (e.g. `feat(do): V22 — sanitize light color descriptors`). The
    `VNN` matches the DO migration tag when the change is DO-side.
 
 ---
@@ -120,7 +120,7 @@ Cloudflare Worker  (src/worker.js)
    │   CHAT_HTML UI, ElevenLabs STT proxy, multi-kind knowledge backfill,
    │   scheduled() cron handler
    ▼
-Durable Object  HAWebSocketV21  (src/ha-websocket.js)
+Durable Object  HAWebSocketV22  (src/ha-websocket.js)
    │   singleton "ha-websocket-singleton" — persistent HA WebSocket,
    │   in-memory stateCache, hibernation snapshot, chat tool loop,
    │   cover fast path, forensic D1 writers, reconnect backfill
@@ -146,11 +146,11 @@ addresses the same instance by the fixed name `ha-websocket-singleton`.
 | Path | Role |
 |---|---|
 | `src/worker.js` | Worker entry. MCP handler (`TOOLS` — 79 entries — + `handleTool` dispatch, `getAgentToolset`, `DANGEROUS_TOOLS`), HTTP routes, embedded `CHAT_HTML`, ElevenLabs STT proxy, KV cache helpers, per-kind `build*Docs`, `backfillKnowledge`, `scheduled()` cron handler. |
-| `src/ha-websocket.js` | The Durable Object class `HAWebSocketV21`. Persistent HA WS, `stateCache`, chat path (`chatWithAgentNative`), native tool loop (`runNativeToolLoop`), tool dispatch (`executeNativeTool`), action executor (`executeAIAction`), prompt builders, fast path, forensic D1 writers, reconnect backfill, `alarm()` keepalive. ~6000 lines — the bulk of the system. |
+| `src/ha-websocket.js` | The Durable Object class `HAWebSocketV22`. Persistent HA WS, `stateCache`, chat path (`chatWithAgentNative`), native tool loop (`runNativeToolLoop`), tool dispatch (`executeNativeTool`), action executor (`executeAIAction`), prompt builders, fast path, forensic D1 writers, reconnect backfill, `alarm()` keepalive. `_sanitizeLightServiceData` strips unsupported color descriptors from `light.turn_on` / `light.toggle` calls before they reach HA. ~6000 lines — the bulk of the system. |
 | `src/agent-tools.js` | OpenAI-format tool schemas for the chat agent: `NATIVE_AGENT_TOOLS` (16 = 4 action + 12 read), `CHAT_ALLOWED_TOOL_NAMES`, `NATIVE_ACTION_TOOL_NAMES`. |
 | `src/vectorize-schema.js` | Shared Vectorize schema + helpers: `vectorIdFor`, `topicTagFor`, `fnv1aHex`, per-kind embed-text builders, `isNoisyEntity` / `isNoisySwitch` / `isNoisyService`, `buildMetadata`. Imported by both `worker.js` and `ha-websocket.js`. |
 | `migrations/000{1,2,3}_*.sql` | D1 schema. 0001 indexes legacy tables; 0002 creates the forensic log tables; 0003 de-dupes `state_changes` and adds the backfill-idempotency unique index. |
-| `wrangler.toml` | Bindings, `[build]`, cron triggers, DO migrations v1→v21. |
+| `wrangler.toml` | Bindings, `[build]`, cron triggers, DO migrations v1→v22. |
 | `dist/worker.js` | esbuild output — **build artifact, never edit**. |
 | `BUGS.md` | The iteration backlog — bugs captured via `report_bug`, folded in at iteration time. |
 | `.dev.vars` | Local-dev secrets — never committed. |
@@ -273,7 +273,7 @@ Groq/MiniMax naming.
 
 ## Bindings, secrets, and flags
 
-**Bindings** (`wrangler.toml`): `HA_WS` (DO `HAWebSocketV21`), `HA_CACHE` (KV),
+**Bindings** (`wrangler.toml`): `HA_WS` (DO `HAWebSocketV22`), `HA_CACHE` (KV),
 `KNOWLEDGE` (Vectorize `ha-knowledge`), `AI` (Workers AI), `DB` (D1 `ha_db`),
 `CF_VERSION_METADATA`.
 

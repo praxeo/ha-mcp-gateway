@@ -145,7 +145,7 @@ Cloudflare Worker (worker.js)         ◀── /mcp, /chat, /transcribe, /refre
    │  proxy, multi-kind backfill, two crons (cache prewarm; daily resync
    │  + ai_log + forensic-log retention)
    ▼
-Durable Object: HAWebSocketV21 (ha-websocket.js)
+Durable Object: HAWebSocketV22 (ha-websocket.js)
    │  singleton "ha-websocket-singleton" — owns the persistent WS
    │  in-memory stateCache, hibernation snapshot, cover fast path,
    │  HOUSE_STATE_SNAPSHOT builder, chat tool loop, forensic D1 writers,
@@ -182,13 +182,13 @@ Layer-by-layer:
 | File | Role |
 |---|---|
 | `src/worker.js` | Cloudflare Worker entry. Owns the MCP handler (`TOOLS` list — 79 tools — plus `handleTool` dispatch, `getAgentToolset` role filter, `DANGEROUS_TOOLS` set), HTTP routes including `/admin/recent_activity`, the embedded `CHAT_HTML` UI, the ElevenLabs STT proxy, the `formatBugsAsMarkdown` helper, KV cache helpers, the per-kind `build*Docs` builders, the multi-kind `backfillKnowledge`, and the `scheduled()` cron handler (`prewarmCache`, `dailyKnowledgeResync`, `dailyAiLogRetention`, `dailyForensicLogRetention`). |
-| `src/ha-websocket.js` | Durable Object class `HAWebSocketV21` (renamed forward through the persistent-WS refresh dance — see [Operational notes](#operational-notes)). Holds the persistent HA WebSocket and in-memory `stateCache`. Subscribes to five HA event types: `state_changed`, `entity_registry_updated`, `device_registry_updated`, `automation_triggered`, `call_service`. Writes every meaningful event fire-and-forget to D1 via `_writeStateChangeToD1` / `_writeAutomationRunToD1` / `_writeServiceCallToD1`, gated by `_shouldLogStateChange` for the state path (Zigbee/network-noise denylist). Reconnect backfill from HA history via `_backfillStateChangesFromHA`. Chat system prompt is split into `getStaticChatSystemPrompt` (cacheable) + `buildDynamicContext` (per-turn). One execution path: `chatWithAgentNative` (user-driven, SSE), preceded by `_tryDeterministicFastPath` for cover commands. Native tool loop in `runNativeToolLoop`, action executor in `executeAIAction`, tool dispatcher in `executeNativeTool`. `alarm()` is WS keepalive only — ping/pong, reconnect on no-pong, mandatory reschedule. |
+| `src/ha-websocket.js` | Durable Object class `HAWebSocketV22` (renamed forward through the persistent-WS refresh dance — see [Operational notes](#operational-notes)). Holds the persistent HA WebSocket and in-memory `stateCache`. Subscribes to five HA event types: `state_changed`, `entity_registry_updated`, `device_registry_updated`, `automation_triggered`, `call_service`. Writes every meaningful event fire-and-forget to D1 via `_writeStateChangeToD1` / `_writeAutomationRunToD1` / `_writeServiceCallToD1`, gated by `_shouldLogStateChange` for the state path (Zigbee/network-noise denylist). Reconnect backfill from HA history via `_backfillStateChangesFromHA`. Chat system prompt is split into `getStaticChatSystemPrompt` (cacheable) + `buildDynamicContext` (per-turn). One execution path: `chatWithAgentNative` (user-driven, SSE), preceded by `_tryDeterministicFastPath` for cover commands. Native tool loop in `runNativeToolLoop`, action executor in `executeAIAction`, tool dispatcher in `executeNativeTool`. `alarm()` is WS keepalive only — ping/pong, reconnect on no-pong, mandatory reschedule. |
 | `src/agent-tools.js` | OpenAI-format tool schemas passed to the chat model. `ACTION_TOOLS` (4: `call_service`, `ai_send_notification`, `save_memory`, `save_observation`) + `READ_TOOLS` (12: `get_state`, `get_logbook`, `render_template`, `vector_search`, `get_house_topology`, `get_automation_config`, `report_bug`, `query_state_history`, `query_automation_runs`, `query_causal_chain`, `get_nws_weather`, `get_nws_discussion`) = `NATIVE_AGENT_TOOLS`, 16 total. `CHAT_ALLOWED_TOOL_NAMES` includes all 16 — the chat agent has the full native surface. `NATIVE_ACTION_TOOL_NAMES` marks the 4 side-effecting tools (logged as actions). |
 | `src/vectorize-schema.js` | Canonical metadata schema, `vectorIdFor(kind, refId)`, FNV-1a hash, `topicTagFor(text)`, per-kind embed-text builders, `isNoisyEntity` / `isNoisySwitch` / `isNoisyService` / `entityCategoryFor` helpers, `buildMetadata` (lowercase-coerces `area`, string-coerces `is_noisy`, propagates `created_at`). |
 | `migrations/0001_d1_indexes_and_columns.sql` | Indexes on the legacy `ai_log` / `observations` / `bugs` tables. Also adds the nullable `data` JSON column to `observations`. |
 | `migrations/0002_forensic_log.sql` | Creates `state_changes`, `automation_runs`, `service_calls` and their context-chain indexes. |
 | `migrations/0003_state_changes_dedup.sql` | De-dupes `state_changes` and adds a unique index on `(entity_id, fired_at_ms, new_state)` so reconnect backfill's `INSERT OR IGNORE` is idempotent. |
-| `wrangler.toml` | Bindings (HA_WS, HA_CACHE, KNOWLEDGE, AI, DB, CF_VERSION_METADATA), build command (esbuild bundles `src/worker.js` → `dist/worker.js`), cron triggers (`* * * * *` cache prewarm, `30 8 * * *` daily resync + retention), DO migrations v1→v21 (`renamed_classes` chain). `compatibility_date = "2026-05-09"`. |
+| `wrangler.toml` | Bindings (HA_WS, HA_CACHE, KNOWLEDGE, AI, DB, CF_VERSION_METADATA), build command (esbuild bundles `src/worker.js` → `dist/worker.js`), cron triggers (`* * * * *` cache prewarm, `30 8 * * *` daily resync + retention), DO migrations v1→v22 (`renamed_classes` chain). `compatibility_date = "2026-05-09"`. |
 | `dist/worker.js` | esbuild output. **Build artifact — never edit.** |
 | `.dev.vars` | Local-dev secrets. Never committed. |
 
@@ -578,7 +578,7 @@ native set maps to an MCP tool.
 | `last_event_seen_ms` | DO storage | scalar | Cursor for reconnect backfill (`_backfillStateChangesFromHA`). |
 
 Timeline timestamps are reformatted to **Central time** at prompt-injection
-(`HAWebSocketV21._formatTimelineTimestamp`). Underlying `ai_log` entries
+(`HAWebSocketV22._formatTimelineTimestamp`). Underlying `ai_log` entries
 stay ISO 8601 for parseability.
 
 ---
@@ -589,7 +589,7 @@ stay ISO 8601 for parseability.
 
 | Binding | Resource | Purpose |
 |---|---|---|
-| `HA_WS` | Durable Object class `HAWebSocketV21` | Singleton `ha-websocket-singleton` |
+| `HA_WS` | Durable Object class `HAWebSocketV22` | Singleton `ha-websocket-singleton` |
 | `HA_CACHE` | KV namespace | TTL'd cache for HA registries / states between cold starts |
 | `KNOWLEDGE` | Vectorize index `ha-knowledge` | Multi-kind semantic index |
 | `AI` | Workers AI | `@cf/baai/bge-large-en-v1.5` embeddings (cls pooling) |
@@ -801,9 +801,9 @@ wrangler d1 execute ha_db --remote --command="SELECT 'state_changes' AS t, COUNT
   inspect per-event `scriptVersion.id` against the latest deployed
   version id; or compare `/admin/version` (worker) against the
   DO `/version` route. **Fix**: rename the DO class via a
-  `renamed_classes` migration. The class has been renamed twenty times
-  for exactly this reason (`HAWebSocket` → `HAWebSocketV2` → … →
-  `HAWebSocketV21`). Storage is preserved across renames.
+  `renamed_classes` migration. The class has been renamed twenty-one
+  times for exactly this reason (`HAWebSocket` → `HAWebSocketV2` → … →
+  `HAWebSocketV22`). Storage is preserved across renames.
 - **Three redundant DO keepalives.** The persistent HA WebSocket is the
   primary; the 60s alarm (ping/pong + mandatory reschedule) is the
   secondary; the minute-cadence `prewarmCache` cron is the tertiary.
@@ -851,6 +851,27 @@ wrangler d1 execute ha_db --remote --command="SELECT 'state_changes' AS t, COUNT
 
 Newest first.
 
+- **V22 — sanitize light color descriptors before HA call.** DeepSeek V4
+  Flash repeatedly fumbled `light.turn_on` on brightness-only lights by
+  including mutually-exclusive color descriptors (`rgb_color`,
+  `color_temp_kelvin`, `white`, …) alongside `brightness_pct`. HA groups
+  all color descriptors into one mutually-exclusive set ("Color
+  descriptors" 400) and each descriptor requires the matching mode in
+  `attributes.supported_color_modes`. New `_sanitizeLightServiceData`
+  reads the target's `supported_color_modes` from `stateCache` and strips
+  any descriptor the light doesn't support before the call reaches HA;
+  if multiple compatible descriptors remain it keeps one by fixed
+  priority. Wired into both `executeAIAction` (chat path) and the DO
+  `/call_service` route (MCP path) so one helper covers both surfaces.
+  Light entity context now also includes `brightness`,
+  `supported_color_modes`, `color_mode` so the model sees the capability
+  up front, and a one-line `LIGHT CALLS` rule was added to QUICK FACTS.
+  Strips are logged to `ai_log` as `light_sanitize` for audit. Unit test
+  suite `test/sanitize-light-service-data.test.js` covers eleven
+  representative cases. Diagnosis: this wasn't a prompt regression — the
+  MiniMax-era prompt had no color-descriptor guidance either; DeepSeek
+  just infers the constraint less well from the schema. The deterministic
+  guard is the floor regardless of model.
 - **V21 — chat-prompt trim + Tesla Model Y knowledge.** History,
   timeline, and top-K retrieval windows tightened; tool schemas
   condensed; the snapshot trimmed. A `TESLA MODEL Y` group was added to
