@@ -17,112 +17,117 @@ the current code in operational detail.
 
 ## Story: the monitor that didn't earn its keep
 
-The original ambition was bigger than what's here today. An autonomous LLM
-heartbeat — MiniMax with the full tool surface — ran every 60 seconds,
-consumed a queue of state-change events filtered down to "interesting"
-ones, retrieved relevant context from the vector index, and decided whether
-to act, notify, save an observation, or do nothing. The pitch in the MCP
-intro message was things like *"I locked the back porch deadbolt at 4:49 AM
-because it was unsecured and the house was occupied."* In principle, a
-24/7 reasoning loop with full state visibility should surface insights
-humans miss.
+The original ambition was bigger. An autonomous LLM heartbeat — MiniMax,
+full tool surface — ran every 60 seconds, drained a queue of state
+changes filtered down to the interesting ones, pulled context from the
+vector index, and decided whether to act, notify, save an observation,
+or do nothing. The hook in the MCP intro message was lines like
+*"I locked the back porch deadbolt at 4:49 AM because it was unsecured
+and the house was occupied."* A 24/7 reasoning loop with full state
+visibility ought to catch what humans miss. In theory.
 
-In practice, it didn't. Over roughly 30 days of running, the autonomous
-monitor produced zero useful proactive interventions. When asked directly
-what it had done, the agent itself admitted:
+It didn't. Over roughly a month of running, the monitor produced zero
+useful proactive interventions. When I asked it directly what it had
+done, it told on itself:
 
-- It saw the auxiliary heat draw spike above 5000W and didn't flag it
-  ("the spike was brief").
-- It logged observations like `[basement-porch-camera-flapping]`
-  (motion 8× at 1:38 AM across 4 weeks) but never surfaced them in chat.
-- It correctly identified that it was supposed to bring these to attention
-  and was unable to close the loop on its own initiative.
+- It saw aux heat spike above 5000W and decided not to flag it ("the
+  spike was brief").
+- It dutifully logged things like `[basement-porch-camera-flapping]` —
+  motion 8× at 1:38 AM across four weeks — but never mentioned them in
+  chat.
+- It knew it was supposed to surface these patterns and couldn't figure
+  out how to bring them up on its own.
 
-Worse, the actions it *did* take were variously annoying or dangerous.
-Every autonomous service call was one of:
-- right and useful (zero instances anyone could recall),
-- right but unnecessary (annoying),
-- wrong (potentially dangerous).
+And when it did act, every autonomous service call fell into one of
+three buckets: right and useful (zero, that I can recall), right but
+unnecessary (annoying), or wrong (occasionally dangerous). No
+silent-good-outcome bucket. The expected value of running the thing was
+negative.
 
-There was no silent-good-outcome bucket. The expected value of running it
-was negative.
+My first instinct was a smarter model. That wasn't it — the model could
+reason fine, it had the wrong job. The monitor saw events one at a
+time, but you don't catch that the basement porch camera triggers at
+1:38 AM by looking at one event. You catch it by looking at thirty days
+of them and seeing the cluster. The work was the wrong shape for a
+streaming agent.
 
-### Diagnosing it
+Same model, asked "tell me the 24-hour story" in chat: clean narrative,
+right anomalies surfaced. Asked "should I interrupt John?" on a
+60-second tick: no, 86,400 times a day. Right tool, wrong job.
 
-The instinct was to reach for a smarter model. The diagnosis was harder.
-The model could reason fine — it just had the wrong job. Three observations
-made this clear:
+And the data the monitor was supposed to surface was already there.
+Live state in the cache, history in HA, semantics in the vector index.
+What I needed wasn't a daemon volunteering things — it was a cheap way
+to ask.
 
-1. **Pattern recognition is a batch problem, not a streaming problem.**
-   You don't notice that the basement porch camera fires at 1:38 AM by
-   looking at one event. You notice by looking at 30 days of events and
-   seeing the cluster. The heartbeat saw events one at a time.
+There was also a less abstract reason. My kid is due in October. "The
+AI sometimes does dangerous things autonomously" isn't a thing you live
+with once there's a baby in the house.
 
-2. **The LLM is excellent at narrative synthesis on demand and mediocre
-   at real-time interrupt judgment.** A "tell me the 24-hour story" chat
-   call produced a clean, well-organized narrative with the right anomalies
-   flagged. The same model on a 60s tick, asked "should I interrupt John?"
-   answered "no" 86,400 times a day.
+So I ripped it out. Every HA state change, automation fire, and service
+call now lands fire-and-forget in D1 — three tables, HA's context-chain
+IDs preserved so cause-and-effect queries work, 90-day rolling
+retention. On WebSocket reconnect the worker pulls missed state changes
+from HA's history API, idempotent against a unique index so backfill is
+safe to retry.
 
-3. **The autonomous monitor's value was supposed to be the data it
-   surfaced — but the data was always there.** The cache held live state.
-   HA held history. The vector index held semantics. What was missing was
-   a clean way to *ask*. The monitor was filling that gap by deciding
-   what to volunteer; the right fix was making it cheap and natural to
-   query.
+The chat agent got three new tools: `query_state_history`,
+`query_automation_runs`, and `query_causal_chain` (which walks
+parent/child context links across all three tables). The same helper
+functions back both the chat dispatcher and the MCP surface, so Claude
+Code can hit everything the chat agent can. A `FORENSIC MEMORY` block
+in the system prompt tells the model the log is its always-on memory
+and to query it freely instead of guessing.
 
-There was also a separate, more important consideration: the household is
-about to grow. With a child arriving in October, "the AI sometimes does
-dangerous things autonomously" stops being a tolerable risk.
-
-### What we built instead
-
-The autonomous heartbeat is gone. In its place:
-
-- **A forensic event log in D1.** Every state change (`state_changes`),
-  every automation fire (`automation_runs`), and every service call
-  (`service_calls`) lands in dedicated tables with HA's context-chain
-  links preserved. 90-day rolling retention. Reconnect-backfill from
-  HA's history API for state changes missed during WS dropouts.
-- **Three new query tools on the chat agent.** `query_state_history`,
-  `query_automation_runs`, and `query_causal_chain` (walks parent/child
-  context links across all three tables). Same helpers back both the
-  native chat dispatcher and the MCP surface — Claude Code can hit
-  everything the chat agent can.
-- **A new `FORENSIC MEMORY` block in the chat system prompt** telling
-  the model the log is its always-on memory and to query it freely
-  rather than guessing.
-- **Net deletion: ~720 lines** out of `ha-websocket.js`, plus seven
-  vestigial MCP tools (`ai_enable` / `ai_disable` / `ai_status` /
-  `ai_trigger` / `ai_clear_log` / `ai_clear_memory` / `ai_clear_chat`).
-  `dist/worker.js` shrank from ~390KB to ~352KB. `alarm()` collapsed to
-  WS ping/pong + reschedule — three redundant DO keepalives remain
-  (the WS itself, the alarm, and the minute-cadence prewarm cron).
+Net change: ~720 lines deleted from `ha-websocket.js`, plus seven
+vestigial MCP tools (`ai_enable`, `ai_disable`, `ai_status`,
+`ai_trigger`, `ai_clear_log`, `ai_clear_memory`, `ai_clear_chat`). The
+bundle shrank from ~390KB to ~352KB. `alarm()` collapsed to a WebSocket
+ping/pong with a mandatory reschedule.
 
 The chat agent now feels omniscient about the house's history without
-being intrusive. "What happened at 3 AM?" "Why didn't the porch light
-fire when the door opened?" "How many times did the basement bay open
-this week?" — all become one or two SQL queries, narrated.
-
-### What's gone for good
-
-The autonomous prompt (`getNativeAgentSystemPrompt` with its
-`AUTONOMOUS ACTION SAFETY` block of hard-NEVERs), `runAIAgent` and
-`runAIAgentNative`, the `recentEvents` queue, the `shouldQueueEvent`
-and `checkBurst` filters, the 15-min synthetic heartbeat, the
-`aiEnabled` flag and all the toggle endpoints — deleted. Git history
-keeps them retrievable if the experiment ever needs to be revisited
-with a different hypothesis.
-
-### What survives
-
-Everything that earned its keep: the persistent HA WS and live
+being intrusive. *"What happened at 3 AM?"* *"Why didn't the porch
+light fire when the door opened?"* *"How many times did the basement
+bay open this week?"* — all one or two SQL queries, narrated. What's
+gone for good: the autonomous prompt, the `runAIAgent` paths, the event
+queue, the burst filters, the synthetic heartbeat, the `aiEnabled` flag
+and its toggle endpoints. Git history keeps them retrievable if I ever
+want to revisit the experiment with a different hypothesis. What
+survives is what earned its keep: the persistent WebSocket and
 `stateCache`, the hibernation snapshot, the chat path with its native
 tool loop, the vector knowledge index, the fast-path cover commands,
-`save_memory` / `save_observation` (now chat-only, gated by explicit
-user-request prompts), the `ai_log` table for chat history, the
-`observations` table, the crons, and the entire MCP tool surface
-minus the seven autonomous-control entries.
+`save_memory` and `save_observation` (chat-only now, gated by explicit
+user request), the `ai_log` and `observations` tables, the crons, and
+the entire MCP surface minus those seven autonomous-control entries.
+
+---
+
+## On models
+
+The chat agent has rotated through more models than I'd care to admit
+for a one-house deployment. Early on I ran Gemma 4 a26 on Cloudflare
+Workers AI — local-ish, free, fast at small scale, but tool-call
+adherence was rough. It would confidently invoke services with the
+wrong arguments. Kimi K2.6 via Moonshot reasoned better but drifted on
+multi-step chains. NVIDIA's Nemotron Super 120B looked good on paper
+and awkward in practice against the OpenAI tool-call format.
+
+gpt-oss-120b on Groq held the role for a few migrations (V13–V15) —
+fast inference, but the failure mode was the one that mattered most
+here: it couldn't keep a multi-step tool chain together. Fabricated
+entity states, reasoning paralysis, premature synthesis fallback. The
+kind of failures that only show up once the agent has to chain three
+or four tool calls without losing the thread.
+
+V16 reverted to MiniMax-M2.7-highspeed — better at the long chain than
+gpt-oss, held the role until DeepSeek V4 Flash with Think High
+reasoning showed up. That's the current setup (V17+): DeepSeek V4
+Flash on Fireworks, `reasoning_effort: "high"`, OpenAI-compatible tool
+schema. Cheaper than MiniMax and better at the chain. It still fumbles
+edge cases occasionally — V22 was a deterministic guard against it
+sending unsupported color descriptors to `light.turn_on` — but those
+get bounded with source-level guards rather than left to the model's
+discretion.
 
 ---
 
