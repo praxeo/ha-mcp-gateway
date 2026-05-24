@@ -105,7 +105,7 @@ the entire MCP surface minus those seven autonomous-control entries.
 ## On models
 
 The chat agent has rotated through more models than I'd care to admit
-for a one-house deployment. Early on I ran Gemma 4 a26 on Cloudflare
+for a one-house deployment. Early on I ran Gemma 4 MoE on Cloudflare
 Workers AI — local-ish, free, fast at small scale, but tool-call
 adherence was rough. It would confidently invoke services with the
 wrong arguments. Kimi K2.6 via Moonshot reasoned better but drifted on
