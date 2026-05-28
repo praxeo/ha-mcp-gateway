@@ -146,6 +146,72 @@ const ACTION_TOOLS = [
         required: ["text"]
       }
     }
+  },
+  {
+    type: "function",
+    function: {
+      name: "schedule_action",
+      description:
+        "Schedule a one-shot HA service call to fire ONCE after a delay, then auto-delete. " +
+        "Use for ephemeral 'in N minutes/hours' requests like 'turn off the drop lights in " +
+        "an hour'. The task lives only in the gateway (not in HA's automations list) and " +
+        "disappears after it fires. Granularity is ~60s. " +
+        "COMPOUND PATTERN — for 'turn X on for N minutes' or 'change Z then change Z back', " +
+        "use TWO tool calls in the same turn: call_service for the immediate action and " +
+        "schedule_action for the reversal. Example for 'turn the AC down 2 degrees for an " +
+        "hour': read current_temperature via get_state (call it T), call_service to set " +
+        "T-2 now, schedule_action to set T back in 3600s. " +
+        "Reply with a one-line confirmation including when it will fire (Central time).",
+      parameters: {
+        type: "object",
+        properties: {
+          delay_seconds: {
+            type: "number",
+            description: "Seconds from now until the action fires. 3600 = 1 hour, 1800 = 30 min, 900 = 15 min. Max 2592000 (30 days)."
+          },
+          domain: {
+            type: "string",
+            description: "HA service domain — same as call_service (e.g., 'light', 'switch', 'climate', 'cover')."
+          },
+          service: {
+            type: "string",
+            description: "HA service name — e.g., 'turn_off', 'set_temperature', 'close_cover'."
+          },
+          service_data: {
+            type: "object",
+            description: "Service data including entity_id and any domain-specific params (temperature, brightness, etc.). Snapshot any 'current value' arithmetic at schedule time — pass absolute values, not deltas.",
+            additionalProperties: true
+          },
+          description: {
+            type: "string",
+            description: "Short human-readable summary used in confirmations, the timeline, and list_scheduled_actions output. E.g., 'Turn off kitchen drop lights' or 'Restore basement thermostat to 72°F'."
+          }
+        },
+        required: ["delay_seconds", "domain", "service", "service_data", "description"]
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "cancel_scheduled_action",
+      description:
+        "Cancel a pending one-shot scheduled action by its task_id. Use when the user " +
+        "says 'never mind', 'cancel that', 'don't turn them off after all', or names a " +
+        "specific pending task. If you don't have the task_id, call list_scheduled_actions " +
+        "first. Returns ok=true and the task description on success, ok=false reason='not_found' " +
+        "if the id is unknown.",
+      parameters: {
+        type: "object",
+        properties: {
+          task_id: {
+            type: "string",
+            description: "The UUID returned by schedule_action (also visible in list_scheduled_actions)."
+          }
+        },
+        required: ["task_id"]
+      }
+    }
   }
 ];
 
@@ -475,6 +541,23 @@ const READ_TOOLS = [
         }
       }
     }
+  },
+  {
+    type: "function",
+    function: {
+      name: "list_scheduled_actions",
+      description:
+        "List all pending one-shot scheduled actions (created via schedule_action), sorted " +
+        "by fire time soonest-first. Use when the user asks 'what's pending', 'what do you " +
+        "have scheduled', 'is there anything queued', or before calling cancel_scheduled_action " +
+        "when you don't know the task_id. Returns { count, tasks[] } with each task's id, " +
+        "description, fire_at_ms (absolute) and fires_in_seconds (relative). Zero arguments.",
+      parameters: {
+        type: "object",
+        properties: {},
+        required: []
+      }
+    }
   }
 ];
 
@@ -502,6 +585,8 @@ export const CHAT_ALLOWED_TOOL_NAMES = new Set([
   "ai_send_notification",
   "save_memory",
   "save_observation",
+  "schedule_action",
+  "cancel_scheduled_action",
   "get_state",
   "get_logbook",
   "render_template",
@@ -513,5 +598,6 @@ export const CHAT_ALLOWED_TOOL_NAMES = new Set([
   "query_automation_runs",
   "query_causal_chain",
   "get_nws_weather",
-  "get_nws_discussion"
+  "get_nws_discussion",
+  "list_scheduled_actions"
 ]);

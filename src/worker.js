@@ -1,4 +1,4 @@
-import { HAWebSocketV22 } from "./ha-websocket.js";
+import { HAWebSocketV23 } from "./ha-websocket.js";
 import {
   ALL_KINDS,
   fnv1aHex,
@@ -680,6 +680,38 @@ var TOOLS = [
         depth: { type: "number", description: "Max chain depth (default 5, hard cap 10)" }
       },
       required: ["context_id"]
+    }
+  },
+  // --- Ephemeral one-shot scheduler ---
+  {
+    name: "schedule_action",
+    description: "Schedule a one-shot HA service call to fire ONCE after a delay, then auto-delete. Use for ephemeral 'in N minutes/hours' tasks like 'turn off the drop lights in an hour'. The task lives only in the gateway (not in HA's automations list). Compound 'on for an hour' patterns: call the regular call_service for the immediate action and schedule_action for the reversal. Granularity is ~60 seconds.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        delay_seconds: { type: "number", description: "Seconds from now until the action fires. 3600 = 1 hour. Max 2592000 (30 days)." },
+        domain: { type: "string", description: "HA service domain — same as call_service (e.g., 'light', 'climate')." },
+        service: { type: "string", description: "HA service name — e.g., 'turn_off', 'set_temperature'." },
+        service_data: { type: "object", description: "Service data including entity_id and any params. Use absolute values, not deltas.", additionalProperties: true },
+        description: { type: "string", description: "Short human-readable summary used in listings and the forensic log." }
+      },
+      required: ["delay_seconds", "domain", "service", "service_data", "description"]
+    }
+  },
+  {
+    name: "list_scheduled_actions",
+    description: "List pending one-shot scheduled actions (sorted soonest-first). Returns { count, tasks[] } with id, description, fire_at_ms, fires_in_seconds. Zero arguments.",
+    inputSchema: { type: "object", properties: {} }
+  },
+  {
+    name: "cancel_scheduled_action",
+    description: "Cancel a pending one-shot scheduled action by its task_id. Returns { ok: true, cancelled: true } on success or { ok: false, cancelled: false, reason: 'not_found' } if the id is unknown.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        task_id: { type: "string", description: "The UUID returned by schedule_action." }
+      },
+      required: ["task_id"]
     }
   }
 ];
@@ -2786,6 +2818,26 @@ async function handleTool(env, name, args) {
       const r = await doFetch(env, "/" + name, args || {});
       return r || { error: "DO not responding" };
     }
+    // ---- Ephemeral one-shot scheduler ----
+    case "schedule_action": {
+      const r = await doFetch(env, "/schedule_action", {
+        delay_seconds: args.delay_seconds,
+        domain: args.domain,
+        service: args.service,
+        service_data: args.service_data || {},
+        description: args.description || "",
+        source: "mcp"
+      });
+      return r || { error: "DO not responding" };
+    }
+    case "list_scheduled_actions": {
+      const r = await doFetch(env, "/list_scheduled_actions", {});
+      return r || { error: "DO not responding" };
+    }
+    case "cancel_scheduled_action": {
+      const r = await doFetch(env, "/cancel_scheduled_action", { task_id: args.task_id });
+      return r || { error: "DO not responding" };
+    }
     // ---- Cache Management ----
     case "cache_status": {
       if (!env.HA_CACHE) return { error: "HA_CACHE not bound" };
@@ -4263,6 +4315,6 @@ var worker_default = {
   }
 };
 export {
-  HAWebSocketV22,
+  HAWebSocketV23,
   worker_default as default
 };

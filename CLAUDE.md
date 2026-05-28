@@ -116,7 +116,7 @@ User (web /chat · Claude Desktop · Claude Code · WhatsApp[dormant])
         │
         ▼
 Cloudflare Worker  (src/worker.js)
-   │   HTTP routing, MCP JSON-RPC handler (79-tool surface), embedded
+   │   HTTP routing, MCP JSON-RPC handler (82-tool surface), embedded
    │   CHAT_HTML UI, ElevenLabs STT proxy, multi-kind knowledge backfill,
    │   scheduled() cron handler
    ▼
@@ -145,9 +145,9 @@ addresses the same instance by the fixed name `ha-websocket-singleton`.
 
 | Path | Role |
 |---|---|
-| `src/worker.js` | Worker entry. MCP handler (`TOOLS` — 79 entries — + `handleTool` dispatch, `getAgentToolset`, `DANGEROUS_TOOLS`), HTTP routes, embedded `CHAT_HTML`, ElevenLabs STT proxy, KV cache helpers, per-kind `build*Docs`, `backfillKnowledge`, `scheduled()` cron handler. |
+| `src/worker.js` | Worker entry. MCP handler (`TOOLS` — 82 entries — + `handleTool` dispatch, `getAgentToolset`, `DANGEROUS_TOOLS`), HTTP routes, embedded `CHAT_HTML`, ElevenLabs STT proxy, KV cache helpers, per-kind `build*Docs`, `backfillKnowledge`, `scheduled()` cron handler. |
 | `src/ha-websocket.js` | The Durable Object class `HAWebSocketV22`. Persistent HA WS, `stateCache`, chat path (`chatWithAgentNative`), native tool loop (`runNativeToolLoop`), tool dispatch (`executeNativeTool`), action executor (`executeAIAction`), prompt builders, fast path, forensic D1 writers, reconnect backfill, `alarm()` keepalive. `_sanitizeLightServiceData` strips unsupported color descriptors from `light.turn_on` / `light.toggle` calls before they reach HA. ~6000 lines — the bulk of the system. |
-| `src/agent-tools.js` | OpenAI-format tool schemas for the chat agent: `NATIVE_AGENT_TOOLS` (16 = 4 action + 12 read), `CHAT_ALLOWED_TOOL_NAMES`, `NATIVE_ACTION_TOOL_NAMES`. |
+| `src/agent-tools.js` | OpenAI-format tool schemas for the chat agent: `NATIVE_AGENT_TOOLS` (19 = 6 action + 13 read), `CHAT_ALLOWED_TOOL_NAMES`, `NATIVE_ACTION_TOOL_NAMES`. |
 | `src/vectorize-schema.js` | Shared Vectorize schema + helpers: `vectorIdFor`, `topicTagFor`, `fnv1aHex`, per-kind embed-text builders, `isNoisyEntity` / `isNoisySwitch` / `isNoisyService`, `buildMetadata`. Imported by both `worker.js` and `ha-websocket.js`. |
 | `migrations/000{1,2,3}_*.sql` | D1 schema. 0001 indexes legacy tables; 0002 creates the forensic log tables; 0003 de-dupes `state_changes` and adds the backfill-idempotency unique index. |
 | `wrangler.toml` | Bindings, `[build]`, cron triggers, DO migrations v1→v22. |
@@ -161,21 +161,25 @@ addresses the same instance by the fixed name `ha-websocket-singleton`.
 
 These are distinct and should not be conflated:
 
-- **MCP surface** — `TOOLS` in `src/worker.js`, **79 tools**, returned by the
+- **MCP surface** — `TOOLS` in `src/worker.js`, **82 tools**, returned by the
   MCP `tools/list` method. Full HA control (entities, devices, areas, floors,
   labels, automations, scripts, scenes, dashboards, calendars, todos, input
   helpers, services) plus agent-state tools, the three forensic query tools,
-  `report_bug`, and `ai_chat`. `getAgentToolset` filters out `DANGEROUS_TOOLS`
-  (12 tools — `restart_ha`, automation create/update/delete, bulk
-  enable/disable, etc.) for non-external roles; external MCP clients get the
-  full set. `handleTool` is the dispatcher.
+  the three ephemeral scheduler tools (`schedule_action`,
+  `list_scheduled_actions`, `cancel_scheduled_action`), `report_bug`, and
+  `ai_chat`. `getAgentToolset` filters out `DANGEROUS_TOOLS` (12 tools —
+  `restart_ha`, automation create/update/delete, bulk enable/disable, etc.)
+  for non-external roles; external MCP clients get the full set. `handleTool`
+  is the dispatcher.
 - **Chat agent native surface** — `NATIVE_AGENT_TOOLS` in `src/agent-tools.js`,
-  **16 tools**, the curated set the in-house chat agent gets. 4 action tools
-  (`call_service`, `ai_send_notification`, `save_memory`, `save_observation`)
-  and 12 read tools (`get_state`, `get_logbook`, `render_template`,
-  `vector_search`, `get_house_topology`, `get_automation_config`, `report_bug`,
-  `query_state_history`, `query_automation_runs`, `query_causal_chain`,
-  `get_nws_weather`, `get_nws_discussion`). Dispatched by `executeNativeTool`.
+  **19 tools**, the curated set the in-house chat agent gets. 6 action tools
+  (`call_service`, `ai_send_notification`, `save_memory`, `save_observation`,
+  `schedule_action`, `cancel_scheduled_action`) and 13 read tools (`get_state`,
+  `get_logbook`, `render_template`, `vector_search`, `get_house_topology`,
+  `get_automation_config`, `report_bug`, `query_state_history`,
+  `query_automation_runs`, `query_causal_chain`, `get_nws_weather`,
+  `get_nws_discussion`, `list_scheduled_actions`). Dispatched by
+  `executeNativeTool`.
 
 The forensic query tools and several others share single helper implementations
 between the two surfaces — when changing a shared tool, check both call sites.
@@ -240,6 +244,21 @@ skipping the LLM. It always uses explicit open/close (never `toggle`), no-ops if
 already in the target state, and falls through to the LLM on any error or
 ambiguity.
 
+### Ephemeral scheduler
+
+`_scheduleAction` / `_listScheduledActions` / `_cancelScheduledAction` /
+`_fireDueScheduledActions` on the DO power the three new tools
+(`schedule_action`, `list_scheduled_actions`, `cancel_scheduled_action`).
+Pending tasks live in DO storage under the `scheduled:<uuid>` namespace; the
+60s `alarm()` tick calls `_fireDueScheduledActions` which fires any past-due
+tasks. Two delivery rules: **delete-before-fire** (better to lose a task than
+fire it twice for non-idempotent services like `toggle`) and a **WS-up guard**
+(skip the tick when the HA WS is down so a transient outage doesn't destroy
+the task). The compound "on for an hour" / "AC down 2 then back up" patterns
+are agent-orchestrated — chat agent calls `call_service` immediately and
+`schedule_action` for the reversal in the same turn, snapshotting any
+"from current temp" arithmetic at schedule time.
+
 ### Crons
 
 Two triggers in `wrangler.toml`:
@@ -248,8 +267,9 @@ Two triggers in `wrangler.toml`:
 - `30 8 * * *` → `dailyKnowledgeResync` + `dailyAiLogRetention` (30-day `ai_log`
   prune) + `dailyForensicLogRetention` (90-day forensic prune).
 
-The DO's `alarm()` is a pure WS keepalive — ping/pong, reconnect on no-pong,
-and a **mandatory** 60s reschedule. Do not remove the reschedule.
+The DO's `alarm()` keeps the WS alive (ping/pong, reconnect on no-pong) and
+also calls `_fireDueScheduledActions` to fire any due scheduled tasks. The
+60s reschedule is **mandatory**. Do not remove the reschedule.
 
 ---
 

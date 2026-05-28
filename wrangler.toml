@@ -51,7 +51,7 @@ binding = "CF_VERSION_METADATA"
 
 [[durable_objects.bindings]]
 name = "HA_WS"
-class_name = "HAWebSocketV22"
+class_name = "HAWebSocketV23"
 
 [[migrations]]
 tag = "v1"
@@ -326,6 +326,21 @@ renamed_classes = [
 tag = "v22"
 renamed_classes = [
   { from = "HAWebSocketV21", to = "HAWebSocketV22" }
+]
+
+# v23 — ephemeral one-shot scheduler. Adds three new tools to both the chat
+# native surface and the MCP surface: schedule_action (queue a delayed HA
+# service call), list_scheduled_actions, cancel_scheduled_action. Pending
+# tasks live in DO storage under the `scheduled:<id>` namespace; the existing
+# 60s alarm() tick gains a _fireDueScheduledActions() pass that deletes-
+# before-fire (better to lose a task than fire twice). Enables "turn off the
+# drop lights in an hour" / "turn the AC down 2 for an hour" patterns
+# without polluting HA's automations list. DO-side code; rename forces a
+# fresh isolate. Storage preserved.
+[[migrations]]
+tag = "v23"
+renamed_classes = [
+  { from = "HAWebSocketV22", to = "HAWebSocketV23" }
 ]
 
 # Two cron triggers:
