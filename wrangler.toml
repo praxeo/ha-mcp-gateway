@@ -51,7 +51,7 @@ binding = "CF_VERSION_METADATA"
 
 [[durable_objects.bindings]]
 name = "HA_WS"
-class_name = "HAWebSocketV23"
+class_name = "HAWebSocketV24"
 
 [[migrations]]
 tag = "v1"
@@ -341,6 +341,22 @@ renamed_classes = [
 tag = "v23"
 renamed_classes = [
   { from = "HAWebSocketV22", to = "HAWebSocketV23" }
+]
+
+# v24 — drop Tesla wake-first gate. The chat prompt previously instructed the
+# agent to press button.tesla_model_y_wake and wait whenever
+# binary_sensor.tesla_model_y_status read asleep/offline, then send the
+# requested command. In practice the Tesla API wakes the car as a side effect
+# of climate.set_temperature, climate.turn_on, lock/unlock, switch.turn_on/off,
+# and cover open/close — and the status sensor lags, so the gate stalls even
+# when the car is already responding. New rule: send the command directly; the
+# wake button is a fallback used only after the actual command errors, with no
+# retry loop on the wake itself. DO-side prompt; rename forces a fresh
+# isolate. Storage preserved.
+[[migrations]]
+tag = "v24"
+renamed_classes = [
+  { from = "HAWebSocketV23", to = "HAWebSocketV24" }
 ]
 
 # Two cron triggers:
