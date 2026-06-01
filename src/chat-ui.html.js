@@ -600,8 +600,7 @@ export const CHAT_HTML = `<!DOCTYPE html>
     text-align: center;
   }
 
-  .quick-btn:first-child,
-  .quick-btn:last-child {
+  .quick-btn:first-child {
     grid-column: 1 / -1;
   }
 
@@ -817,6 +816,7 @@ export const CHAT_HTML = `<!DOCTYPE html>
         <button class="quick-btn garage" onclick="sendQuick('Open the basement bay door')">Open basement</button>
         <button class="quick-btn garage" onclick="sendQuick('Close the basement bay door')">Close basement</button>
         <button class="quick-btn" onclick="sendQuick(&quot;What's the climate? Inside temp, AC status, outside temp, today's high and low&quot;)">Climate</button>
+        <button class="quick-btn" onclick="sendQuick('Precondition the Tesla')">Precondition Tesla</button>
       </div>
     </div>
   </div>
