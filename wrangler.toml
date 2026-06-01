@@ -51,7 +51,7 @@ binding = "CF_VERSION_METADATA"
 
 [[durable_objects.bindings]]
 name = "HA_WS"
-class_name = "HAWebSocketV25"
+class_name = "HAWebSocketV26"
 
 [[migrations]]
 tag = "v1"
@@ -368,6 +368,22 @@ renamed_classes = [
 tag = "v25"
 renamed_classes = [
   { from = "HAWebSocketV24", to = "HAWebSocketV25" }
+]
+
+# v26 — Fireworks session affinity + perf-header capture. A fixed
+# x-session-affinity header pins all gateway traffic to one serverless replica
+# so the byte-identical static prefix (the V13 split) actually stays cache-warm
+# across turns and tool-loop iterations — Fireworks caching is replica-local,
+# so without a routing hint consecutive turns miss the warm KV even inside its
+# TTL. Also captures the fireworks-* perf response headers (server TTFT,
+# prompt/cached tokens) into per_iteration timing to split prefill vs
+# generation. DO-side code; the persistent HA WS pins the live isolate to stale
+# V25 across plain deploys, so the rename forces a fresh isolate. Storage
+# preserved.
+[[migrations]]
+tag = "v26"
+renamed_classes = [
+  { from = "HAWebSocketV25", to = "HAWebSocketV26" }
 ]
 
 # Two cron triggers:
