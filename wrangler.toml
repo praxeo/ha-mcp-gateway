@@ -51,7 +51,7 @@ binding = "CF_VERSION_METADATA"
 
 [[durable_objects.bindings]]
 name = "HA_WS"
-class_name = "HAWebSocketV24"
+class_name = "HAWebSocketV25"
 
 [[migrations]]
 tag = "v1"
@@ -357,6 +357,17 @@ renamed_classes = [
 tag = "v24"
 renamed_classes = [
   { from = "HAWebSocketV23", to = "HAWebSocketV24" }
+]
+
+# v25 forces a fresh isolate so the hardened cover fast-path guards go live.
+# A forensic/timeline question ("show me a timeline for when the garage door
+# opened ... figure out if the Tesla can open the garage") was matching the
+# bare verb "open" and physically opening the door; the guards now bail such
+# questions to the LLM. Storage preserved.
+[[migrations]]
+tag = "v25"
+renamed_classes = [
+  { from = "HAWebSocketV24", to = "HAWebSocketV25" }
 ]
 
 # Two cron triggers:
