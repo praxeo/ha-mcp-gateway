@@ -810,7 +810,6 @@ export const CHAT_HTML = `<!DOCTYPE html>
     <div class="welcome" id="welcome">
       <img class="welcome-icon-img" src="https://brands.home-assistant.io/_/homeassistant/icon.png" alt="" />
       <h2>HA Agent</h2>
-      <p>Chat with your smart home. Ask about status, control devices, or just say hello.</p>
       <div class="quick-actions">
         <button class="quick-btn" onclick="sendQuick('What is the status of the house?')">House status</button>
         <button class="quick-btn garage" onclick="sendQuick('Open the main garage door')">Open main garage</button>
