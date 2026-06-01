@@ -8,7 +8,7 @@ export const CHAT_HTML = `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover, interactive-widget=resizes-content">
 <meta name="theme-color" content="#070710">
 <meta name="color-scheme" content="dark">
 <meta name="apple-mobile-web-app-capable" content="yes">
@@ -52,6 +52,7 @@ export const CHAT_HTML = `<!DOCTYPE html>
   html, body {
     height: 100%;
     overflow: hidden;
+    overscroll-behavior: none;
     color: var(--text);
     font-family: 'DM Sans', -apple-system, BlinkMacSystemFont, sans-serif;
     -webkit-font-smoothing: antialiased;
@@ -889,6 +890,44 @@ export const CHAT_HTML = `<!DOCTYPE html>
   const statusDot = document.getElementById('statusDot');
   const statusText = document.getElementById('statusText');
 
+  // ── Mobile-robust scrolling ───────────────────────────────────────────
+  // Only auto-snap to the bottom when the user is already there, so reading a
+  // long reply (or scrolling up) doesn't get yanked down. The user's own sends
+  // and keyboard toggles force a snap.
+  let stickToBottom = true;
+  function isNearBottom(px) {
+    return msgEl.scrollHeight - msgEl.scrollTop - msgEl.clientHeight < (px || 90);
+  }
+  function scrollToBottom(force) {
+    if (force || stickToBottom) msgEl.scrollTop = msgEl.scrollHeight;
+  }
+  msgEl.addEventListener('scroll', () => { stickToBottom = isNearBottom(); }, { passive: true });
+
+  // Keep the input docked just above the on-screen keyboard. visualViewport
+  // shrinks to the area above the keyboard when an input is focused; mirror its
+  // height onto the app so the pinned input bar rides up with it and the latest
+  // message stays visible. Browsers without visualViewport keep the CSS 100dvh
+  // fallback and the interactive-widget meta.
+  (function () {
+    const vv = window.visualViewport;
+    if (!vv) return;
+    const app = document.querySelector('.app');
+    let raf = 0;
+    const sync = () => {
+      cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(() => {
+        app.style.height = vv.height + 'px';
+        scrollToBottom(true);
+      });
+    };
+    vv.addEventListener('resize', sync);
+    vv.addEventListener('scroll', sync);
+  })();
+
+  // When the box gains focus, make sure the newest message is visible once the
+  // keyboard animation settles.
+  input.addEventListener('focus', () => { setTimeout(() => scrollToBottom(true), 300); });
+
   // Auto-resize textarea
   input.addEventListener('input', () => {
     input.style.height = 'auto';
@@ -1096,7 +1135,7 @@ export const CHAT_HTML = `<!DOCTYPE html>
     }
 
     msgEl.appendChild(div);
-    msgEl.scrollTop = msgEl.scrollHeight;
+    scrollToBottom(role === 'user');
   }
 
   function addReasoning(text) {
@@ -1110,7 +1149,7 @@ export const CHAT_HTML = `<!DOCTYPE html>
     body.textContent = text;
     det.appendChild(body);
     msgEl.appendChild(det);
-    msgEl.scrollTop = msgEl.scrollHeight;
+    scrollToBottom();
   }
 
   async function send() {
@@ -1125,7 +1164,7 @@ export const CHAT_HTML = `<!DOCTYPE html>
 
     addMsg('user', text);
     typing.classList.add('active');
-    msgEl.scrollTop = msgEl.scrollHeight;
+    scrollToBottom(true);
 
     let statusEl = null;
 
@@ -1136,7 +1175,7 @@ export const CHAT_HTML = `<!DOCTYPE html>
         msgEl.appendChild(statusEl);
       }
       statusEl.textContent = msg;
-      msgEl.scrollTop = msgEl.scrollHeight;
+      scrollToBottom();
     }
 
     function clearStatus() {
