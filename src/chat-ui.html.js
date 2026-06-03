@@ -68,7 +68,6 @@ export const CHAT_HTML = `<!DOCTYPE html>
     background-attachment: fixed;
   }
 
-  /* Modified to handle positioning and centering dynamic viewport resizing cleanly */
   .app {
     display: flex;
     flex-direction: column;
@@ -82,93 +81,13 @@ export const CHAT_HTML = `<!DOCTYPE html>
     top: 0;
   }
 
-  /* ── Header ── */
-  .header {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    padding: max(14px, env(safe-area-inset-top)) 18px 14px;
-    padding-left: max(18px, env(safe-area-inset-left));
-    padding-right: max(18px, env(safe-area-inset-right));
-    border-bottom: 1px solid var(--border);
-    background: var(--surface-glass);
-    -webkit-backdrop-filter: blur(18px) saturate(160%);
-    backdrop-filter: blur(18px) saturate(160%);
-    flex-shrink: 0;
-    z-index: 10;
-  }
-
-  .header-icon-img {
-    width: 38px; height: 38px;
-    border-radius: 11px;
-    object-fit: contain;
-    flex-shrink: 0;
-    background: rgba(255, 255, 255, 0.04);
-    padding: 4px;
-    border: 1px solid var(--border);
-  }
-
-  .header-info h1 {
-    font-size: 15.5px;
-    font-weight: 700;
-    letter-spacing: -0.02em;
-  }
-
-  .header-status {
-    font-size: 11px;
-    color: var(--text-dim);
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    margin-top: 1px;
-  }
-
-  .status-dot {
-    width: 7px; height: 7px;
-    border-radius: 50%;
-    background: var(--success);
-    display: inline-block;
-    box-shadow: 0 0 0 0 rgba(52, 211, 153, 0.6);
-    animation: dotPulse 2.4s ease-in-out infinite;
-  }
-
-  @keyframes dotPulse {
-    0%, 100% { box-shadow: 0 0 0 0 rgba(52, 211, 153, 0.5); }
-    50%      { box-shadow: 0 0 0 4px rgba(52, 211, 153, 0); }
-  }
-
-  .status-dot.offline {
-    background: var(--error);
-    animation: none;
-    box-shadow: 0 0 0 3px rgba(248, 113, 113, 0.12);
-  }
-
-  .header-actions {
-    margin-left: auto;
-    display: flex;
-    gap: 8px;
-  }
-
-  .header-btn {
-    background: var(--surface-2);
-    border: 1px solid var(--border);
-    color: var(--text-dim);
-    border-radius: 10px;
-    padding: 7px 11px;
-    font-size: 11px;
-    cursor: pointer;
-    font-family: inherit;
-    transition: all 0.18s ease;
-  }
-
-  .header-btn:hover { color: var(--text); border-color: var(--border-strong); }
-
   /* ── Messages ── */
   .messages {
     flex: 1;
     overflow-y: auto;
     overscroll-behavior: contain;
-    padding: 18px 18px 8px;
+    /* Added env(safe-area-inset-top) to prevent content sliding under iOS status bar */
+    padding: max(18px, env(safe-area-inset-top)) 18px 8px;
     padding-left: max(18px, env(safe-area-inset-left));
     padding-right: max(18px, env(safe-area-inset-right));
     display: flex;
@@ -380,7 +299,7 @@ export const CHAT_HTML = `<!DOCTYPE html>
     display: flex;
     flex-direction: column;
     gap: 13px;
-    padding: 13px 12px max(16px, env(safe-area-inset-bottom));
+    padding: 16px 12px max(16px, env(safe-area-inset-bottom));
     padding-left: max(12px, env(safe-area-inset-left));
     padding-right: max(12px, env(safe-area-inset-right));
     background: var(--surface-glass);
@@ -668,129 +587,6 @@ export const CHAT_HTML = `<!DOCTYPE html>
     opacity: 0.85;
   }
 
-  /* ── Bug trigger (above input box) ── */
-  .bug-trigger-row {
-    display: flex;
-    justify-content: center;
-    margin-bottom: 2px;
-  }
-
-  .bug-trigger-btn {
-    background: transparent;
-    border: 1px dashed rgba(248, 113, 113, 0.45);
-    color: var(--error);
-    border-radius: 999px;
-    padding: 7px 16px;
-    font-size: 12px;
-    font-family: inherit;
-    font-weight: 500;
-    cursor: pointer;
-    letter-spacing: 0.02em;
-    transition: all 0.18s;
-  }
-
-  .bug-trigger-btn:hover,
-  .bug-trigger-btn:focus {
-    background: rgba(248, 113, 113, 0.09);
-    border-style: solid;
-    outline: none;
-  }
-
-  .bug-trigger-btn:active { transform: scale(0.97); }
-
-  /* ── Bug-report composer ── */
-  .bug-overlay {
-    display: none;
-    position: fixed;
-    inset: 0;
-    background: rgba(0, 0, 0, 0.62);
-    z-index: 100;
-    align-items: center;
-    justify-content: center;
-    padding: 20px;
-    -webkit-backdrop-filter: blur(4px);
-    backdrop-filter: blur(4px);
-  }
-
-  .bug-overlay.active { display: flex; animation: msgIn 0.2s ease-out; }
-
-  .bug-composer {
-    background: var(--surface);
-    border: 1px solid var(--border-strong);
-    border-radius: var(--radius-lg);
-    padding: 22px;
-    width: 100%;
-    max-width: 480px;
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-    box-shadow: var(--shadow-2);
-  }
-
-  .bug-title { font-size: 17px; font-weight: 700; color: var(--text); letter-spacing: -0.01em; }
-  .bug-sub   { font-size: 12px; color: var(--text-dim); line-height: 1.5; }
-
-  #bugInput {
-    background: rgba(0, 0, 0, 0.35);
-    border: 1px solid var(--border);
-    border-radius: 12px;
-    color: var(--text);
-    padding: 12px 14px;
-    font-family: 'DM Sans', sans-serif;
-    font-size: 16px;
-    line-height: 1.45;
-    resize: vertical;
-    min-height: 96px;
-    outline: none;
-    transition: border-color 0.18s, box-shadow 0.18s;
-  }
-
-  #bugInput:focus     { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-dim); }
-  #bugInput::placeholder { color: var(--text-faint); }
-
-  .bug-row {
-    display: flex;
-    gap: 9px;
-    justify-content: flex-end;
-  }
-
-  .bug-btn {
-    border-radius: 12px;
-    padding: 10px 18px;
-    font-family: inherit;
-    font-size: 13px;
-    font-weight: 600;
-    cursor: pointer;
-    border: 1px solid var(--border);
-    transition: all 0.18s;
-  }
-
-  .bug-btn-secondary {
-    background: transparent;
-    color: var(--text-dim);
-  }
-
-  .bug-btn-secondary:hover {
-    color: var(--text);
-    border-color: var(--border-strong);
-  }
-
-  .bug-btn-primary {
-    background: var(--grad-accent);
-    color: white;
-    border-color: transparent;
-    box-shadow: var(--glow-accent);
-  }
-
-  .bug-btn-primary:hover { filter: brightness(1.08); }
-
-  .bug-hint {
-    font-size: 11px;
-    color: var(--text-faint);
-    text-align: right;
-    margin-top: -4px;
-  }
-
   @media (prefers-reduced-motion: reduce) {
     * { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
   }
@@ -798,17 +594,6 @@ export const CHAT_HTML = `<!DOCTYPE html>
 </head>
 <body>
 <div class="app">
-  <div class="header">
-    <img class="header-icon-img" src="https://brands.home-assistant.io/_/homeassistant/icon.png" alt="Home Assistant" />
-    <div class="header-info">
-      <h1>HA Agent</h1>
-      <div class="header-status">
-        <span class="status-dot" id="statusDot"></span>
-        <span id="statusText">Connecting...</span>
-      </div>
-    </div>
-  </div>
-
   <div class="messages" id="messages">
     <div class="welcome" id="welcome">
       <img class="welcome-icon-img" src="https://brands.home-assistant.io/_/homeassistant/icon.png" alt="" />
@@ -845,9 +630,6 @@ export const CHAT_HTML = `<!DOCTYPE html>
   </div>
 
   <div class="input-area">
-    <div class="bug-trigger-row">
-      <button class="bug-trigger-btn" type="button" onclick="openBugComposer()">Report a bug</button>
-    </div>
     <div class="input-row">
       <textarea id="input" placeholder="Message your home..." rows="1"></textarea>
       <button id="sendBtn" type="button" aria-label="Send" onclick="send()">
@@ -871,27 +653,12 @@ export const CHAT_HTML = `<!DOCTYPE html>
   </div>
 </div>
 
-<div class="bug-overlay" id="bugOverlay" onclick="closeBugComposer(event)">
-  <div class="bug-composer" onclick="event.stopPropagation()">
-    <div class="bug-title">Report a bug</div>
-    <div class="bug-sub">Describe what went wrong. The agent logs your description plus the last few turns and the state of any cited entities.</div>
-    <textarea id="bugInput" placeholder="The agent did X but it should have done Y…" rows="4"></textarea>
-    <div class="bug-row">
-      <button class="bug-btn bug-btn-secondary" onclick="closeBugComposer()">Cancel</button>
-      <button class="bug-btn bug-btn-primary" onclick="submitBug()">Submit</button>
-    </div>
-    <div class="bug-hint">Esc to cancel · Cmd/Ctrl+Enter to submit</div>
-  </div>
-</div>
-
 <script>
   const msgEl = document.getElementById('messages');
   const input = document.getElementById('input');
   const sendBtn = document.getElementById('sendBtn');
   const typing = document.getElementById('typing');
   const welcome = document.getElementById('welcome');
-  const statusDot = document.getElementById('statusDot');
-  const statusText = document.getElementById('statusText');
 
   // ── Mobile-robust scrolling ───────────────────────────────────────────
   // Only auto-snap to the bottom when the user is already there, so reading a
@@ -906,7 +673,7 @@ export const CHAT_HTML = `<!DOCTYPE html>
   }
   msgEl.addEventListener('scroll', () => { stickToBottom = isNearBottom(); }, { passive: true });
 
-  // FIXED visualViewport resizing and placement calculation for iOS Safari.
+  // VisualViewport resizing and placement calculation for iOS Safari.
   (function () {
     const vv = window.visualViewport;
     if (!vv) return;
@@ -950,23 +717,6 @@ export const CHAT_HTML = `<!DOCTYPE html>
       send();
     }
   });
-
-  // Check agent status on load
-  checkStatus();
-
-  function checkStatus() {
-    fetch('/health')
-      .then(r => r.json())
-      .then(d => {
-        const ok = d.websocket && d.websocket.connected;
-        statusDot.className = 'status-dot' + (ok ? '' : ' offline');
-        statusText.textContent = ok ? 'Online · ' + (d.websocket.cached_entities || 0) + ' entities' : 'Disconnected';
-      })
-      .catch(() => {
-        statusDot.className = 'status-dot offline';
-        statusText.textContent = 'Unreachable';
-      });
-  }
 
   let lastUserMessage = null;
 
@@ -1025,67 +775,6 @@ export const CHAT_HTML = `<!DOCTYPE html>
     return btn;
   }
 
-  function makeReportBtn(errorText) {
-    const btn = document.createElement('button');
-    btn.className = 'bubble-btn';
-    btn.type = 'button';
-    btn.innerHTML = '<span>🐛 report</span>';
-    btn.onclick = () => {
-      const ctx = [];
-      if (lastUserMessage) ctx.push('I sent: "' + lastUserMessage + '"');
-      if (errorText)       ctx.push('Got error: ' + errorText);
-      ctx.push('');
-      ctx.push('What went wrong: ');
-      openBugComposer(ctx.join('\\n'));
-    };
-    return btn;
-  }
-
-  // ── Bug-report composer ──
-  function openBugComposer(prefill) {
-    const overlay = document.getElementById('bugOverlay');
-    const input   = document.getElementById('bugInput');
-    if (typeof prefill === 'string') input.value = prefill;
-    overlay.classList.add('active');
-    setTimeout(() => {
-      input.focus();
-      // Cursor at end
-      const len = input.value.length;
-      input.setSelectionRange(len, len);
-    }, 30);
-  }
-
-  function closeBugComposer(e) {
-    // If invoked as a click handler on the overlay, ignore clicks bubbled from the composer.
-    if (e && e.type === 'click' && e.target !== e.currentTarget) return;
-    document.getElementById('bugOverlay').classList.remove('active');
-    document.getElementById('bugInput').value = '';
-  }
-
-  function submitBug() {
-    const bugInput = document.getElementById('bugInput');
-    const text = bugInput.value.trim();
-    if (!text) return;
-    closeBugComposer();
-    const message = 'Log as bug: ' + text;
-    const mainInput = document.getElementById('input');
-    mainInput.value = message;
-    send();
-  }
-
-  // Keyboard shortcuts inside the composer
-  document.addEventListener('keydown', (e) => {
-    const overlay = document.getElementById('bugOverlay');
-    if (!overlay || !overlay.classList.contains('active')) return;
-    if (e.key === 'Escape') {
-      e.preventDefault();
-      closeBugComposer();
-    } else if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
-      e.preventDefault();
-      submitBug();
-    }
-  });
-
   function addMsg(role, text, actions) {
     if (welcome) welcome.style.display = 'none';
 
@@ -1126,7 +815,6 @@ export const CHAT_HTML = `<!DOCTYPE html>
       acts.className = 'msg-actions';
       acts.style.opacity = '1'; // always visible on errors
       if (lastUserMessage) acts.appendChild(makeRetryBtn());
-      acts.appendChild(makeReportBtn(text));
       acts.appendChild(makeCopyBtn(text));
       div.appendChild(acts);
     } else if (role === 'user') {
