@@ -68,14 +68,18 @@ export const CHAT_HTML = `<!DOCTYPE html>
     background-attachment: fixed;
   }
 
+  /* Modified to handle positioning and centering dynamic viewport resizing cleanly */
   .app {
     display: flex;
     flex-direction: column;
-    height: 100vh;
-    height: 100dvh;
+    position: absolute;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 100%;
     max-width: 760px;
-    margin: 0 auto;
-    position: relative;
+    height: 100%;
+    height: 100dvh;
+    top: 0;
   }
 
   /* ── Header ── */
@@ -902,11 +906,7 @@ export const CHAT_HTML = `<!DOCTYPE html>
   }
   msgEl.addEventListener('scroll', () => { stickToBottom = isNearBottom(); }, { passive: true });
 
-  // Keep the input docked just above the on-screen keyboard. visualViewport
-  // shrinks to the area above the keyboard when an input is focused; mirror its
-  // height onto the app so the pinned input bar rides up with it and the latest
-  // message stays visible. Browsers without visualViewport keep the CSS 100dvh
-  // fallback and the interactive-widget meta.
+  // FIXED visualViewport resizing and placement calculation for iOS Safari.
   (function () {
     const vv = window.visualViewport;
     if (!vv) return;
@@ -915,7 +915,12 @@ export const CHAT_HTML = `<!DOCTYPE html>
     const sync = () => {
       cancelAnimationFrame(raf);
       raf = requestAnimationFrame(() => {
+        // 1. Shrink app height to fit visual frame perfectly
         app.style.height = vv.height + 'px';
+        // 2. Anchor layout wrapper exactly to the top offset of the visual window
+        app.style.top = vv.offsetTop + 'px';
+        // 3. Prevent Safari's layout viewport from remaining scrolled on window context
+        window.scrollTo(0, 0);
         scrollToBottom(true);
       });
     };
@@ -923,9 +928,14 @@ export const CHAT_HTML = `<!DOCTYPE html>
     vv.addEventListener('scroll', sync);
   })();
 
-  // When the box gains focus, make sure the newest message is visible once the
-  // keyboard animation settles.
-  input.addEventListener('focus', () => { setTimeout(() => scrollToBottom(true), 300); });
+  // Overriding focus routines to fight back iOS viewport shifting.
+  input.addEventListener('focus', () => { 
+    window.scrollTo(0, 0);
+    setTimeout(() => {
+      window.scrollTo(0, 0);
+      scrollToBottom(true);
+    }, 280); 
+  });
 
   // Auto-resize textarea
   input.addEventListener('input', () => {
