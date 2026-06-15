@@ -17,8 +17,8 @@ Assistant smart home to LLMs. It:
 - streams every meaningful HA event into a queryable D1 **forensic log**,
 - exposes the whole surface as an **MCP server** (`POST /mcp`) for clients like
   Claude Desktop and Claude Code,
-- runs a built-in **chat agent** — "Ranger," DeepSeek V4 Flash on Fireworks
-  with Think High reasoning and a native tool-calling loop — reachable at a web
+- runs a built-in **chat agent** — "Ranger," MiniMax M3 on Fireworks
+  with thinking enabled and a native tool-calling loop — reachable at a web
   `/chat` UI and via the `ai_chat` MCP tool,
 - short-circuits deterministic cover (garage/bay door) commands via a sub-500ms
   fast path that skips the LLM entirely.
@@ -71,13 +71,13 @@ npm test             # vitest run — currently one suite (forensic filter)
    (`src/ha-websocket.js`) do not.** To force a fresh DO isolate you must rename
    the DO class via a `renamed_classes` migration in `wrangler.toml` and update
    `class_name` in the `durable_objects.bindings`. The class is currently
-   `HAWebSocketV22` — it has been renamed 21 times for exactly this reason.
+   `HAWebSocketV27` — it has been renamed 26 times for exactly this reason.
    Procedure for any DO-side change you need live:
-   - bump the class name (`HAWebSocketV22` → `HAWebSocketV23`) in the `export
-     class` line in `src/ha-websocket.js`, every `HAWebSocketV22.` static
+   - bump the class name (`HAWebSocketV27` → `HAWebSocketV28`) in the `export
+     class` line in `src/ha-websocket.js`, every `HAWebSocketV27.` static
      reference, the `export {}` at the file end, and the `worker.js` import;
-   - add a `[[migrations]]` block with `tag = "v23"` and
-     `renamed_classes = [{ from = "HAWebSocketV22", to = "HAWebSocketV23" }]`;
+   - add a `[[migrations]]` block with `tag = "v28"` and
+     `renamed_classes = [{ from = "HAWebSocketV27", to = "HAWebSocketV28" }]`;
    - update `class_name` in `[[durable_objects.bindings]]`.
    DO storage (snapshot, chat history, memory, cursors) is preserved across
    renames. Diagnose staleness with `wrangler tail --format json` (compare
@@ -104,7 +104,7 @@ npm test             # vitest run — currently one suite (forensic filter)
    push speculative changes to `main`.
 
 7. **Commit hygiene.** Commit messages in this repo follow
-   `type(scope): VNN — summary` (e.g. `feat(do): V22 — sanitize light color descriptors`). The
+   `type(scope): VNN — summary` (e.g. `feat(do): V27 — swap chat model to MiniMax M3 on Fireworks`). The
    `VNN` matches the DO migration tag when the change is DO-side.
 
 ---
@@ -120,7 +120,7 @@ Cloudflare Worker  (src/worker.js)
    │   CHAT_HTML UI, ElevenLabs STT proxy, multi-kind knowledge backfill,
    │   scheduled() cron handler
    ▼
-Durable Object  HAWebSocketV22  (src/ha-websocket.js)
+Durable Object  HAWebSocketV27  (src/ha-websocket.js)
    │   singleton "ha-websocket-singleton" — persistent HA WebSocket,
    │   in-memory stateCache, hibernation snapshot, chat tool loop,
    │   cover fast path, forensic D1 writers, reconnect backfill
@@ -146,7 +146,7 @@ addresses the same instance by the fixed name `ha-websocket-singleton`.
 | Path | Role |
 |---|---|
 | `src/worker.js` | Worker entry. MCP handler (`TOOLS` — 82 entries — + `handleTool` dispatch, `getAgentToolset`, `DANGEROUS_TOOLS`), HTTP routes, embedded `CHAT_HTML`, ElevenLabs STT proxy, KV cache helpers, per-kind `build*Docs`, `backfillKnowledge`, `scheduled()` cron handler. |
-| `src/ha-websocket.js` | The Durable Object class `HAWebSocketV22`. Persistent HA WS, `stateCache`, chat path (`chatWithAgentNative`), native tool loop (`runNativeToolLoop`), tool dispatch (`executeNativeTool`), action executor (`executeAIAction`), prompt builders, fast path, forensic D1 writers, reconnect backfill, `alarm()` keepalive. `_sanitizeLightServiceData` strips unsupported color descriptors from `light.turn_on` / `light.toggle` calls before they reach HA. ~6000 lines — the bulk of the system. |
+| `src/ha-websocket.js` | The Durable Object class `HAWebSocketV27`. Persistent HA WS, `stateCache`, chat path (`chatWithAgentNative`), native tool loop (`runNativeToolLoop`), tool dispatch (`executeNativeTool`), action executor (`executeAIAction`), prompt builders, fast path, forensic D1 writers, reconnect backfill, `alarm()` keepalive. `_sanitizeLightServiceData` strips unsupported color descriptors from `light.turn_on` / `light.toggle` calls before they reach HA. ~6000 lines — the bulk of the system. |
 | `src/agent-tools.js` | OpenAI-format tool schemas for the chat agent: `NATIVE_AGENT_TOOLS` (19 = 6 action + 13 read), `CHAT_ALLOWED_TOOL_NAMES`, `NATIVE_ACTION_TOOL_NAMES`. |
 | `src/vectorize-schema.js` | Shared Vectorize schema + helpers: `vectorIdFor`, `topicTagFor`, `fnv1aHex`, per-kind embed-text builders, `isNoisyEntity` / `isNoisySwitch` / `isNoisyService`, `buildMetadata`. Imported by both `worker.js` and `ha-websocket.js`. |
 | `migrations/000{1,2,3}_*.sql` | D1 schema. 0001 indexes legacy tables; 0002 creates the forensic log tables; 0003 de-dupes `state_changes` and adds the backfill-idempotency unique index. |
@@ -227,7 +227,7 @@ then builds context and runs `runNativeToolLoop`: call the model, dispatch
 `tool_calls` via `executeNativeTool`, push results, repeat. The chat path uses
 `maxIterations: 6`, `maxTokens: 4096`, `hallucinationGuard: true`.
 `callLLMWithTools` posts to Fireworks with `temperature: 0`,
-`reasoning_effort: "high"`, and a 45s `AbortController` timeout.
+`thinking: { type: "enabled" }`, and a 45s `AbortController` timeout.
 
 The system prompt is split for prefix caching (V13):
 `getStaticChatSystemPrompt()` is 100% static (byte-identical every request —
@@ -280,20 +280,29 @@ there, never inline:
 
 ```js
 static LLM_ENDPOINT = "https://api.fireworks.ai/inference/v1/chat/completions";
-static LLM_MODEL = "accounts/fireworks/models/deepseek-v4-flash";
+static LLM_MODEL = "accounts/fireworks/models/minimax-m3";
 static LLM_REASONING_EFFORT = "high";
 ```
 
+`LLM_REASONING_EFFORT` is retained but **unused since V27**. MiniMax M3 on
+Fireworks enables thinking via a `thinking: { type: "enabled" }` request toggle
+rather than `reasoning_effort`, and rejects sending both together — so `callLLM`
+and `callLLMWithTools` send the toggle and omit `reasoning_effort`. Reasoning
+still returns in `reasoning_content`, so the extraction / SSE stream / prior-turn
+re-feed are unchanged.
+
 The API key is `env.FIREWORKS_API_KEY`. Provider history (kept here because it
 explains the migration tags): originally MiniMax → gpt-oss-120b on Groq (V13–15)
-→ MiniMax again (V16) → DeepSeek V4 Flash on Fireworks (V17+). Don't reintroduce
-Groq/MiniMax naming.
+→ MiniMax again (V16) → DeepSeek V4 Flash on Fireworks (V17–V26) → MiniMax M3 on
+Fireworks (V27+). Don't reintroduce Groq, the old MiniMax endpoint/auth
+(`MINIMAX_API_KEY`, `reasoning_split`), or DeepSeek naming — the current model is
+MiniMax M3, served by Fireworks via `FIREWORKS_API_KEY`.
 
 ---
 
 ## Bindings, secrets, and flags
 
-**Bindings** (`wrangler.toml`): `HA_WS` (DO `HAWebSocketV22`), `HA_CACHE` (KV),
+**Bindings** (`wrangler.toml`): `HA_WS` (DO `HAWebSocketV27`), `HA_CACHE` (KV),
 `KNOWLEDGE` (Vectorize `ha-knowledge`), `AI` (Workers AI), `DB` (D1 `ha_db`),
 `CF_VERSION_METADATA`.
 
