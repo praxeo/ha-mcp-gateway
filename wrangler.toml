@@ -51,7 +51,7 @@ binding = "CF_VERSION_METADATA"
 
 [[durable_objects.bindings]]
 name = "HA_WS"
-class_name = "HAWebSocketV27"
+class_name = "HAWebSocketV28"
 
 [[migrations]]
 tag = "v1"
@@ -399,6 +399,26 @@ renamed_classes = [
 tag = "v27"
 renamed_classes = [
   { from = "HAWebSocketV26", to = "HAWebSocketV27" }
+]
+
+# v28 — flat tool-argument healing for call_service / schedule_action.
+# MiniMax M3 (live since V27) emits service parameters — entity_id,
+# temperature, etc. — at the TOP LEVEL of the tool call instead of nested
+# inside `data` / `service_data`. The dispatchers (executeNativeTool) and
+# the scheduler (_fireDueScheduledActions fires with target:{}) only read
+# the nested object, so the flat params were silently dropped: HA rejected
+# climate.turn_on with "must contain at least one of entity_id, ..." and
+# climate.set_temperature with "must contain at least one of temperature,
+# ...". Symptom: the agent couldn't precondition the Tesla and a scheduled
+# "set AC to 73 at 4pm" fired with empty data. coalesceServiceData() folds
+# stray top-level keys (and target.entity_id) into the nested data object
+# before dispatch. DO-side code; the persistent HA WS pins the live isolate
+# to stale V27 across plain deploys, so the rename forces a fresh isolate.
+# Storage preserved.
+[[migrations]]
+tag = "v28"
+renamed_classes = [
+  { from = "HAWebSocketV27", to = "HAWebSocketV28" }
 ]
 
 # Two cron triggers:
