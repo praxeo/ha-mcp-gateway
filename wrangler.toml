@@ -51,7 +51,7 @@ binding = "CF_VERSION_METADATA"
 
 [[durable_objects.bindings]]
 name = "HA_WS"
-class_name = "HAWebSocketV26"
+class_name = "HAWebSocketV27"
 
 [[migrations]]
 tag = "v1"
@@ -384,6 +384,21 @@ renamed_classes = [
 tag = "v26"
 renamed_classes = [
   { from = "HAWebSocketV25", to = "HAWebSocketV26" }
+]
+
+# v27 — swap the chat model to MiniMax M3 on Fireworks (LLM_MODEL
+# deepseek-v4-flash → minimax-m3). M3 on Fireworks enables thinking via the
+# thinking:{type:"enabled"} toggle rather than reasoning_effort and rejects
+# both together, so callLLM / callLLMWithTools now send the toggle and drop
+# reasoning_effort. Reasoning still returns in reasoning_content, so the
+# reasoning extraction, SSE reasoning stream, and prior-turn reasoning re-feed
+# are unchanged. DO-side code; the persistent HA WS pins the live isolate to
+# stale V26 across plain deploys, so the rename forces a fresh isolate.
+# Storage preserved.
+[[migrations]]
+tag = "v27"
+renamed_classes = [
+  { from = "HAWebSocketV26", to = "HAWebSocketV27" }
 ]
 
 # Two cron triggers:
