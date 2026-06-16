@@ -1,4 +1,4 @@
-import { HAWebSocketV28 } from "./ha-websocket.js";
+import { HAWebSocketV29 } from "./ha-websocket.js";
 import { CHAT_HTML } from "./chat-ui.html.js";
 import {
   ALL_KINDS,
@@ -2691,6 +2691,33 @@ var worker_default = {
         headers: { ...corsHeaders, "Content-Type": "application/json" }
       });
     }
+    // Runtime LLM config. GET returns the effective/stored/default config; POST
+    // (JSON body) sets the stored override and { "reset": true } clears it.
+    // Lets the chat/agent model, endpoint, and reasoning mode be swapped live
+    // (e.g. Qwen ↔ MiniMax) without the DO-rename migration dance.
+    if (url.pathname === "/admin/llm-config") {
+      if (request.method !== "GET" && request.method !== "POST") {
+        return new Response("Method not allowed", { status: 405 });
+      }
+      let result;
+      if (request.method === "POST") {
+        const body = await request.json().catch(() => ({}));
+        result = await doFetch(env, "/llm_config", body || {});
+      } else {
+        result = await doFetch(env, "/llm_config");
+      }
+      if (!result) {
+        return new Response(JSON.stringify({ error: "DO not responding" }), {
+          status: 503,
+          headers: { ...corsHeaders, "Content-Type": "application/json" }
+        });
+      }
+      const status = result.error ? 400 : 200;
+      return new Response(JSON.stringify(result, null, 2), {
+        status,
+        headers: { ...corsHeaders, "Content-Type": "application/json" }
+      });
+    }
     if (url.pathname === "/admin/index-stats") {
       if (request.method !== "GET") {
         return new Response("Method not allowed", { status: 405 });
@@ -3029,6 +3056,6 @@ var worker_default = {
   }
 };
 export {
-  HAWebSocketV28,
+  HAWebSocketV29,
   worker_default as default
 };
