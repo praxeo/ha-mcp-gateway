@@ -4,7 +4,8 @@ A Cloudflare Worker + Durable Object that bridges Home Assistant to LLMs. It
 holds a persistent WebSocket to HA, mirrors live state in memory, streams
 every meaningful event into a queryable D1 forensic log, and exposes the
 whole surface as an MCP server. A built-in chat agent — "Ranger," running
-DeepSeek V4 Flash on Fireworks with Think High reasoning and a native
+Qwen 3.7 Plus on Fireworks (runtime-configurable; see [LLM configuration](#llm-configuration))
+with thinking enabled and a native
 tool-calling loop — answers questions on demand and acts on user commands.
 Deterministic cover commands short-circuit the LLM via a sub-500ms fast path.
 A Cloudflare Vectorize index over nine kinds backs semantic retrieval.
@@ -121,13 +122,64 @@ or four tool calls without losing the thread.
 
 V16 reverted to MiniMax-M2.7-highspeed — better at the long chain than
 gpt-oss, held the role until DeepSeek V4 Flash with Think High
-reasoning showed up. That's the current setup (V17+): DeepSeek V4
-Flash on Fireworks, `reasoning_effort: "high"`, OpenAI-compatible tool
-schema. Cheaper than MiniMax and better at the chain. It still fumbles
-edge cases occasionally — V22 was a deterministic guard against it
-sending unsupported color descriptors to `light.turn_on` — but those
-get bounded with source-level guards rather than left to the model's
-discretion.
+reasoning showed up (V17–V26: DeepSeek V4 Flash on Fireworks,
+`reasoning_effort: "high"`, OpenAI-compatible tool schema — cheaper than
+MiniMax and better at the chain). V27 swapped to MiniMax M3 (and the
+reasoning control moved from `reasoning_effort` to the
+`thinking: { type: "enabled" }` toggle, since Fireworks rejects sending
+both). The current setup is **Qwen 3.7 Plus on Fireworks** (V29+), with
+thinking enabled — cheaper still and strong on the multi-step tool chain.
+
+The model itself stopped being a code-level decision in V29: the
+endpoint, model, and reasoning mode are now **runtime-configurable** (DO
+storage override → env vars → baked-in defaults), so a swap no longer
+needs the persistent-WS class-rename dance. See
+[LLM configuration](#llm-configuration). Every model still fumbles edge
+cases occasionally — V22 was a deterministic guard against unsupported
+color descriptors on `light.turn_on`, V28 healed flat tool-call args —
+but those get bounded with source-level guards rather than left to the
+model's discretion.
+
+---
+
+## LLM configuration
+
+Since V29 the chat/agent LLM is **runtime-configurable**. The effective
+config is resolved at call time (`resolveLLMConfig` in `ha-websocket.js`)
+from three layers, highest precedence first:
+
+1. **DO storage override** — key `llm_config`, set live via the
+   `/admin/llm-config` route. No deploy, no class rename.
+2. **env vars** — `LLM_ENDPOINT` / `LLM_MODEL` / `LLM_REASONING_MODE` /
+   `LLM_REASONING_EFFORT` (picked up by a fresh isolate).
+3. **baked-in defaults** — static class constants
+   (`HAWebSocketV29._defaultLLMConfig()`): endpoint
+   `api.fireworks.ai/.../chat/completions`, model
+   `accounts/fireworks/models/qwen3p7-plus`, reasoning mode `thinking`.
+
+Both call sites (`callLLM`, `callLLMWithTools`) go through
+`_getLLMConfig()`, so they can't drift. Reasoning is applied by
+`applyReasoningToBody`: mode `thinking` → `thinking: { type: "enabled" }`;
+`effort` → `reasoning_effort: <effort>`; `none` → neither. Fireworks
+**rejects sending `thinking` and `reasoning_effort` together**, so the
+helper emits at most one. Reasoning still returns in `reasoning_content`,
+so the extraction / SSE stream / prior-turn re-feed are model-agnostic.
+
+Operating it:
+
+```text
+GET  /admin/llm-config                       # effective + stored + env + defaults
+POST /admin/llm-config  {"model":"accounts/fireworks/models/minimax-m3",
+                         "reasoning_mode":"thinking"}   # set override (merged)
+POST /admin/llm-config  {"reset":true}       # clear override → back to env/defaults
+```
+
+A set is validated (`sanitizeLLMConfigPatch` — only `endpoint`, `model`,
+`reasoning_mode`, `reasoning_effort`; enums enforced) and updates the
+in-process cache, so even the pinned live isolate honors it on the next
+call. Any OpenAI-compatible Fireworks model can be selected this way; the
+API key is the `FIREWORKS_API_KEY` secret. This is the fast rollback path
+for a bad model swap — no redeploy required.
 
 ---
 
@@ -145,12 +197,12 @@ Cloudflare Worker (worker.js)         ◀── /mcp, /chat, /transcribe, /refre
    │                                       /admin/index-stats,
    │                                       /admin/cleanup-stale-vectors,
    │                                       /admin/reindex-observations,
-   │                                       /admin/version
-   │  routing, MCP handler (79-tool surface), CHAT_HTML, ElevenLabs STT
+   │                                       /admin/version, /admin/llm-config
+   │  routing, MCP handler (82-tool surface), CHAT_HTML, ElevenLabs STT
    │  proxy, multi-kind backfill, two crons (cache prewarm; daily resync
    │  + ai_log + forensic-log retention)
    ▼
-Durable Object: HAWebSocketV22 (ha-websocket.js)
+Durable Object: HAWebSocketV29 (ha-websocket.js)
    │  singleton "ha-websocket-singleton" — owns the persistent WS
    │  in-memory stateCache, hibernation snapshot, cover fast path,
    │  HOUSE_STATE_SNAPSHOT builder, chat tool loop, forensic D1 writers,
@@ -164,7 +216,8 @@ Durable Object: HAWebSocketV22 (ha-websocket.js)
    │               service_calls   (bugs live in DO storage — see below)
    ├──► Cloudflare Vectorize "ha-knowledge"  (env.KNOWLEDGE)
    ├──► Cloudflare Workers AI                (env.AI, bge-large-en-v1.5)
-   ├──► DeepSeek V4 Flash on Fireworks at api.fireworks.ai (OpenAI-compatible)
+   ├──► Qwen 3.7 Plus on Fireworks at api.fireworks.ai (OpenAI-compatible,
+   │       runtime-configurable model/endpoint/reasoning)
    └──► ElevenLabs Scribe at api.elevenlabs.io       (speech-to-text)
 ```
 
@@ -176,7 +229,7 @@ Layer-by-layer:
 4. **ha-mcp-gateway (this repo)** — Worker + DO. Translates natural language into HA service calls and answers historical questions from the forensic log. Auth: Cloudflare Access JWT for browser users; long-lived HA token in worker secret.
 5. **Vectorize knowledge index (`ha-knowledge`)** — see [Knowledge index](#knowledge-index-ha-knowledge).
 6. **Cloudflare D1 (`ha_db`)** — relational store. `ai_log` keeps chat/action history; `observations` keeps tagged hypotheses; `state_changes` / `automation_runs` / `service_calls` are the [forensic log](#forensic-event-log).
-7. **DeepSeek V4 Flash (Fireworks)** — chat completions + native tool calls, run with Think High reasoning (`reasoning_effort: "high"`). The DO drives the loop, not the model. 45s `AbortController` timeout per call.
+7. **Qwen 3.7 Plus (Fireworks)** — chat completions + native tool calls, run with thinking enabled (`thinking: { type: "enabled" }`). Model, endpoint, and reasoning mode are runtime-configurable (see [LLM configuration](#llm-configuration)). The DO drives the loop, not the model. 45s `AbortController` timeout per call.
 8. **ElevenLabs Scribe** — `scribe_v1` speech-to-text. Worker proxies the chat UI's audio blobs through `/transcribe`.
 9. **Frontends** — Claude Desktop and Claude Code (MCP), `/chat` HTML UI served by the Worker (SSE-streaming, hero mic button, collapsible reasoning panel). Twilio (WhatsApp) is currently dormant.
 
@@ -187,7 +240,7 @@ Layer-by-layer:
 | File | Role |
 |---|---|
 | `src/worker.js` | Cloudflare Worker entry. Owns the MCP handler (`TOOLS` list — 79 tools — plus `handleTool` dispatch, `getAgentToolset` role filter, `DANGEROUS_TOOLS` set), HTTP routes including `/admin/recent_activity`, the embedded `CHAT_HTML` UI, the ElevenLabs STT proxy, the `formatBugsAsMarkdown` helper, KV cache helpers, the per-kind `build*Docs` builders, the multi-kind `backfillKnowledge`, and the `scheduled()` cron handler (`prewarmCache`, `dailyKnowledgeResync`, `dailyAiLogRetention`, `dailyForensicLogRetention`). |
-| `src/ha-websocket.js` | Durable Object class `HAWebSocketV22` (renamed forward through the persistent-WS refresh dance — see [Operational notes](#operational-notes)). Holds the persistent HA WebSocket and in-memory `stateCache`. Subscribes to five HA event types: `state_changed`, `entity_registry_updated`, `device_registry_updated`, `automation_triggered`, `call_service`. Writes every meaningful event fire-and-forget to D1 via `_writeStateChangeToD1` / `_writeAutomationRunToD1` / `_writeServiceCallToD1`, gated by `_shouldLogStateChange` for the state path (Zigbee/network-noise denylist). Reconnect backfill from HA history via `_backfillStateChangesFromHA`. Chat system prompt is split into `getStaticChatSystemPrompt` (cacheable) + `buildDynamicContext` (per-turn). One execution path: `chatWithAgentNative` (user-driven, SSE), preceded by `_tryDeterministicFastPath` for cover commands. Native tool loop in `runNativeToolLoop`, action executor in `executeAIAction`, tool dispatcher in `executeNativeTool`. `alarm()` is WS keepalive only — ping/pong, reconnect on no-pong, mandatory reschedule. |
+| `src/ha-websocket.js` | Durable Object class `HAWebSocketV29` (renamed forward through the persistent-WS refresh dance — see [Operational notes](#operational-notes)). Holds the persistent HA WebSocket and in-memory `stateCache`. Subscribes to five HA event types: `state_changed`, `entity_registry_updated`, `device_registry_updated`, `automation_triggered`, `call_service`. Writes every meaningful event fire-and-forget to D1 via `_writeStateChangeToD1` / `_writeAutomationRunToD1` / `_writeServiceCallToD1`, gated by `_shouldLogStateChange` for the state path (Zigbee/network-noise denylist). Reconnect backfill from HA history via `_backfillStateChangesFromHA`. Chat system prompt is split into `getStaticChatSystemPrompt` (cacheable) + `buildDynamicContext` (per-turn). One execution path: `chatWithAgentNative` (user-driven, SSE), preceded by `_tryDeterministicFastPath` for cover commands. Native tool loop in `runNativeToolLoop`, action executor in `executeAIAction`, tool dispatcher in `executeNativeTool`. `alarm()` is WS keepalive only — ping/pong, reconnect on no-pong, mandatory reschedule. |
 | `src/agent-tools.js` | OpenAI-format tool schemas passed to the chat model. `ACTION_TOOLS` (4: `call_service`, `ai_send_notification`, `save_memory`, `save_observation`) + `READ_TOOLS` (12: `get_state`, `get_logbook`, `render_template`, `vector_search`, `get_house_topology`, `get_automation_config`, `report_bug`, `query_state_history`, `query_automation_runs`, `query_causal_chain`, `get_nws_weather`, `get_nws_discussion`) = `NATIVE_AGENT_TOOLS`, 16 total. `CHAT_ALLOWED_TOOL_NAMES` includes all 16 — the chat agent has the full native surface. `NATIVE_ACTION_TOOL_NAMES` marks the 4 side-effecting tools (logged as actions). |
 | `src/vectorize-schema.js` | Canonical metadata schema, `vectorIdFor(kind, refId)`, FNV-1a hash, `topicTagFor(text)`, per-kind embed-text builders, `isNoisyEntity` / `isNoisySwitch` / `isNoisyService` / `entityCategoryFor` helpers, `buildMetadata` (lowercase-coerces `area`, string-coerces `is_noisy`, propagates `created_at`). |
 | `migrations/0001_d1_indexes_and_columns.sql` | Indexes on the legacy `ai_log` / `observations` / `bugs` tables. Also adds the nullable `data` JSON column to `observations`. |
@@ -418,19 +471,21 @@ Anything not in the snapshot is fair game for `get_state` /
 ## Native tool loop
 
 The chat model is given OpenAI-format tool schemas (`NATIVE_AGENT_TOOLS`
-in `agent-tools.js`, 16 tools). The DO drives the loop: send messages,
+in `agent-tools.js`, 19 tools). The DO drives the loop: send messages,
 read `tool_calls`, dispatch via `executeNativeTool`, push tool results
 back, repeat until the model emits no `tool_calls`. `callLLMWithTools`
-posts to Fireworks (`accounts/fireworks/models/deepseek-v4-flash`,
-`temperature: 0`, `reasoning_effort: "high"`) with a 45s `AbortController`
+posts to Fireworks (`temperature: 0`) using the runtime-resolved model
+and reasoning mode — by default `accounts/fireworks/models/qwen3p7-plus`
+with `thinking: { type: "enabled" }` (see
+[LLM configuration](#llm-configuration)) — with a 45s `AbortController`
 timeout.
 
 Caps:
 
 - **Chat path** (`chatWithAgentNative`): `runNativeToolLoop` is invoked
   with `maxIterations: 6`, `maxTokens: 4096`, `hallucinationGuard: true`.
-  Tool set is the full 16-tool surface filtered through
-  `CHAT_ALLOWED_TOOL_NAMES` (a defensive no-op now that all 16 are
+  Tool set is the full 19-tool surface filtered through
+  `CHAT_ALLOWED_TOOL_NAMES` (a defensive no-op now that all 19 are
   allowed; kept for future flexibility). `runNativeToolLoop`'s own
   defaults — `maxIterations: 8`, `maxTokens: 16384` — apply to any other
   caller.
@@ -583,7 +638,7 @@ native set maps to an MCP tool.
 | `last_event_seen_ms` | DO storage | scalar | Cursor for reconnect backfill (`_backfillStateChangesFromHA`). |
 
 Timeline timestamps are reformatted to **Central time** at prompt-injection
-(`HAWebSocketV22._formatTimelineTimestamp`). Underlying `ai_log` entries
+(`HAWebSocketV29._formatTimelineTimestamp`). Underlying `ai_log` entries
 stay ISO 8601 for parseability.
 
 ---
@@ -594,7 +649,7 @@ stay ISO 8601 for parseability.
 
 | Binding | Resource | Purpose |
 |---|---|---|
-| `HA_WS` | Durable Object class `HAWebSocketV22` | Singleton `ha-websocket-singleton` |
+| `HA_WS` | Durable Object class `HAWebSocketV29` | Singleton `ha-websocket-singleton` |
 | `HA_CACHE` | KV namespace | TTL'd cache for HA registries / states between cold starts |
 | `KNOWLEDGE` | Vectorize index `ha-knowledge` | Multi-kind semantic index |
 | `AI` | Workers AI | `@cf/baai/bge-large-en-v1.5` embeddings (cls pooling) |
@@ -619,6 +674,7 @@ stay ISO 8601 for parseability.
 | `USE_VECTOR_ENTITY_RETRIEVAL` | `"true"` flips context build to vector retrieval. Falls back to flat-list on failure. |
 | `CLIMATE_PREAMBLE_ENABLED` | (optional) `"false"` disables the climate preamble |
 | `DUMP_SYSTEM_PROMPT` | (optional) `"1"` emits a one-shot preflight breakdown of the model request body to `ai_log`. Unset after use. |
+| `LLM_ENDPOINT` / `LLM_MODEL` / `LLM_REASONING_MODE` / `LLM_REASONING_EFFORT` | (optional) env-var layer for the runtime LLM config; overridden by the `llm_config` DO-storage override, overrides the baked-in defaults. See [LLM configuration](#llm-configuration). |
 
 ### Cron triggers
 
@@ -806,9 +862,12 @@ wrangler d1 execute ha_db --remote --command="SELECT 'state_changes' AS t, COUNT
   inspect per-event `scriptVersion.id` against the latest deployed
   version id; or compare `/admin/version` (worker) against the
   DO `/version` route. **Fix**: rename the DO class via a
-  `renamed_classes` migration. The class has been renamed twenty-one
+  `renamed_classes` migration. The class has been renamed twenty-eight
   times for exactly this reason (`HAWebSocket` → `HAWebSocketV2` → … →
-  `HAWebSocketV22`). Storage is preserved across renames.
+  `HAWebSocketV29`). Storage is preserved across renames. **Exception:**
+  since V29 the LLM config (model/endpoint/reasoning) is runtime-swappable
+  via `/admin/llm-config` with no rename — see
+  [LLM configuration](#llm-configuration).
 - **Three redundant DO keepalives.** The persistent HA WebSocket is the
   primary; the 60s alarm (ping/pong + mandatory reschedule) is the
   secondary; the minute-cadence `prewarmCache` cron is the tertiary.
@@ -992,8 +1051,10 @@ don't delete entries, the history is the audit trail.
 
 The model swap that the [Story](#story-the-monitor-that-didnt-earn-its-keep)
 anticipated has happened — the chat-only architecture freed the token
-budget, and the agent now runs DeepSeek V4 Flash with Think High
-reasoning. The highest-leverage open items from here:
+budget, and the agent now runs Qwen 3.7 Plus on Fireworks with thinking
+enabled (and, since V29, the model is swappable at runtime — see
+[LLM configuration](#llm-configuration)). The highest-leverage open items
+from here:
 
 1. **Scheduled actions.** A `schedule_action` tool that accepts natural
    language ("close the basement bay at 11 PM tonight") and stores

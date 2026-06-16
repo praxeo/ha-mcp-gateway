@@ -41,7 +41,8 @@ Windows**.
 
 ```powershell
 npm install          # dependencies (only devDependency is vitest)
-npm test             # vitest run — currently one suite (forensic filter)
+npm test             # vitest run — 6 suites (forensic filter, light sanitizer,
+                     #   scheduler, fast path, coalesce, llm-config)
 ```
 
 - **Deploy is git-driven.** A push to `main` triggers a **Cloudflare Workers
@@ -57,9 +58,11 @@ npm test             # vitest run — currently one suite (forensic filter)
   overwritten on every build. All source lives in `src/`.
 - A deploy reconciles bindings, cron triggers, and Durable Object migrations
   with Cloudflare.
-- Tests run with `vitest`. The only current suite is
-  `test/should-log-state-change.test.js` (the forensic noise filter). Add tests
-  alongside it when changing pure, testable logic.
+- Tests run with `vitest` — 6 suites under `test/` (98 cases): the forensic
+  noise filter (`should-log-state-change`), the light-service sanitizer, the
+  scheduler, the cover fast path, the flat-arg coalescer, and the runtime
+  LLM-config helpers (`llm-config`). Add tests alongside these when changing
+  pure, testable logic; the pure helpers keep a synced stub copy in their test.
 
 ---
 
