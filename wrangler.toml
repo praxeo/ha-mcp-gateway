@@ -51,7 +51,7 @@ binding = "CF_VERSION_METADATA"
 
 [[durable_objects.bindings]]
 name = "HA_WS"
-class_name = "HAWebSocketV28"
+class_name = "HAWebSocketV29"
 
 [[migrations]]
 tag = "v1"
@@ -419,6 +419,26 @@ renamed_classes = [
 tag = "v28"
 renamed_classes = [
   { from = "HAWebSocketV27", to = "HAWebSocketV28" }
+]
+
+# v29 — runtime-configurable LLM config + default model swap to Qwen 3.7 Plus.
+# The chat/agent model, endpoint, and reasoning mode are now resolved at call
+# time (resolveLLMConfig: DO storage override → env vars → baked-in defaults)
+# instead of being read straight from the static class constants. A new
+# /llm_config DO route (and /admin/llm-config worker route) sets the storage
+# override, so a model swap (e.g. Qwen ↔ MiniMax) goes live with no rename or
+# redeploy — the route updates the in-process cache too. Fireworks rejects
+# `thinking` + `reasoning_effort` together, so applyReasoningToBody emits exactly
+# one based on reasoning_mode ("thinking"/"effort"/"none"). Default flips
+# minimax-m3 → qwen3p7-plus (reasoning_mode "thinking"); reasoning still returns
+# in reasoning_content so extraction/SSE/re-feed are unchanged. DO-side code;
+# the persistent HA WS pins the live isolate to stale V28 across plain deploys,
+# so this rename forces a fresh isolate (which also picks up the new default).
+# Storage preserved, including any existing llm_config override.
+[[migrations]]
+tag = "v29"
+renamed_classes = [
+  { from = "HAWebSocketV28", to = "HAWebSocketV29" }
 ]
 
 # Two cron triggers:

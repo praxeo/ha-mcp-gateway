@@ -17,8 +17,9 @@ Assistant smart home to LLMs. It:
 - streams every meaningful HA event into a queryable D1 **forensic log**,
 - exposes the whole surface as an **MCP server** (`POST /mcp`) for clients like
   Claude Desktop and Claude Code,
-- runs a built-in **chat agent** — "Ranger," MiniMax M3 on Fireworks
-  with thinking enabled and a native tool-calling loop — reachable at a web
+- runs a built-in **chat agent** — "Ranger," Qwen 3.7 Plus on Fireworks
+  (runtime-configurable; see LLM configuration) with thinking enabled and a
+  native tool-calling loop — reachable at a web
   `/chat` UI and via the `ai_chat` MCP tool,
 - short-circuits deterministic cover (garage/bay door) commands via a sub-500ms
   fast path that skips the LLM entirely.
@@ -71,14 +72,18 @@ npm test             # vitest run — currently one suite (forensic filter)
    (`src/ha-websocket.js`) do not.** To force a fresh DO isolate you must rename
    the DO class via a `renamed_classes` migration in `wrangler.toml` and update
    `class_name` in the `durable_objects.bindings`. The class is currently
-   `HAWebSocketV27` — it has been renamed 26 times for exactly this reason.
+   `HAWebSocketV29` — it has been renamed 28 times for exactly this reason.
    Procedure for any DO-side change you need live:
-   - bump the class name (`HAWebSocketV27` → `HAWebSocketV28`) in the `export
-     class` line in `src/ha-websocket.js`, every `HAWebSocketV27.` static
+   - bump the class name (`HAWebSocketV29` → `HAWebSocketV30`) in the `export
+     class` line in `src/ha-websocket.js`, every `HAWebSocketV29.` static
      reference, the `export {}` at the file end, and the `worker.js` import;
-   - add a `[[migrations]]` block with `tag = "v28"` and
-     `renamed_classes = [{ from = "HAWebSocketV27", to = "HAWebSocketV28" }]`;
+   - add a `[[migrations]]` block with `tag = "v30"` and
+     `renamed_classes = [{ from = "HAWebSocketV29", to = "HAWebSocketV30" }]`;
    - update `class_name` in `[[durable_objects.bindings]]`.
+   **Exception — the LLM config is now runtime-configurable** (V29): the chat/
+   agent model, endpoint, and reasoning mode can be swapped live via the
+   `/admin/llm-config` route (DO storage override) with no rename or redeploy.
+   See the LLM configuration section. A model swap no longer needs this dance.
    DO storage (snapshot, chat history, memory, cursors) is preserved across
    renames. Diagnose staleness with `wrangler tail --format json` (compare
    per-event `scriptVersion.id` to the latest deploy) or by comparing
@@ -104,7 +109,7 @@ npm test             # vitest run — currently one suite (forensic filter)
    push speculative changes to `main`.
 
 7. **Commit hygiene.** Commit messages in this repo follow
-   `type(scope): VNN — summary` (e.g. `feat(do): V27 — swap chat model to MiniMax M3 on Fireworks`). The
+   `type(scope): VNN — summary` (e.g. `feat(do): V29 — runtime LLM config + Qwen 3.7 Plus default`). The
    `VNN` matches the DO migration tag when the change is DO-side.
 
 ---
@@ -120,7 +125,7 @@ Cloudflare Worker  (src/worker.js)
    │   CHAT_HTML UI, ElevenLabs STT proxy, multi-kind knowledge backfill,
    │   scheduled() cron handler
    ▼
-Durable Object  HAWebSocketV27  (src/ha-websocket.js)
+Durable Object  HAWebSocketV29  (src/ha-websocket.js)
    │   singleton "ha-websocket-singleton" — persistent HA WebSocket,
    │   in-memory stateCache, hibernation snapshot, chat tool loop,
    │   cover fast path, forensic D1 writers, reconnect backfill
@@ -131,7 +136,7 @@ Durable Object  HAWebSocketV27  (src/ha-websocket.js)
    │                           automation_runs, service_calls
    ├─► Vectorize "ha-knowledge" — nine-kind semantic index
    ├─► Workers AI            — @cf/baai/bge-large-en-v1.5 embeddings (cls)
-   ├─► Fireworks             — DeepSeek V4 Flash chat completions
+   ├─► Fireworks             — Qwen 3.7 Plus chat completions (runtime-configurable)
    └─► ElevenLabs Scribe     — speech-to-text
 ```
 
@@ -146,7 +151,7 @@ addresses the same instance by the fixed name `ha-websocket-singleton`.
 | Path | Role |
 |---|---|
 | `src/worker.js` | Worker entry. MCP handler (`TOOLS` — 82 entries — + `handleTool` dispatch, `getAgentToolset`, `DANGEROUS_TOOLS`), HTTP routes, embedded `CHAT_HTML`, ElevenLabs STT proxy, KV cache helpers, per-kind `build*Docs`, `backfillKnowledge`, `scheduled()` cron handler. |
-| `src/ha-websocket.js` | The Durable Object class `HAWebSocketV27`. Persistent HA WS, `stateCache`, chat path (`chatWithAgentNative`), native tool loop (`runNativeToolLoop`), tool dispatch (`executeNativeTool`), action executor (`executeAIAction`), prompt builders, fast path, forensic D1 writers, reconnect backfill, `alarm()` keepalive. `_sanitizeLightServiceData` strips unsupported color descriptors from `light.turn_on` / `light.toggle` calls before they reach HA. ~6000 lines — the bulk of the system. |
+| `src/ha-websocket.js` | The Durable Object class `HAWebSocketV29`. Persistent HA WS, `stateCache`, chat path (`chatWithAgentNative`), native tool loop (`runNativeToolLoop`), tool dispatch (`executeNativeTool`), action executor (`executeAIAction`), prompt builders, fast path, forensic D1 writers, reconnect backfill, `alarm()` keepalive. `_sanitizeLightServiceData` strips unsupported color descriptors from `light.turn_on` / `light.toggle` calls before they reach HA. ~6000 lines — the bulk of the system. |
 | `src/agent-tools.js` | OpenAI-format tool schemas for the chat agent: `NATIVE_AGENT_TOOLS` (19 = 6 action + 13 read), `CHAT_ALLOWED_TOOL_NAMES`, `NATIVE_ACTION_TOOL_NAMES`. |
 | `src/vectorize-schema.js` | Shared Vectorize schema + helpers: `vectorIdFor`, `topicTagFor`, `fnv1aHex`, per-kind embed-text builders, `isNoisyEntity` / `isNoisySwitch` / `isNoisyService`, `buildMetadata`. Imported by both `worker.js` and `ha-websocket.js`. |
 | `migrations/000{1,2,3}_*.sql` | D1 schema. 0001 indexes legacy tables; 0002 creates the forensic log tables; 0003 de-dupes `state_changes` and adds the backfill-idempotency unique index. |
@@ -275,34 +280,62 @@ also calls `_fireDueScheduledActions` to fire any due scheduled tasks. The
 
 ## LLM configuration
 
-Defined once as static class constants in `src/ha-websocket.js` — change them
-there, never inline:
+**Runtime-configurable since V29.** The effective config is resolved at call
+time by `resolveLLMConfig` (module-level, pure) with three layers, highest
+precedence first:
+
+1. **DO storage override** — `state.storage` key `llm_config`, set live via the
+   `/admin/llm-config` route (worker) → `/llm_config` (DO). No deploy, no rename.
+2. **env vars** — `LLM_ENDPOINT` / `LLM_MODEL` / `LLM_REASONING_MODE` /
+   `LLM_REASONING_EFFORT` (a fresh isolate picks these up).
+3. **baked-in defaults** — the static class constants in `src/ha-websocket.js`,
+   exposed via `HAWebSocketV29._defaultLLMConfig()`:
 
 ```js
 static LLM_ENDPOINT = "https://api.fireworks.ai/inference/v1/chat/completions";
-static LLM_MODEL = "accounts/fireworks/models/minimax-m3";
-static LLM_REASONING_EFFORT = "high";
+static LLM_MODEL = "accounts/fireworks/models/qwen3p7-plus"; // Qwen 3.7 Plus
+static LLM_REASONING_MODE = "thinking";   // "thinking" | "effort" | "none"
+static LLM_REASONING_EFFORT = "high";     // used only when mode === "effort"
 ```
 
-`LLM_REASONING_EFFORT` is retained but **unused since V27**. MiniMax M3 on
-Fireworks enables thinking via a `thinking: { type: "enabled" }` request toggle
-rather than `reasoning_effort`, and rejects sending both together — so `callLLM`
-and `callLLMWithTools` send the toggle and omit `reasoning_effort`. Reasoning
-still returns in `reasoning_content`, so the extraction / SSE stream / prior-turn
-re-feed are unchanged.
+Both call sites (`callLLM`, `callLLMWithTools`) go through `await
+this._getLLMConfig()` and use the resolved `cfg.endpoint` / `cfg.model`, so they
+can't drift. Reasoning is applied by `applyReasoningToBody(body, cfg)`: mode
+`"thinking"` → `thinking: { type: "enabled" }`; `"effort"` →
+`reasoning_effort: <effort>`; `"none"` → neither. Fireworks **rejects sending
+`thinking` and `reasoning_effort` together**, so the helper always emits at most
+one and clears any pre-existing field first. Reasoning still returns in
+`reasoning_content`, so the extraction / SSE stream / prior-turn re-feed are
+unchanged. The pure helpers have unit coverage in `test/llm-config.test.js`
+(keep the stubs there in sync).
+
+Operating the runtime config:
+
+```text
+GET  /admin/llm-config                          # effective + stored + env + defaults
+POST /admin/llm-config  {"model":"accounts/fireworks/models/minimax-m3",
+                         "reasoning_mode":"thinking"}   # set override (merged)
+POST /admin/llm-config  {"reset":true}          # clear override → back to env/defaults
+```
+
+The override is validated by `sanitizeLLMConfigPatch` (only `endpoint`, `model`,
+`reasoning_mode`, `reasoning_effort`; enums enforced). A set updates the
+in-process cache, so even the pinned live isolate honors it on the next call.
 
 The API key is `env.FIREWORKS_API_KEY`. Provider history (kept here because it
 explains the migration tags): originally MiniMax → gpt-oss-120b on Groq (V13–15)
 → MiniMax again (V16) → DeepSeek V4 Flash on Fireworks (V17–V26) → MiniMax M3 on
-Fireworks (V27+). Don't reintroduce Groq, the old MiniMax endpoint/auth
-(`MINIMAX_API_KEY`, `reasoning_split`), or DeepSeek naming — the current model is
-MiniMax M3, served by Fireworks via `FIREWORKS_API_KEY`.
+Fireworks (V27–V28) → Qwen 3.7 Plus on Fireworks (V29+, runtime-configurable).
+Don't reintroduce Groq or the old MiniMax endpoint/auth (`MINIMAX_API_KEY`,
+`reasoning_split`). The current default is Qwen 3.7 Plus, served by Fireworks via
+`FIREWORKS_API_KEY`; any OpenAI-compatible Fireworks model can be selected at
+runtime via the override.
 
 ---
 
 ## Bindings, secrets, and flags
 
-**Bindings** (`wrangler.toml`): `HA_WS` (DO `HAWebSocketV27`), `HA_CACHE` (KV),
+**Bindings** (`wrangler.toml`): `HA_WS` (DO `HAWebSocketV29`), `HA_CACHE` (KV),
 `KNOWLEDGE` (Vectorize `ha-knowledge`), `AI` (Workers AI), `DB` (D1 `ha_db`),
 `CF_VERSION_METADATA`.
 
@@ -321,12 +354,13 @@ fallback), `CLIMATE_PREAMBLE_ENABLED` (optional), `DUMP_SYSTEM_PROMPT`
 `/health`, `/transcribe` (ElevenLabs STT proxy), `/refresh`, `/chat` (GET = UI,
 POST = SSE chat), `/twilio` (dormant), `/mcp` (and `/` — MCP JSON-RPC), plus
 admin endpoints: `/admin/bugs`, `/admin/bugs/clear`, `/admin/recent_activity`,
-`/admin/version`, `/admin/index-stats`, `/admin/reindex-observations`,
+`/admin/version`, `/admin/llm-config` (GET/POST — runtime LLM config),
+`/admin/index-stats`, `/admin/reindex-observations`,
 `/admin/cleanup-stale-vectors`, `/admin/rebuild-knowledge`.
 
-The DO has its own internal HTTP router (`/status`, `/reconnect`, `/version`,
-`/vector_search`, `/call_service`, the registry routes, the forensic query
-routes, etc.) — reached only via `doFetch` from the Worker.
+The DO has its own internal HTTP router (`/status`, `/llm_config`, `/reconnect`,
+`/version`, `/vector_search`, `/call_service`, the registry routes, the forensic
+query routes, etc.) — reached only via `doFetch` from the Worker.
 
 ---
 
