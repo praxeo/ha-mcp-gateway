@@ -17,8 +17,8 @@ Assistant smart home to LLMs. It:
 - streams every meaningful HA event into a queryable D1 **forensic log**,
 - exposes the whole surface as an **MCP server** (`POST /mcp`) for clients like
   Claude Desktop and Claude Code,
-- runs a built-in **chat agent** — "Ranger," Qwen 3.7 Plus on Fireworks
-  (runtime-configurable; see LLM configuration) with thinking enabled and a
+- runs a built-in **chat agent** — "Ranger," GLM 5.2 on Fireworks
+  (runtime-configurable; see LLM configuration) with reasoning enabled and a
   native tool-calling loop — reachable at a web
   `/chat` UI and via the `ai_chat` MCP tool,
 - short-circuits deterministic cover (garage/bay door) commands via a sub-500ms
@@ -139,7 +139,7 @@ Durable Object  HAWebSocketV29  (src/ha-websocket.js)
    │                           automation_runs, service_calls
    ├─► Vectorize "ha-knowledge" — nine-kind semantic index
    ├─► Workers AI            — @cf/baai/bge-large-en-v1.5 embeddings (cls)
-   ├─► Fireworks             — Qwen 3.7 Plus chat completions (runtime-configurable)
+   ├─► Fireworks             — GLM 5.2 chat completions (runtime-configurable)
    └─► ElevenLabs Scribe     — speech-to-text
 ```
 
@@ -296,8 +296,8 @@ precedence first:
 
 ```js
 static LLM_ENDPOINT = "https://api.fireworks.ai/inference/v1/chat/completions";
-static LLM_MODEL = "accounts/fireworks/models/qwen3p7-plus"; // Qwen 3.7 Plus
-static LLM_REASONING_MODE = "thinking";   // "thinking" | "effort" | "none"
+static LLM_MODEL = "accounts/fireworks/models/glm-5p2"; // GLM 5.2
+static LLM_REASONING_MODE = "effort";     // "thinking" | "effort" | "none"
 static LLM_REASONING_EFFORT = "high";     // used only when mode === "effort"
 ```
 
@@ -328,9 +328,15 @@ in-process cache, so even the pinned live isolate honors it on the next call.
 The API key is `env.FIREWORKS_API_KEY`. Provider history (kept here because it
 explains the migration tags): originally MiniMax → gpt-oss-120b on Groq (V13–15)
 → MiniMax again (V16) → DeepSeek V4 Flash on Fireworks (V17–V26) → MiniMax M3 on
-Fireworks (V27–V28) → Qwen 3.7 Plus on Fireworks (V29+, runtime-configurable).
-Don't reintroduce Groq or the old MiniMax endpoint/auth (`MINIMAX_API_KEY`,
-`reasoning_split`). The current default is Qwen 3.7 Plus, served by Fireworks via
+Fireworks (V27–V28) → Qwen 3.7 Plus on Fireworks (V29, runtime-configurable) →
+GLM 5.2 on Fireworks (still V29 class — a model swap is exempt from the
+DO-rename/migration dance per gotcha #1; the default change ships in code and
+goes live via the `/admin/llm-config` override or a fresh isolate). GLM 5.2
+drives reasoning via `reasoning_effort`
+(mode `"effort"`), not the Anthropic-style `thinking` toggle Qwen used — its
+`low`/`medium`/`high` all map to the High tier; only `max`/`xhigh` reach Max
+(outside our effort enum). Don't reintroduce Groq or the old MiniMax endpoint/auth
+(`MINIMAX_API_KEY`, `reasoning_split`). The current default is GLM 5.2, served by Fireworks via
 `FIREWORKS_API_KEY`; any OpenAI-compatible Fireworks model can be selected at
 runtime via the override.
 

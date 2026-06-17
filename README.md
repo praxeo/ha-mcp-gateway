@@ -4,8 +4,8 @@ A Cloudflare Worker + Durable Object that bridges Home Assistant to LLMs. It
 holds a persistent WebSocket to HA, mirrors live state in memory, streams
 every meaningful event into a queryable D1 forensic log, and exposes the
 whole surface as an MCP server. A built-in chat agent — "Ranger," running
-Qwen 3.7 Plus on Fireworks (runtime-configurable; see [LLM configuration](#llm-configuration))
-with thinking enabled and a native
+GLM 5.2 on Fireworks (runtime-configurable; see [LLM configuration](#llm-configuration))
+with reasoning enabled and a native
 tool-calling loop — answers questions on demand and acts on user commands.
 Deterministic cover commands short-circuit the LLM via a sub-500ms fast path.
 A Cloudflare Vectorize index over nine kinds backs semantic retrieval.
@@ -127,8 +127,11 @@ reasoning showed up (V17–V26: DeepSeek V4 Flash on Fireworks,
 MiniMax and better at the chain). V27 swapped to MiniMax M3 (and the
 reasoning control moved from `reasoning_effort` to the
 `thinking: { type: "enabled" }` toggle, since Fireworks rejects sending
-both). The current setup is **Qwen 3.7 Plus on Fireworks** (V29+), with
-thinking enabled — cheaper still and strong on the multi-step tool chain.
+both). V29 swapped to Qwen 3.7 Plus (with the `thinking` toggle). The current
+setup is **GLM 5.2 on Fireworks**, with reasoning enabled — and because GLM 5.2
+drives reasoning through `reasoning_effort` (High/Max tiers) rather than the
+`thinking` toggle, the reasoning mode moved back to `"effort"` (`"high"` → the
+High tier). Strong on the multi-step tool chain.
 
 The model itself stopped being a code-level decision in V29: the
 endpoint, model, and reasoning mode are now **runtime-configurable** (DO
@@ -155,7 +158,7 @@ from three layers, highest precedence first:
 3. **baked-in defaults** — static class constants
    (`HAWebSocketV29._defaultLLMConfig()`): endpoint
    `api.fireworks.ai/.../chat/completions`, model
-   `accounts/fireworks/models/qwen3p7-plus`, reasoning mode `thinking`.
+   `accounts/fireworks/models/glm-5p2`, reasoning mode `effort` (`high`).
 
 Both call sites (`callLLM`, `callLLMWithTools`) go through
 `_getLLMConfig()`, so they can't drift. Reasoning is applied by
@@ -216,7 +219,7 @@ Durable Object: HAWebSocketV29 (ha-websocket.js)
    │               service_calls   (bugs live in DO storage — see below)
    ├──► Cloudflare Vectorize "ha-knowledge"  (env.KNOWLEDGE)
    ├──► Cloudflare Workers AI                (env.AI, bge-large-en-v1.5)
-   ├──► Qwen 3.7 Plus on Fireworks at api.fireworks.ai (OpenAI-compatible,
+   ├──► GLM 5.2 on Fireworks at api.fireworks.ai (OpenAI-compatible,
    │       runtime-configurable model/endpoint/reasoning)
    └──► ElevenLabs Scribe at api.elevenlabs.io       (speech-to-text)
 ```
@@ -229,7 +232,7 @@ Layer-by-layer:
 4. **ha-mcp-gateway (this repo)** — Worker + DO. Translates natural language into HA service calls and answers historical questions from the forensic log. Auth: Cloudflare Access JWT for browser users; long-lived HA token in worker secret.
 5. **Vectorize knowledge index (`ha-knowledge`)** — see [Knowledge index](#knowledge-index-ha-knowledge).
 6. **Cloudflare D1 (`ha_db`)** — relational store. `ai_log` keeps chat/action history; `observations` keeps tagged hypotheses; `state_changes` / `automation_runs` / `service_calls` are the [forensic log](#forensic-event-log).
-7. **Qwen 3.7 Plus (Fireworks)** — chat completions + native tool calls, run with thinking enabled (`thinking: { type: "enabled" }`). Model, endpoint, and reasoning mode are runtime-configurable (see [LLM configuration](#llm-configuration)). The DO drives the loop, not the model. 45s `AbortController` timeout per call.
+7. **GLM 5.2 (Fireworks)** — chat completions + native tool calls, run with reasoning enabled via `reasoning_effort: "high"` (GLM 5.2's High tier; it does not use the `thinking` toggle). Model, endpoint, and reasoning mode are runtime-configurable (see [LLM configuration](#llm-configuration)). The DO drives the loop, not the model. 45s `AbortController` timeout per call.
 8. **ElevenLabs Scribe** — `scribe_v1` speech-to-text. Worker proxies the chat UI's audio blobs through `/transcribe`.
 9. **Frontends** — Claude Desktop and Claude Code (MCP), `/chat` HTML UI served by the Worker (SSE-streaming, hero mic button, collapsible reasoning panel). Twilio (WhatsApp) is currently dormant.
 
@@ -475,8 +478,8 @@ in `agent-tools.js`, 19 tools). The DO drives the loop: send messages,
 read `tool_calls`, dispatch via `executeNativeTool`, push tool results
 back, repeat until the model emits no `tool_calls`. `callLLMWithTools`
 posts to Fireworks (`temperature: 0`) using the runtime-resolved model
-and reasoning mode — by default `accounts/fireworks/models/qwen3p7-plus`
-with `thinking: { type: "enabled" }` (see
+and reasoning mode — by default `accounts/fireworks/models/glm-5p2`
+with `reasoning_effort: "high"` (see
 [LLM configuration](#llm-configuration)) — with a 45s `AbortController`
 timeout.
 
@@ -1051,7 +1054,7 @@ don't delete entries, the history is the audit trail.
 
 The model swap that the [Story](#story-the-monitor-that-didnt-earn-its-keep)
 anticipated has happened — the chat-only architecture freed the token
-budget, and the agent now runs Qwen 3.7 Plus on Fireworks with thinking
+budget, and the agent now runs GLM 5.2 on Fireworks with reasoning
 enabled (and, since V29, the model is swappable at runtime — see
 [LLM configuration](#llm-configuration)). The highest-leverage open items
 from here:

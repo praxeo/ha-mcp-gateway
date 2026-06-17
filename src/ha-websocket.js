@@ -196,17 +196,20 @@ export class HAWebSocketV29 {
   // model / endpoint / reasoning mode can be swapped at runtime via the
   // /llm_config route WITHOUT the DO-rename migration dance (see CLAUDE.md
   // gotcha #1). callLLM and callLLMWithTools both go through _getLLMConfig, so
-  // the two call sites can't drift. Default model is Qwen 3.7 Plus on Fireworks.
+  // the two call sites can't drift. Default model is GLM 5.2 on Fireworks.
   static LLM_ENDPOINT = "https://api.fireworks.ai/inference/v1/chat/completions";
-  static LLM_MODEL = "accounts/fireworks/models/qwen3p7-plus";
+  static LLM_MODEL = "accounts/fireworks/models/glm-5p2";
   // Reasoning control. Fireworks rejects sending `thinking` and
   // `reasoning_effort` together, so exactly one is applied per request based on
   // LLM_REASONING_MODE: "thinking" → thinking:{type:"enabled"}; "effort" →
-  // reasoning_effort:<LLM_REASONING_EFFORT>; "none" → neither. Qwen 3.7 Plus has
-  // reasoning on by default and accepts the Anthropic-compatible thinking toggle;
-  // reasoning still returns in reasoning_content either way, so the extraction /
-  // SSE stream / prior-turn re-feed are unchanged.
-  static LLM_REASONING_MODE = "thinking";
+  // reasoning_effort:<LLM_REASONING_EFFORT>; "none" → neither. GLM 5.2 drives
+  // reasoning via reasoning_effort (two tiers: High and Max) — it does NOT use
+  // the Anthropic-style thinking toggle — so the mode is "effort". GLM collapses
+  // low/medium/high to its High tier; only "max"/"xhigh" reach Max (not in our
+  // effort enum), so "high" pins the High tier. Reasoning still returns in
+  // reasoning_content, so the extraction / SSE stream / prior-turn re-feed are
+  // unchanged.
+  static LLM_REASONING_MODE = "effort";
   static LLM_REASONING_EFFORT = "high";
 
   // Baked-in default config object — the lowest-precedence layer for
