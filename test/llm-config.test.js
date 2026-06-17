@@ -22,8 +22,8 @@ const LLM_REASONING_EFFORTS = new Set(["low", "medium", "high", "none"]);
 // Baked-in defaults — mirror HAWebSocketV29._defaultLLMConfig().
 const DEFAULTS = {
   endpoint: "https://api.fireworks.ai/inference/v1/chat/completions",
-  model: "accounts/fireworks/models/qwen3p7-plus",
-  reasoning_mode: "thinking",
+  model: "accounts/fireworks/models/glm-5p2",
+  reasoning_mode: "effort",
   reasoning_effort: "high"
 };
 
@@ -113,11 +113,11 @@ function sanitizeLLMConfigPatch(patch) {
 // ---- tests ----
 
 describe("resolveLLMConfig — layering", () => {
-  it("returns baked-in defaults (Qwen 3.7 Plus) with no override or env", () => {
+  it("returns baked-in defaults (GLM 5.2) with no override or env", () => {
     const cfg = resolveLLMConfig(null, {}, DEFAULTS);
-    expect(cfg.model).toBe("accounts/fireworks/models/qwen3p7-plus");
+    expect(cfg.model).toBe("accounts/fireworks/models/glm-5p2");
     expect(cfg.endpoint).toBe(DEFAULTS.endpoint);
-    expect(cfg.reasoning_mode).toBe("thinking");
+    expect(cfg.reasoning_mode).toBe("effort");
     expect(cfg.reasoning_effort).toBe("high");
     expect(cfg.source).toEqual({
       endpoint: "default", model: "default", reasoning_mode: "default", reasoning_effort: "default"
@@ -155,7 +155,7 @@ describe("resolveLLMConfig — layering", () => {
     const cfg = resolveLLMConfig(stored, env, DEFAULTS);
     expect(cfg.model).toBe("accounts/fireworks/models/qwen3p6-plus"); // override
     expect(cfg.endpoint).toBe("https://example.test/v1/chat/completions"); // env
-    expect(cfg.reasoning_mode).toBe("thinking"); // default
+    expect(cfg.reasoning_mode).toBe("effort"); // default
     expect(cfg.source).toEqual({
       endpoint: "env", model: "override", reasoning_mode: "default", reasoning_effort: "default"
     });
@@ -164,14 +164,14 @@ describe("resolveLLMConfig — layering", () => {
   it("a bad enum that slipped into storage falls back to the default for that field", () => {
     const stored = { reasoning_mode: "bogus", reasoning_effort: "ludicrous" };
     const cfg = resolveLLMConfig(stored, {}, DEFAULTS);
-    expect(cfg.reasoning_mode).toBe("thinking");
+    expect(cfg.reasoning_mode).toBe("effort");
     expect(cfg.reasoning_effort).toBe("high");
   });
 
   it("ignores bad env enum values (treated as absent)", () => {
     const env = { LLM_REASONING_MODE: "turbo" };
     const cfg = resolveLLMConfig(null, env, DEFAULTS);
-    expect(cfg.reasoning_mode).toBe("thinking");
+    expect(cfg.reasoning_mode).toBe("effort");
     expect(cfg.source.reasoning_mode).toBe("default");
   });
 });
