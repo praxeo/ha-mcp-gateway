@@ -7,7 +7,7 @@ log, and exposes the whole surface as an MCP server for clients like Claude
 Desktop and Claude Code.
 
 There is also a built-in chat agent — "Ranger" — reachable at a `/chat` web UI
-and through the `ai_chat` MCP tool. It runs GLM 5.2 on Fireworks with reasoning
+and through the `ai_chat` MCP tool. It runs GLM 5.2 Fast on Fireworks with reasoning
 enabled and a native tool-calling loop. The model is configurable at runtime
 (see [LLM configuration](#llm-configuration)). Imperative garage/bay-door
 commands skip the LLM entirely through a sub-500ms fast path.
@@ -112,10 +112,12 @@ control moved from `reasoning_effort` to the `thinking: { type: "enabled" }`
 toggle (Fireworks rejects sending both). V29 switched to Qwen 3.7 Plus, still on
 the `thinking` toggle.
 
-The current default is **GLM 5.2 on Fireworks** with reasoning enabled. GLM 5.2
-drives reasoning through `reasoning_effort` rather than the `thinking` toggle, so
-the reasoning mode moved back to `"effort"` (`"high"` maps to its High tier).
-It's strong on the multi-step tool chain.
+The current default is **GLM 5.2 Fast on Fireworks** with reasoning enabled — the
+`accounts/fireworks/routers/glm-5p2-fast` high-speed serving path (same GLM 5.2
+model and quality, higher per-token price). It drives reasoning through
+`reasoning_effort` rather than the `thinking` toggle, so the reasoning mode moved
+back to `"effort"` (`"high"` maps to its High tier). It's strong on the
+multi-step tool chain.
 
 Since V29 the model is no longer a code-level decision: endpoint, model, and
 reasoning mode resolve at runtime (DO storage override → env vars → baked-in
@@ -141,7 +143,7 @@ highest precedence first:
 3. **Baked-in defaults** — static class constants
    (`HAWebSocketV29._defaultLLMConfig()`): endpoint
    `api.fireworks.ai/.../chat/completions`, model
-   `accounts/fireworks/models/glm-5p2`, reasoning mode `effort` at `high`.
+   `accounts/fireworks/routers/glm-5p2-fast`, reasoning mode `effort` at `high`.
 
 Both call sites (`callLLM`, `callLLMWithTools`) go through `_getLLMConfig()`, so
 they can't drift apart. `applyReasoningToBody` applies the reasoning setting:
@@ -176,6 +178,7 @@ Cloudflare Worker (worker.js)         ◀── /mcp, /chat, /transcribe, /refre
    │                                       /health, /twilio[dormant],
    │                                       /admin/bugs, /admin/bugs/clear,
    │                                       /admin/recent_activity,
+   │                                       /admin/token-usage,
    │                                       /admin/rebuild-knowledge,
    │                                       /admin/index-stats,
    │                                       /admin/cleanup-stale-vectors,
@@ -199,7 +202,7 @@ Durable Object: HAWebSocketV29 (ha-websocket.js)
    │               service_calls   (bugs live in DO storage — see below)
    ├──► Cloudflare Vectorize "ha-knowledge"  (env.KNOWLEDGE)
    ├──► Cloudflare Workers AI                (env.AI, bge-large-en-v1.5)
-   ├──► GLM 5.2 on Fireworks at api.fireworks.ai (OpenAI-compatible,
+   ├──► GLM 5.2 Fast on Fireworks at api.fireworks.ai (OpenAI-compatible,
    │       runtime-configurable model/endpoint/reasoning)
    └──► ElevenLabs Scribe at api.elevenlabs.io       (speech-to-text)
 ```
@@ -222,7 +225,7 @@ The layers, bottom to top:
    chat/action history, `observations` keeps tagged hypotheses, and
    `state_changes` / `automation_runs` / `service_calls` are the
    [forensic log](#forensic-event-log).
-7. **GLM 5.2 (Fireworks)** — chat completions plus native tool calls, run with
+7. **GLM 5.2 Fast (Fireworks)** — chat completions plus native tool calls, run with
    reasoning enabled via `reasoning_effort: "high"` (GLM 5.2's High tier; it
    does not use the `thinking` toggle). Model, endpoint, and reasoning mode are
    runtime-configurable (see [LLM configuration](#llm-configuration)). The DO
@@ -344,6 +347,26 @@ dump of the last N hours UNION'd across all three tables:
 
 `?format=json` returns structured rows. Useful for verifying data flow without
 invoking the chat agent.
+
+`GET /admin/token-usage?days=N` (default 30, clamp 1–30) rolls up the chat
+agent's Fireworks token usage per day from the `ai_log` `chat_timing_ms` rows —
+the native tool loop records each response's `usage` (prompt / completion /
+cached) totals there. Default output is a plain-text table; `?format=json`
+returns structured rows (`per_day`, `totals`, `averages`), `?format=markdown` a
+Markdown table:
+
+```
+Day         Prompt  Completion  Cached   Total  Turns
+----------  ------  ----------  ------  ------  -----
+2026-07-04  48,120      12,880  31,020  61,000     42
+TOTAL (1d)  48,120      12,880  31,020  61,000     42
+AVG/day     48,120      12,880  31,020  61,000     42
+```
+
+Day buckets are UTC; `total_tokens` = prompt + completion (cached is the cache-hit
+subset of prompt); fast-path / error turns count as turns with 0 tokens; history
+is capped at `ai_log`'s 30-day retention. Tokens only — multiply by the current
+Fireworks per-model rate for a dollar figure.
 
 ---
 
@@ -474,7 +497,7 @@ The chat model is given OpenAI-format tool schemas (`NATIVE_AGENT_TOOLS` in
 `tool_calls`, dispatch via `executeNativeTool`, push tool results back, repeat
 until the model emits no `tool_calls`. `callLLMWithTools` posts to Fireworks
 (`temperature: 0`) using the runtime-resolved model and reasoning mode — by
-default `accounts/fireworks/models/glm-5p2` with `reasoning_effort: "high"` (see
+default `accounts/fireworks/routers/glm-5p2-fast` with `reasoning_effort: "high"` (see
 [LLM configuration](#llm-configuration)) — with a 45s `AbortController` timeout.
 
 Caps:
@@ -943,11 +966,12 @@ Newest first.
   by the 60s `alarm()` tick (`_fireDueScheduledActions`), with a delete-before-
   fire rule and a WS-up guard. See [Scheduler](#scheduler). This was item #1 on
   the old roadmap.
-- **V29 — runtime-configurable LLM config; default GLM 5.2.** The endpoint,
+- **V29 — runtime-configurable LLM config; default GLM 5.2 Fast.** The endpoint,
   model, and reasoning mode now resolve at call time from a DO storage override →
   env vars → baked-in defaults, swappable live via `/admin/llm-config` with no
-  class rename. The default moved from Qwen 3.7 Plus to GLM 5.2, with the
-  reasoning mode back on `reasoning_effort` (`"high"`). See
+  class rename. The default moved from Qwen 3.7 Plus to GLM 5.2, then to GLM 5.2
+  Fast (the `accounts/fireworks/routers/glm-5p2-fast` high-speed serving path),
+  with the reasoning mode back on `reasoning_effort` (`"high"`). See
   [LLM configuration](#llm-configuration).
 - **V28 — flat tool-call argument coalescer.** A guard that repairs tool calls
   where the model emitted arguments flat (e.g. `entity_id` at the top level)

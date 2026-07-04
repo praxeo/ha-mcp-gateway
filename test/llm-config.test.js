@@ -22,7 +22,7 @@ const LLM_REASONING_EFFORTS = new Set(["low", "medium", "high", "none"]);
 // Baked-in defaults — mirror HAWebSocketV29._defaultLLMConfig().
 const DEFAULTS = {
   endpoint: "https://api.fireworks.ai/inference/v1/chat/completions",
-  model: "accounts/fireworks/models/glm-5p2",
+  model: "accounts/fireworks/routers/glm-5p2-fast",
   reasoning_mode: "effort",
   reasoning_effort: "high"
 };
@@ -113,9 +113,9 @@ function sanitizeLLMConfigPatch(patch) {
 // ---- tests ----
 
 describe("resolveLLMConfig — layering", () => {
-  it("returns baked-in defaults (GLM 5.2) with no override or env", () => {
+  it("returns baked-in defaults (GLM 5.2 Fast) with no override or env", () => {
     const cfg = resolveLLMConfig(null, {}, DEFAULTS);
-    expect(cfg.model).toBe("accounts/fireworks/models/glm-5p2");
+    expect(cfg.model).toBe("accounts/fireworks/routers/glm-5p2-fast");
     expect(cfg.endpoint).toBe(DEFAULTS.endpoint);
     expect(cfg.reasoning_mode).toBe("effort");
     expect(cfg.reasoning_effort).toBe("high");

@@ -17,7 +17,7 @@ Assistant smart home to LLMs. It:
 - streams every meaningful HA event into a queryable D1 **forensic log**,
 - exposes the whole surface as an **MCP server** (`POST /mcp`) for clients like
   Claude Desktop and Claude Code,
-- runs a built-in **chat agent** — "Ranger," GLM 5.2 on Fireworks
+- runs a built-in **chat agent** — "Ranger," GLM 5.2 Fast on Fireworks
   (runtime-configurable; see LLM configuration) with reasoning enabled and a
   native tool-calling loop — reachable at a web
   `/chat` UI and via the `ai_chat` MCP tool,
@@ -139,7 +139,7 @@ Durable Object  HAWebSocketV29  (src/ha-websocket.js)
    │                           automation_runs, service_calls
    ├─► Vectorize "ha-knowledge" — nine-kind semantic index
    ├─► Workers AI            — @cf/baai/bge-large-en-v1.5 embeddings (cls)
-   ├─► Fireworks             — GLM 5.2 chat completions (runtime-configurable)
+   ├─► Fireworks             — GLM 5.2 Fast chat completions (runtime-configurable)
    └─► ElevenLabs Scribe     — speech-to-text
 ```
 
@@ -296,7 +296,7 @@ precedence first:
 
 ```js
 static LLM_ENDPOINT = "https://api.fireworks.ai/inference/v1/chat/completions";
-static LLM_MODEL = "accounts/fireworks/models/glm-5p2"; // GLM 5.2
+static LLM_MODEL = "accounts/fireworks/routers/glm-5p2-fast"; // GLM 5.2 Fast
 static LLM_REASONING_MODE = "effort";     // "thinking" | "effort" | "none"
 static LLM_REASONING_EFFORT = "high";     // used only when mode === "effort"
 ```
@@ -329,14 +329,16 @@ The API key is `env.FIREWORKS_API_KEY`. Provider history (kept here because it
 explains the migration tags): originally MiniMax → gpt-oss-120b on Groq (V13–15)
 → MiniMax again (V16) → DeepSeek V4 Flash on Fireworks (V17–V26) → MiniMax M3 on
 Fireworks (V27–V28) → Qwen 3.7 Plus on Fireworks (V29, runtime-configurable) →
-GLM 5.2 on Fireworks (still V29 class — a model swap is exempt from the
-DO-rename/migration dance per gotcha #1; the default change ships in code and
-goes live via the `/admin/llm-config` override or a fresh isolate). GLM 5.2
-drives reasoning via `reasoning_effort`
+GLM 5.2 on Fireworks → GLM 5.2 Fast on Fireworks (still V29 class — a model swap
+is exempt from the DO-rename/migration dance per gotcha #1; the default change
+ships in code and goes live via the `/admin/llm-config` override or a fresh
+isolate). GLM 5.2 Fast is the `accounts/fireworks/routers/glm-5p2-fast`
+high-speed serving path — the same GLM 5.2 model and quality at a higher
+per-token price. It drives reasoning via `reasoning_effort`
 (mode `"effort"`), not the Anthropic-style `thinking` toggle Qwen used — its
 `low`/`medium`/`high` all map to the High tier; only `max`/`xhigh` reach Max
 (outside our effort enum). Don't reintroduce Groq or the old MiniMax endpoint/auth
-(`MINIMAX_API_KEY`, `reasoning_split`). The current default is GLM 5.2, served by Fireworks via
+(`MINIMAX_API_KEY`, `reasoning_split`). The current default is GLM 5.2 Fast, served by Fireworks via
 `FIREWORKS_API_KEY`; any OpenAI-compatible Fireworks model can be selected at
 runtime via the override.
 
@@ -363,7 +365,9 @@ fallback), `CLIMATE_PREAMBLE_ENABLED` (optional), `DUMP_SYSTEM_PROMPT`
 `/health`, `/transcribe` (ElevenLabs STT proxy), `/refresh`, `/chat` (GET = UI,
 POST = SSE chat), `/twilio` (dormant), `/mcp` (and `/` — MCP JSON-RPC), plus
 admin endpoints: `/admin/bugs`, `/admin/bugs/clear`, `/admin/recent_activity`,
-`/admin/version`, `/admin/llm-config` (GET/POST — runtime LLM config),
+`/admin/token-usage` (GET — per-day chat token totals from `ai_log`; `?days=N`
+1–30, `?format=json|markdown`), `/admin/version`,
+`/admin/llm-config` (GET/POST — runtime LLM config),
 `/admin/index-stats`, `/admin/reindex-observations`,
 `/admin/cleanup-stale-vectors`, `/admin/rebuild-knowledge`.
 

@@ -196,9 +196,12 @@ export class HAWebSocketV29 {
   // model / endpoint / reasoning mode can be swapped at runtime via the
   // /llm_config route WITHOUT the DO-rename migration dance (see CLAUDE.md
   // gotcha #1). callLLM and callLLMWithTools both go through _getLLMConfig, so
-  // the two call sites can't drift. Default model is GLM 5.2 on Fireworks.
+  // the two call sites can't drift. Default model is GLM 5.2 Fast on Fireworks
+  // — the `routers/` high-speed serving path (100+ tok/s). Same model and
+  // quality as plain glm-5p2, at a higher per-token price; reasoning behavior
+  // below is identical.
   static LLM_ENDPOINT = "https://api.fireworks.ai/inference/v1/chat/completions";
-  static LLM_MODEL = "accounts/fireworks/models/glm-5p2";
+  static LLM_MODEL = "accounts/fireworks/routers/glm-5p2-fast";
   // Reasoning control. Fireworks rejects sending `thinking` and
   // `reasoning_effort` together, so exactly one is applied per request based on
   // LLM_REASONING_MODE: "thinking" → thinking:{type:"enabled"}; "effort" →

@@ -2671,6 +2671,168 @@ var worker_default = {
         });
       }
     }
+    // Per-day token usage for the chat agent, aggregated from ai_log
+    // `chat_timing_ms` rows. The native tool loop records the prompt / completion
+    // / cached token totals from each Fireworks `usage` object into the row's
+    // `data` JSON (total_prompt_tokens / total_completion_tokens /
+    // total_cached_tokens); this rolls them up by day. `?days=N` (default 30,
+    // clamp 1–30 — ai_log has 30-day retention) sets the window; `?format=json`
+    // returns structured rows, `?format=markdown` a Markdown table, default is a
+    // plain-text table. No LLM involved — straight D1 read. Day buckets are UTC
+    // (ai_log timestamps are ISO-UTC). Fast-path / error turns log a
+    // `chat_timing_ms` row with no token fields — counted as a turn, 0 tokens.
+    if (url.pathname === "/admin/token-usage") {
+      if (request.method !== "GET") {
+        return new Response("Method not allowed", { status: 405 });
+      }
+      if (!env.DB) {
+        return new Response(JSON.stringify({ error: "DB not bound" }), {
+          status: 500,
+          headers: { ...corsHeaders, "Content-Type": "application/json" }
+        });
+      }
+      const daysParam = parseInt(url.searchParams.get("days") || "30", 10);
+      const days = isNaN(daysParam) ? 30 : Math.max(1, Math.min(30, daysParam));
+      try {
+        // substr(timestamp,1,10) is the YYYY-MM-DD (UTC) day key — a string slice
+        // that sidesteps SQLite parsing the ISO `Z`/fractional-seconds suffix and
+        // the T-vs-space pitfall of string-comparing full ISO timestamps.
+        const result = await env.DB.prepare(`
+          SELECT substr(timestamp,1,10) AS day,
+                 SUM(COALESCE(json_extract(data,'$.total_prompt_tokens'),0))     AS prompt_tokens,
+                 SUM(COALESCE(json_extract(data,'$.total_completion_tokens'),0)) AS completion_tokens,
+                 SUM(COALESCE(json_extract(data,'$.total_cached_tokens'),0))     AS cached_tokens,
+                 SUM(CASE WHEN json_extract(data,'$.total_prompt_tokens') IS NOT NULL THEN 1 ELSE 0 END) AS llm_turns,
+                 COUNT(*) AS turns
+            FROM ai_log
+           WHERE type = 'chat_timing_ms'
+             AND substr(timestamp,1,10) >= date('now', ?1)
+           GROUP BY day
+           ORDER BY day DESC
+        `).bind(`-${days - 1} days`).all();
+
+        const rows = (result?.results || []).map((r) => {
+          const prompt = Number(r.prompt_tokens) || 0;
+          const completion = Number(r.completion_tokens) || 0;
+          const cached = Number(r.cached_tokens) || 0;
+          return {
+            day: r.day,
+            prompt_tokens: prompt,
+            completion_tokens: completion,
+            cached_tokens: cached,             // subset of prompt_tokens (cache hits)
+            total_tokens: prompt + completion, // billed volume (cached is part of prompt)
+            llm_turns: Number(r.llm_turns) || 0,
+            turns: Number(r.turns) || 0
+          };
+        });
+
+        const totals = rows.reduce((a, r) => ({
+          prompt_tokens: a.prompt_tokens + r.prompt_tokens,
+          completion_tokens: a.completion_tokens + r.completion_tokens,
+          cached_tokens: a.cached_tokens + r.cached_tokens,
+          total_tokens: a.total_tokens + r.total_tokens,
+          llm_turns: a.llm_turns + r.llm_turns,
+          turns: a.turns + r.turns
+        }), { prompt_tokens: 0, completion_tokens: 0, cached_tokens: 0, total_tokens: 0, llm_turns: 0, turns: 0 });
+
+        const dayCount = rows.length || 1; // divisor: days that actually have rows
+        const averages = {
+          prompt_tokens: Math.round(totals.prompt_tokens / dayCount),
+          completion_tokens: Math.round(totals.completion_tokens / dayCount),
+          cached_tokens: Math.round(totals.cached_tokens / dayCount),
+          total_tokens: Math.round(totals.total_tokens / dayCount),
+          turns: Math.round(totals.turns / dayCount)
+        };
+
+        const notes = [
+          "Tokens summed from ai_log chat_timing_ms rows (native tool-loop chat path).",
+          "total_tokens = prompt + completion; cached_tokens is the cache-hit subset of prompt.",
+          "Fast-path / error turns carry no token fields (counted in `turns`, 0 tokens, 0 `llm_turns`).",
+          "Day buckets are UTC. ai_log has 30-day retention, so history is capped at ~30 days.",
+          "Averages divide by days-with-data, not calendar days in the window."
+        ];
+
+        const format = url.searchParams.get("format");
+        if (format === "json") {
+          return new Response(JSON.stringify({
+            window_days: days,
+            day_count: rows.length,
+            totals,
+            averages,
+            notes,
+            per_day: rows
+          }, null, 2), {
+            headers: { ...corsHeaders, "Content-Type": "application/json" }
+          });
+        }
+
+        // Text/Markdown table. Manual thousands separator — the Workers runtime
+        // has no guaranteed ICU for toLocaleString grouping.
+        const fmtInt = (n) => String(Math.round(Number(n) || 0)).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+        const header = ["Day", "Prompt", "Completion", "Cached", "Total", "Turns"];
+        const bodyRows = rows.map((r) => [
+          r.day, fmtInt(r.prompt_tokens), fmtInt(r.completion_tokens),
+          fmtInt(r.cached_tokens), fmtInt(r.total_tokens), String(r.turns)
+        ]);
+        const totalRow = [
+          `TOTAL (${rows.length}d)`, fmtInt(totals.prompt_tokens), fmtInt(totals.completion_tokens),
+          fmtInt(totals.cached_tokens), fmtInt(totals.total_tokens), String(totals.turns)
+        ];
+        const avgRow = [
+          "AVG/day", fmtInt(averages.prompt_tokens), fmtInt(averages.completion_tokens),
+          fmtInt(averages.cached_tokens), fmtInt(averages.total_tokens), String(averages.turns)
+        ];
+
+        if (format === "markdown") {
+          const line = (cells) => `| ${cells.join(" | ")} |`;
+          const md = [
+            `### Chat agent token usage — last ${days} day(s) (${rows.length} with data)`,
+            "",
+            line(header),
+            `| ${header.map(() => "---").join(" | ")} |`,
+            ...bodyRows.map(line),
+            line(totalRow),
+            line(avgRow),
+            "",
+            ...notes.map((n) => `- ${n}`)
+          ].join("\n") + "\n";
+          return new Response(md, {
+            headers: { ...corsHeaders, "Content-Type": "text/markdown; charset=utf-8" }
+          });
+        }
+
+        // Default: fixed-width plain-text table (numbers right-aligned, day left).
+        const allRows = [header, ...bodyRows, totalRow, avgRow];
+        const widths = header.map((_, i) => Math.max(...allRows.map((row) => String(row[i]).length)));
+        const pad = (s, i) => {
+          s = String(s);
+          const gap = " ".repeat(Math.max(0, widths[i] - s.length));
+          return i === 0 ? s + gap : gap + s; // day left-aligned, counts right-aligned
+        };
+        const renderRow = (row) => row.map((c, i) => pad(c, i)).join("  ");
+        const bar = widths.map((w) => "-".repeat(w)).join("--");
+        const lines = [
+          `Chat agent token usage — last ${days} day(s) (${rows.length} with data)`,
+          "",
+          renderRow(header),
+          bar,
+          ...bodyRows.map(renderRow),
+          bar,
+          renderRow(totalRow),
+          renderRow(avgRow),
+          "",
+          ...notes.map((n) => `note: ${n}`)
+        ];
+        return new Response(lines.join("\n") + "\n", {
+          headers: { ...corsHeaders, "Content-Type": "text/plain; charset=utf-8" }
+        });
+      } catch (err) {
+        return new Response(JSON.stringify({ error: err.message }), {
+          status: 500,
+          headers: { ...corsHeaders, "Content-Type": "application/json" }
+        });
+      }
+    }
     if (url.pathname === "/admin/version") {
       if (request.method !== "GET") {
         return new Response("Method not allowed", { status: 405 });
