@@ -358,6 +358,88 @@ export const CHAT_HTML = `<!DOCTYPE html>
   #sendBtn:disabled { opacity: 0.4; cursor: not-allowed; box-shadow: none; }
   #sendBtn:active { transform: scale(0.94); }
 
+  /* ── Persistent cover controls ──
+     Pinned in the input area so the garage/basement buttons stay reachable
+     after the chat starts — the Tesla browser keeps this page alive in the
+     background, and the welcome-screen buttons vanish once history exists. */
+  .cover-bar {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 9px;
+  }
+
+  .cover-group {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    background: rgba(0, 0, 0, 0.3);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 6px 7px 6px 12px;
+    min-width: 0;
+  }
+
+  .cover-info {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+  }
+
+  .cover-name {
+    font-size: 12.5px;
+    font-weight: 600;
+    color: var(--text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .cover-state {
+    font-size: 10px;
+    font-family: 'JetBrains Mono', monospace;
+    letter-spacing: 0.03em;
+    color: var(--text-faint);
+    white-space: nowrap;
+  }
+
+  .cover-state.is-open { color: var(--warning); }
+  .cover-state.is-closed { color: var(--success); }
+  .cover-state.is-moving { color: var(--accent); animation: coverBlink 1.1s ease-in-out infinite; }
+
+  @keyframes coverBlink {
+    0%, 100% { opacity: 1; }
+    50%      { opacity: 0.45; }
+  }
+
+  .cover-btn {
+    border: 1px solid rgba(91, 140, 255, 0.4);
+    background: linear-gradient(135deg, rgba(91, 140, 255, 0.16), rgba(139, 92, 255, 0.1));
+    color: #dfe7ff;
+    border-radius: 10px;
+    min-height: 46px;
+    padding: 0 14px;
+    font-size: 13.5px;
+    font-weight: 600;
+    font-family: inherit;
+    cursor: pointer;
+    flex-shrink: 0;
+    transition: transform 0.12s, border-color 0.18s, background 0.18s;
+    touch-action: manipulation;
+  }
+
+  .cover-btn:hover {
+    border-color: var(--accent);
+    background: linear-gradient(135deg, rgba(91, 140, 255, 0.24), rgba(139, 92, 255, 0.16));
+  }
+
+  .cover-btn:active { transform: scale(0.95); }
+
+  @media (max-width: 540px) {
+    .cover-bar { grid-template-columns: 1fr; gap: 7px; }
+  }
+
   /* ── Mic button (hero) ── */
   .mic-row {
     display: grid;
@@ -527,20 +609,9 @@ export const CHAT_HTML = `<!DOCTYPE html>
     grid-column: 1 / -1;
   }
 
-  .quick-btn.garage {
-    border-color: rgba(91, 140, 255, 0.4);
-    background: linear-gradient(135deg, rgba(91, 140, 255, 0.16), rgba(139, 92, 255, 0.1));
-    color: #dfe7ff;
-  }
-
   .quick-btn:hover {
     border-color: var(--border-strong);
     background: var(--surface);
-  }
-
-  .quick-btn.garage:hover {
-    border-color: var(--accent);
-    background: linear-gradient(135deg, rgba(91, 140, 255, 0.24), rgba(139, 92, 255, 0.16));
   }
 
   .quick-btn:active { transform: scale(0.97); }
@@ -600,10 +671,6 @@ export const CHAT_HTML = `<!DOCTYPE html>
       <h2>HA Agent</h2>
       <div class="quick-actions">
         <button class="quick-btn" onclick="sendQuick('What is the status of the house?')">House status</button>
-        <button class="quick-btn garage" onclick="sendQuick('Open the main garage door')">Open main garage</button>
-        <button class="quick-btn garage" onclick="sendQuick('Close the main garage door')">Close main garage</button>
-        <button class="quick-btn garage" onclick="sendQuick('Open the basement bay door')">Open basement</button>
-        <button class="quick-btn garage" onclick="sendQuick('Close the basement bay door')">Close basement</button>
         <button class="quick-btn" onclick="sendQuick(&quot;What's the climate? Inside temp, AC status, outside temp, today's high and low&quot;)">Climate</button>
         <button class="quick-btn" onclick="sendQuick('Precondition the Tesla')">Precondition Tesla</button>
       </div>
@@ -630,6 +697,24 @@ export const CHAT_HTML = `<!DOCTYPE html>
   </div>
 
   <div class="input-area">
+    <div class="cover-bar" id="coverBar">
+      <div class="cover-group" data-entity="cover.ratgdo32_2b8ecc_door">
+        <div class="cover-info">
+          <span class="cover-name">Main garage</span>
+          <span class="cover-state">—</span>
+        </div>
+        <button class="cover-btn" type="button" onclick="sendQuick('Open the main garage door')">▲ Open</button>
+        <button class="cover-btn" type="button" onclick="sendQuick('Close the main garage door')">▼ Close</button>
+      </div>
+      <div class="cover-group" data-entity="cover.ratgdo32_b1e618_door">
+        <div class="cover-info">
+          <span class="cover-name">Basement bay</span>
+          <span class="cover-state">—</span>
+        </div>
+        <button class="cover-btn" type="button" onclick="sendQuick('Open the basement bay door')">▲ Open</button>
+        <button class="cover-btn" type="button" onclick="sendQuick('Close the basement bay door')">▼ Close</button>
+      </div>
+    </div>
     <div class="input-row">
       <textarea id="input" placeholder="Message your home..." rows="1"></textarea>
       <button id="sendBtn" type="button" aria-label="Send" onclick="send()">
@@ -725,9 +810,20 @@ export const CHAT_HTML = `<!DOCTYPE html>
   const ICON_CHECK = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>';
   const ICON_RETRY = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path></svg>';
 
+  let suppressRefocus = false;
+
   function sendQuick(text) {
+    if (sendBtn.disabled) return; // a send is already in flight
+    // Button-originated sends must not refocus the input afterwards — a
+    // programmatic focus pops the on-screen keyboard over half the Tesla screen.
+    suppressRefocus = true;
     input.value = text;
     send();
+  }
+
+  function refocusInput() {
+    if (suppressRefocus) { suppressRefocus = false; return; }
+    input.focus();
   }
 
   function makeCopyBtn(text) {
@@ -890,7 +986,7 @@ export const CHAT_HTML = `<!DOCTYPE html>
         typing.classList.remove('active');
         addMsg('error', 'Agent error: ' + resp.status);
         sendBtn.disabled = false;
-        input.focus();
+        refocusInput();
         return;
       }
 
@@ -986,7 +1082,8 @@ export const CHAT_HTML = `<!DOCTYPE html>
             clearStatus();
             window.__chatRetried = false;
             sendBtn.disabled = false;
-            input.focus();
+            refocusInput();
+            refreshCovers();
             return;
           }
         } catch (err2) {
@@ -1000,7 +1097,8 @@ export const CHAT_HTML = `<!DOCTYPE html>
     }
 
     sendBtn.disabled = false;
-    input.focus();
+    refocusInput();
+    refreshCovers();
   }
 
   function clearChat() {
@@ -1010,6 +1108,58 @@ export const CHAT_HTML = `<!DOCTYPE html>
     if (welcome) welcome.style.display = 'flex';
     lastUserMessage = null;
   }
+
+  // ── Persistent cover-bar state pills ──
+  const coverBar = document.getElementById('coverBar');
+  const COVER_STATE_TEXT = { open: 'Open', closed: 'Closed', opening: 'Opening…', closing: 'Closing…' };
+  let coverRepollTimer = null;
+  let coverRepollCount = 0;
+
+  async function refreshCovers() {
+    if (!coverBar) return;
+    let covers;
+    try {
+      const resp = await fetch('/covers', { cache: 'no-store' });
+      if (!resp.ok) return;
+      const data = await resp.json();
+      covers = data.covers || [];
+    } catch { return; }
+
+    let moving = false;
+    for (const c of covers) {
+      const group = coverBar.querySelector('[data-entity="' + c.entity_id + '"]');
+      if (!group) continue;
+      const pill = group.querySelector('.cover-state');
+      const st = String(c.state || '').toLowerCase();
+      pill.textContent = COVER_STATE_TEXT[st] || '—';
+      let cls = 'is-unknown';
+      if (st === 'open') cls = 'is-open';
+      else if (st === 'closed') cls = 'is-closed';
+      else if (st === 'opening' || st === 'closing') { cls = 'is-moving'; moving = true; }
+      pill.className = 'cover-state ' + cls;
+    }
+
+    // While a door is physically moving, repoll on a short leash (bounded so a
+    // stuck "opening" report can't poll forever) until it settles.
+    clearTimeout(coverRepollTimer);
+    if (moving && coverRepollCount < 20) {
+      coverRepollCount++;
+      coverRepollTimer = setTimeout(refreshCovers, 4000);
+    } else if (!moving) {
+      coverRepollCount = 0;
+    }
+  }
+
+  refreshCovers();
+  setInterval(() => {
+    if (document.visibilityState === 'visible') refreshCovers();
+  }, 45000);
+  // The Tesla browser keeps this page alive in the background for hours —
+  // refresh the pills the moment it returns to the foreground.
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') refreshCovers();
+  });
+  window.addEventListener('pageshow', () => refreshCovers());
 
   // ── Voice input (ElevenLabs Scribe) — 3-state machine ──
   const micBtn = document.getElementById('micBtn');

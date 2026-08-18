@@ -2474,6 +2474,26 @@ var worker_default = {
         return new Response(JSON.stringify({ status: "CRITICAL_ERROR", message: err.message }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
       }
     }
+    if (url.pathname === "/covers") {
+      // Live cover states for the chat UI's persistent garage bar. Read-only.
+      // Entity IDs mirror the fast-path targets in ha-websocket.js.
+      const COVER_BAR_ENTITIES = [
+        { entity_id: "cover.ratgdo32_2b8ecc_door", label: "Main garage" },
+        { entity_id: "cover.ratgdo32_b1e618_door", label: "Basement bay" }
+      ];
+      const covers = await Promise.all(COVER_BAR_ENTITIES.map(async (c) => {
+        try {
+          const s = await getEntityState(env, c.entity_id);
+          const state = s && !s.error && typeof s.state === "string" ? s.state : "unknown";
+          return { entity_id: c.entity_id, label: c.label, state };
+        } catch {
+          return { entity_id: c.entity_id, label: c.label, state: "unknown" };
+        }
+      }));
+      return new Response(JSON.stringify({ covers }), {
+        headers: { ...corsHeaders, "Content-Type": "application/json", "Cache-Control": "no-store" }
+      });
+    }
     if (url.pathname === "/chat") {
       if (request.method === "GET") {
         const msg = url.searchParams.get("m") || url.searchParams.get("message");

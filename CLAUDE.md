@@ -363,8 +363,9 @@ fallback), `CLIMATE_PREAMBLE_ENABLED` (optional), `DUMP_SYSTEM_PROMPT`
 ## HTTP routes (Worker)
 
 `/health`, `/transcribe` (ElevenLabs STT proxy), `/refresh`, `/chat` (GET = UI,
-POST = SSE chat), `/twilio` (dormant), `/mcp` (and `/` — MCP JSON-RPC), plus
-admin endpoints: `/admin/bugs`, `/admin/bugs/clear`, `/admin/recent_activity`,
+POST = SSE chat), `/covers` (GET — live garage/basement-bay cover states for
+the chat UI's persistent cover bar), `/twilio` (dormant), `/mcp` (and `/` —
+MCP JSON-RPC), plus admin endpoints: `/admin/bugs`, `/admin/bugs/clear`, `/admin/recent_activity`,
 `/admin/token-usage` (GET — per-day chat token totals from `ai_log`; `?days=N`
 1–30, `?format=json|markdown`), `/admin/version`,
 `/admin/llm-config` (GET/POST — runtime LLM config),
