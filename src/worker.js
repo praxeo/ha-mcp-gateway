@@ -2474,9 +2474,69 @@ var worker_default = {
         return new Response(JSON.stringify({ status: "CRITICAL_ERROR", message: err.message }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
       }
     }
+    if (url.pathname === "/dash") {
+      // Glanceable house tiles + cover states for the chat UI's dashboard.
+      // Read-only. Entity IDs mirror _buildHouseStateSnapshot / the fast-path
+      // targets in ha-websocket.js.
+      const DASH = {
+        covers: [
+          { entity_id: "cover.ratgdo32_2b8ecc_door", label: "Main garage" },
+          { entity_id: "cover.ratgdo32_b1e618_door", label: "Basement bay" }
+        ],
+        climate: "climate.t6_pro_z_wave_programmable_thermostat_2", // Main/Kitchen
+        locks: [
+          "lock.home_connect_620_connected_smart_lock",
+          "lock.home_connect_620_connected_smart_lock_2",
+          "lock.home_connect_620_connected_smart_lock_3",
+          "lock.home_connect_620_connected_smart_lock_4"
+        ],
+        doors: [
+          "binary_sensor.front_door_sensor",
+          "binary_sensor.garage_door_exterior_entry_sensor",
+          "binary_sensor.garage_interior_door_sensor",
+          "binary_sensor.basement_stairs_door_sensor"
+        ],
+        presence: ["person.john", "person.sabrina"],
+        power: "sensor.frient_a_s_emizb_141_instantaneous_demand"
+      };
+      const ids = [
+        ...DASH.covers.map((c) => c.entity_id),
+        DASH.climate, ...DASH.locks, ...DASH.doors, ...DASH.presence, DASH.power
+      ];
+      const states = {};
+      await Promise.all(ids.map(async (id) => {
+        try {
+          const s = await getEntityState(env, id);
+          if (s && !s.error) states[id] = s;
+        } catch {}
+      }));
+      const st = (id) => (states[id] ? String(states[id].state) : null);
+      const num = (v) => (v === null || v === undefined || isNaN(Number(v)) ? null : Math.round(Number(v)));
+      const covers = DASH.covers.map((c) => ({
+        entity_id: c.entity_id, label: c.label, state: st(c.entity_id) || "unknown"
+      }));
+      const cs = states[DASH.climate];
+      const tiles = {
+        climate: cs ? {
+          temp: num(cs.attributes?.current_temperature),
+          target: num(cs.attributes?.temperature ?? cs.attributes?.target_temp_high),
+          action: cs.attributes?.hvac_action || cs.state || null
+        } : null,
+        locks: { total: DASH.locks.length, locked: DASH.locks.filter((id) => st(id) === "locked").length },
+        doors: { total: DASH.doors.length, open: DASH.doors.filter((id) => st(id) === "on").length },
+        presence: { total: DASH.presence.length, home: DASH.presence.filter((id) => st(id) === "home").length },
+        power: states[DASH.power] ? {
+          value: Number(states[DASH.power].state) || 0,
+          unit: states[DASH.power].attributes?.unit_of_measurement || ""
+        } : null
+      };
+      return new Response(JSON.stringify({ covers, tiles }), {
+        headers: { ...corsHeaders, "Content-Type": "application/json", "Cache-Control": "no-store" }
+      });
+    }
     if (url.pathname === "/covers") {
-      // Live cover states for the chat UI's persistent garage bar. Read-only.
-      // Entity IDs mirror the fast-path targets in ha-websocket.js.
+      // Legacy: superseded by /dash (which includes the same covers array).
+      // Kept because the Tesla browser can hold the old cached page for days.
       const COVER_BAR_ENTITIES = [
         { entity_id: "cover.ratgdo32_2b8ecc_door", label: "Main garage" },
         { entity_id: "cover.ratgdo32_b1e618_door", label: "Basement bay" }
