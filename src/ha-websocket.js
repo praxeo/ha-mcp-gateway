@@ -196,22 +196,20 @@ export class HAWebSocketV29 {
   // model / endpoint / reasoning mode can be swapped at runtime via the
   // /llm_config route WITHOUT the DO-rename migration dance (see CLAUDE.md
   // gotcha #1). callLLM and callLLMWithTools both go through _getLLMConfig, so
-  // the two call sites can't drift. Default model is GLM 5.2 Fast on Fireworks
-  // — the `routers/` high-speed serving path (100+ tok/s). Same model and
-  // quality as plain glm-5p2, at a higher per-token price; reasoning behavior
-  // below is identical.
+  // the two call sites can't drift. Default model is Qwen `qwen3p8-2p4t-a95b`
+  // on Fireworks — a large MoE (~2.4T total / ~95B active). Runtime-swappable
+  // via /admin/llm-config; reasoning behavior below is unchanged.
   static LLM_ENDPOINT = "https://api.fireworks.ai/inference/v1/chat/completions";
-  static LLM_MODEL = "accounts/fireworks/routers/glm-5p2-fast";
+  static LLM_MODEL = "accounts/fireworks/models/qwen3p8-2p4t-a95b";
   // Reasoning control. Fireworks rejects sending `thinking` and
   // `reasoning_effort` together, so exactly one is applied per request based on
   // LLM_REASONING_MODE: "thinking" → thinking:{type:"enabled"}; "effort" →
-  // reasoning_effort:<LLM_REASONING_EFFORT>; "none" → neither. GLM 5.2 drives
-  // reasoning via reasoning_effort (two tiers: High and Max) — it does NOT use
-  // the Anthropic-style thinking toggle — so the mode is "effort". GLM collapses
-  // low/medium/high to its High tier; only "max"/"xhigh" reach Max (not in our
-  // effort enum), so "high" pins the High tier. Reasoning still returns in
-  // reasoning_content, so the extraction / SSE stream / prior-turn re-feed are
-  // unchanged.
+  // reasoning_effort:<LLM_REASONING_EFFORT>; "none" → neither. We drive reasoning
+  // via reasoning_effort (mode "effort"). Fireworks treats reasoning_effort and
+  // the Anthropic-style thinking toggle as interchangeable and maps between them
+  // (and maps NIM enable_thinking onto reasoning_effort), so "high" works across
+  // model families. Reasoning still returns in reasoning_content, so the
+  // extraction / SSE stream / prior-turn re-feed are unchanged.
   static LLM_REASONING_MODE = "effort";
   static LLM_REASONING_EFFORT = "high";
 
