@@ -81,13 +81,74 @@ export const CHAT_HTML = `<!DOCTYPE html>
     top: 0;
   }
 
+  /* ── Dashboard status strip (always visible, read-only) ── */
+  .dash-strip {
+    display: flex;
+    gap: 8px;
+    padding: max(10px, env(safe-area-inset-top)) 14px 10px;
+    padding-left: max(14px, env(safe-area-inset-left));
+    padding-right: max(14px, env(safe-area-inset-right));
+    background: var(--surface-glass);
+    -webkit-backdrop-filter: blur(18px) saturate(160%);
+    backdrop-filter: blur(18px) saturate(160%);
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+    z-index: 10;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+
+  .dash-strip::-webkit-scrollbar { display: none; }
+
+  .dash-tile {
+    flex: 1 1 0;
+    min-width: 92px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+    padding: 8px 10px;
+    background: rgba(0, 0, 0, 0.3);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    text-align: center;
+  }
+
+  .tile-label {
+    font-size: 10.5px;
+    font-weight: 600;
+    font-family: 'JetBrains Mono', monospace;
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+    color: var(--text-faint);
+    white-space: nowrap;
+  }
+
+  .tile-value {
+    font-size: 17px;
+    font-weight: 700;
+    color: var(--text);
+    white-space: nowrap;
+  }
+
+  .tile-value.ok { color: var(--success); }
+  .tile-value.warn { color: var(--warning); }
+  .tile-value.info { color: var(--accent); }
+
+  .tile-sub {
+    font-size: 11px;
+    color: var(--text-dim);
+    white-space: nowrap;
+    min-height: 13px;
+  }
+
   /* ── Messages ── */
   .messages {
     flex: 1;
     overflow-y: auto;
     overscroll-behavior: contain;
-    /* Added env(safe-area-inset-top) to prevent content sliding under iOS status bar */
-    padding: max(18px, env(safe-area-inset-top)) 18px 8px;
+    /* Top safe-area inset now lives on .dash-strip above this container */
+    padding: 12px 18px 8px;
     padding-left: max(18px, env(safe-area-inset-left));
     padding-right: max(18px, env(safe-area-inset-right));
     display: flex;
@@ -121,7 +182,7 @@ export const CHAT_HTML = `<!DOCTYPE html>
     max-width: 86%;
     padding: 12px 16px;
     border-radius: var(--radius);
-    font-size: 14.5px;
+    font-size: 15.5px;
     line-height: 1.55;
     word-wrap: break-word;
     animation: msgIn 0.26s cubic-bezier(0.22, 1, 0.36, 1);
@@ -388,7 +449,7 @@ export const CHAT_HTML = `<!DOCTYPE html>
   }
 
   .cover-name {
-    font-size: 12.5px;
+    font-size: 15px;
     font-weight: 600;
     color: var(--text);
     white-space: nowrap;
@@ -397,7 +458,7 @@ export const CHAT_HTML = `<!DOCTYPE html>
   }
 
   .cover-state {
-    font-size: 10px;
+    font-size: 12px;
     font-family: 'JetBrains Mono', monospace;
     letter-spacing: 0.03em;
     color: var(--text-faint);
@@ -407,6 +468,14 @@ export const CHAT_HTML = `<!DOCTYPE html>
   .cover-state.is-open { color: var(--warning); }
   .cover-state.is-closed { color: var(--success); }
   .cover-state.is-moving { color: var(--accent); animation: coverBlink 1.1s ease-in-out infinite; }
+
+  /* Whole-card state accent so open/moving reads from across the car */
+  .cover-group.is-open {
+    border-color: rgba(251, 191, 36, 0.5);
+    box-shadow: 0 0 16px rgba(251, 191, 36, 0.14);
+  }
+
+  .cover-group.is-moving { border-color: rgba(91, 140, 255, 0.55); }
 
   @keyframes coverBlink {
     0%, 100% { opacity: 1; }
@@ -418,9 +487,9 @@ export const CHAT_HTML = `<!DOCTYPE html>
     background: linear-gradient(135deg, rgba(91, 140, 255, 0.16), rgba(139, 92, 255, 0.1));
     color: #dfe7ff;
     border-radius: 10px;
-    min-height: 46px;
-    padding: 0 14px;
-    font-size: 13.5px;
+    min-height: 52px;
+    padding: 0 16px;
+    font-size: 15.5px;
     font-weight: 600;
     font-family: inherit;
     cursor: pointer;
@@ -438,6 +507,17 @@ export const CHAT_HTML = `<!DOCTYPE html>
 
   @media (max-width: 540px) {
     .cover-bar { grid-template-columns: 1fr; gap: 7px; }
+  }
+
+  /* Wide screens (the Tesla browser) — scale everything up for arm's length */
+  @media (min-width: 900px) {
+    .msg { font-size: 16.5px; }
+    .cover-name { font-size: 17px; }
+    .cover-state { font-size: 13px; }
+    .cover-btn { font-size: 17px; min-height: 58px; padding: 0 20px; }
+    .tile-label { font-size: 11.5px; }
+    .tile-value { font-size: 20px; }
+    .tile-sub { font-size: 12.5px; }
   }
 
   /* ── Mic button (hero) ── */
@@ -593,7 +673,7 @@ export const CHAT_HTML = `<!DOCTYPE html>
     color: var(--text);
     padding: 18px 18px;
     border-radius: var(--radius);
-    font-size: 15px;
+    font-size: 16px;
     font-weight: 600;
     cursor: pointer;
     font-family: inherit;
@@ -665,6 +745,33 @@ export const CHAT_HTML = `<!DOCTYPE html>
 </head>
 <body>
 <div class="app">
+  <div class="dash-strip" id="dashStrip">
+    <div class="dash-tile" data-tile="climate">
+      <span class="tile-label">Inside</span>
+      <span class="tile-value">—</span>
+      <span class="tile-sub"></span>
+    </div>
+    <div class="dash-tile" data-tile="locks">
+      <span class="tile-label">Locks</span>
+      <span class="tile-value">—</span>
+      <span class="tile-sub"></span>
+    </div>
+    <div class="dash-tile" data-tile="doors">
+      <span class="tile-label">Doors</span>
+      <span class="tile-value">—</span>
+      <span class="tile-sub"></span>
+    </div>
+    <div class="dash-tile" data-tile="presence">
+      <span class="tile-label">People</span>
+      <span class="tile-value">—</span>
+      <span class="tile-sub"></span>
+    </div>
+    <div class="dash-tile" data-tile="power">
+      <span class="tile-label">Power</span>
+      <span class="tile-value">—</span>
+      <span class="tile-sub"></span>
+    </div>
+  </div>
   <div class="messages" id="messages">
     <div class="welcome" id="welcome">
       <img class="welcome-icon-img" src="https://brands.home-assistant.io/_/homeassistant/icon.png" alt="" />
@@ -708,7 +815,7 @@ export const CHAT_HTML = `<!DOCTYPE html>
       </div>
       <div class="cover-group" data-entity="cover.ratgdo32_b1e618_door">
         <div class="cover-info">
-          <span class="cover-name">Basement bay</span>
+          <span class="cover-name">Basement</span>
           <span class="cover-state">—</span>
         </div>
         <button class="cover-btn" type="button" onclick="sendQuick('Open the basement bay door')">▲ Open</button>
@@ -1083,7 +1190,7 @@ export const CHAT_HTML = `<!DOCTYPE html>
             window.__chatRetried = false;
             sendBtn.disabled = false;
             refocusInput();
-            refreshCovers();
+            refreshDash();
             return;
           }
         } catch (err2) {
@@ -1098,7 +1205,7 @@ export const CHAT_HTML = `<!DOCTYPE html>
 
     sendBtn.disabled = false;
     refocusInput();
-    refreshCovers();
+    refreshDash();
   }
 
   function clearChat() {
@@ -1109,25 +1216,73 @@ export const CHAT_HTML = `<!DOCTYPE html>
     lastUserMessage = null;
   }
 
-  // ── Persistent cover-bar state pills ──
+  // ── Dashboard refresh: cover cards + status tiles ──
   const coverBar = document.getElementById('coverBar');
+  const dashStrip = document.getElementById('dashStrip');
   const COVER_STATE_TEXT = { open: 'Open', closed: 'Closed', opening: 'Opening…', closing: 'Closing…' };
   let coverRepollTimer = null;
   let coverRepollCount = 0;
 
-  async function refreshCovers() {
-    if (!coverBar) return;
-    let covers;
+  function setTile(name, value, cls, sub) {
+    if (!dashStrip) return;
+    const tile = dashStrip.querySelector('[data-tile="' + name + '"]');
+    if (!tile) return;
+    const v = tile.querySelector('.tile-value');
+    v.textContent = value;
+    v.className = 'tile-value' + (cls ? ' ' + cls : '');
+    tile.querySelector('.tile-sub').textContent = sub || '';
+  }
+
+  function renderTiles(tiles) {
+    if (!tiles) return;
+    const c = tiles.climate;
+    if (c && c.temp != null) {
+      const act = String(c.action || '');
+      const cls = act === 'cooling' ? 'info' : act === 'heating' ? 'warn' : '';
+      const sub = (act && act !== 'idle' && act !== 'off')
+        ? act + (c.target != null ? ' → ' + c.target + '°' : '')
+        : (c.target != null ? 'set ' + c.target + '°' : 'idle');
+      setTile('climate', c.temp + '°', cls, sub);
+    } else setTile('climate', '—', '', '');
+
+    const l = tiles.locks;
+    if (l && l.total) {
+      const un = l.total - l.locked;
+      setTile('locks', un === 0 ? 'Locked' : un + ' unlocked', un === 0 ? 'ok' : 'warn', l.locked + ' of ' + l.total);
+    } else setTile('locks', '—', '', '');
+
+    const d = tiles.doors;
+    if (d && d.total) {
+      setTile('doors', d.open === 0 ? 'Closed' : d.open + ' open', d.open === 0 ? 'ok' : 'warn', d.total + ' sensors');
+    } else setTile('doors', '—', '', '');
+
+    const p = tiles.presence;
+    if (p && p.total) {
+      setTile('presence', p.home === p.total ? 'All home' : p.home === 0 ? 'Away' : p.home + ' home', p.home > 0 ? 'ok' : '', p.total + ' tracked');
+    } else setTile('presence', '—', '', '');
+
+    const w = tiles.power;
+    if (w && w.value != null) {
+      let val = w.value, unit = w.unit || '';
+      if ((unit === 'W' || unit === 'w') && val >= 1000) { val = (val / 1000).toFixed(2); unit = 'kW'; }
+      setTile('power', val + ' ' + unit, '', 'now');
+    } else setTile('power', '—', '', '');
+  }
+
+  async function refreshDash() {
+    if (!coverBar && !dashStrip) return;
+    let data;
     try {
-      const resp = await fetch('/covers', { cache: 'no-store' });
+      const resp = await fetch('/dash', { cache: 'no-store' });
       if (!resp.ok) return;
-      const data = await resp.json();
-      covers = data.covers || [];
+      data = await resp.json();
     } catch { return; }
 
+    renderTiles(data.tiles);
+
     let moving = false;
-    for (const c of covers) {
-      const group = coverBar.querySelector('[data-entity="' + c.entity_id + '"]');
+    for (const c of (data.covers || [])) {
+      const group = coverBar && coverBar.querySelector('[data-entity="' + c.entity_id + '"]');
       if (!group) continue;
       const pill = group.querySelector('.cover-state');
       const st = String(c.state || '').toLowerCase();
@@ -1137,6 +1292,7 @@ export const CHAT_HTML = `<!DOCTYPE html>
       else if (st === 'closed') cls = 'is-closed';
       else if (st === 'opening' || st === 'closing') { cls = 'is-moving'; moving = true; }
       pill.className = 'cover-state ' + cls;
+      group.className = 'cover-group' + (cls === 'is-open' || cls === 'is-moving' ? ' ' + cls : '');
     }
 
     // While a door is physically moving, repoll on a short leash (bounded so a
@@ -1144,22 +1300,22 @@ export const CHAT_HTML = `<!DOCTYPE html>
     clearTimeout(coverRepollTimer);
     if (moving && coverRepollCount < 20) {
       coverRepollCount++;
-      coverRepollTimer = setTimeout(refreshCovers, 4000);
+      coverRepollTimer = setTimeout(refreshDash, 4000);
     } else if (!moving) {
       coverRepollCount = 0;
     }
   }
 
-  refreshCovers();
+  refreshDash();
   setInterval(() => {
-    if (document.visibilityState === 'visible') refreshCovers();
+    if (document.visibilityState === 'visible') refreshDash();
   }, 45000);
   // The Tesla browser keeps this page alive in the background for hours —
-  // refresh the pills the moment it returns to the foreground.
+  // refresh the dashboard the moment it returns to the foreground.
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible') refreshCovers();
+    if (document.visibilityState === 'visible') refreshDash();
   });
-  window.addEventListener('pageshow', () => refreshCovers());
+  window.addEventListener('pageshow', () => refreshDash());
 
   // ── Voice input (ElevenLabs Scribe) — 3-state machine ──
   const micBtn = document.getElementById('micBtn');
