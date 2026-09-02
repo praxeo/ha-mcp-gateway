@@ -112,12 +112,14 @@ control moved from `reasoning_effort` to the `thinking: { type: "enabled" }`
 toggle (Fireworks rejects sending both). V29 switched to Qwen 3.7 Plus, still on
 the `thinking` toggle.
 
-The current default is **Qwen `qwen3p8-2p4t-a95b` on Fireworks** with reasoning
-enabled — a large Qwen MoE (~2.4T total / ~95B active), swapped in after a run on
-GLM 5.2 Fast. Reasoning stays on `reasoning_effort` (mode `"effort"`, `"high"`):
-per the Fireworks reasoning guide, `reasoning_effort` and the `thinking` toggle
-are interchangeable (Fireworks maps between them), so the swap needed no reasoning
-change. It's strong on the multi-step tool chain.
+The current default is **GLM 5.3 (`glm-5p3`) on Fireworks** with reasoning
+enabled — a 1M-token context window and native tool calling, swapped in after a
+run on Qwen `qwen3p8-2p4t-a95b`. Reasoning stays on `reasoning_effort` (mode
+`"effort"`, `"high"`): per the Fireworks reasoning guide, `reasoning_effort` and
+the `thinking` toggle are interchangeable (Fireworks maps between them), so the
+swap needed no reasoning change. It was checked against the live API first —
+tool-call shape, `reasoning_content` echo on later tool-loop rounds, and the
+`fireworks-*` perf headers all match what the DO already expects.
 
 Since V29 the model is no longer a code-level decision: endpoint, model, and
 reasoning mode resolve at runtime (DO storage override → env vars → baked-in
@@ -143,7 +145,7 @@ highest precedence first:
 3. **Baked-in defaults** — static class constants
    (`HAWebSocketV29._defaultLLMConfig()`): endpoint
    `api.fireworks.ai/.../chat/completions`, model
-   `accounts/fireworks/models/qwen3p8-2p4t-a95b`, reasoning mode `effort` at `high`.
+   `accounts/fireworks/models/glm-5p3`, reasoning mode `effort` at `high`.
 
 Both call sites (`callLLM`, `callLLMWithTools`) go through `_getLLMConfig()`, so
 they can't drift apart. `applyReasoningToBody` applies the reasoning setting:
@@ -497,7 +499,7 @@ The chat model is given OpenAI-format tool schemas (`NATIVE_AGENT_TOOLS` in
 `tool_calls`, dispatch via `executeNativeTool`, push tool results back, repeat
 until the model emits no `tool_calls`. `callLLMWithTools` posts to Fireworks
 (`temperature: 0`) using the runtime-resolved model and reasoning mode — by
-default `accounts/fireworks/models/qwen3p8-2p4t-a95b` with `reasoning_effort: "high"` (see
+default `accounts/fireworks/models/glm-5p3` with `reasoning_effort: "high"` (see
 [LLM configuration](#llm-configuration)) — with a 45s `AbortController` timeout.
 
 Caps:
@@ -966,12 +968,12 @@ Newest first.
   by the 60s `alarm()` tick (`_fireDueScheduledActions`), with a delete-before-
   fire rule and a WS-up guard. See [Scheduler](#scheduler). This was item #1 on
   the old roadmap.
-- **V29 — runtime-configurable LLM config; default Qwen `qwen3p8-2p4t-a95b`.** The
+- **V29 — runtime-configurable LLM config; default GLM 5.3 (`glm-5p3`).** The
   endpoint, model, and reasoning mode now resolve at call time from a DO storage
   override → env vars → baked-in defaults, swappable live via `/admin/llm-config`
   with no class rename. The default moved from Qwen 3.7 Plus to GLM 5.2, to GLM
-  5.2 Fast, then to Qwen `qwen3p8-2p4t-a95b` (a ~2.4T/~95B-active MoE), with the
-  reasoning mode on `reasoning_effort` (`"high"`). See
+  5.2 Fast, to Qwen `qwen3p8-2p4t-a95b`, then to GLM 5.3 (`glm-5p3`, 1M context),
+  with the reasoning mode on `reasoning_effort` (`"high"`) throughout. See
   [LLM configuration](#llm-configuration).
 - **V28 — flat tool-call argument coalescer.** A guard that repairs tool calls
   where the model emitted arguments flat (e.g. `entity_id` at the top level)

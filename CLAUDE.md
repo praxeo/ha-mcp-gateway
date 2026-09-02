@@ -296,7 +296,7 @@ precedence first:
 
 ```js
 static LLM_ENDPOINT = "https://api.fireworks.ai/inference/v1/chat/completions";
-static LLM_MODEL = "accounts/fireworks/models/qwen3p8-2p4t-a95b"; // Qwen 2.4T-A95B MoE
+static LLM_MODEL = "accounts/fireworks/models/glm-5p3";    // GLM 5.3
 static LLM_REASONING_MODE = "effort";     // "thinking" | "effort" | "none"
 static LLM_REASONING_EFFORT = "high";     // used only when mode === "effort"
 ```
@@ -329,19 +329,23 @@ The API key is `env.FIREWORKS_API_KEY`. Provider history (kept here because it
 explains the migration tags): originally MiniMax → gpt-oss-120b on Groq (V13–15)
 → MiniMax again (V16) → DeepSeek V4 Flash on Fireworks (V17–V26) → MiniMax M3 on
 Fireworks (V27–V28) → Qwen 3.7 Plus on Fireworks (V29, runtime-configurable) →
-GLM 5.2 on Fireworks → GLM 5.2 Fast on Fireworks → Qwen `qwen3p8-2p4t-a95b` on
+GLM 5.2 → GLM 5.2 Fast → Qwen `qwen3p8-2p4t-a95b` → GLM 5.3 (`glm-5p3`), all on
 Fireworks (still V29 class — a model swap is exempt from the DO-rename/migration
 dance per gotcha #1; the default change ships in code and goes live via the
-`/admin/llm-config` override or a fresh isolate). `qwen3p8-2p4t-a95b` is a large
-Qwen MoE (~2.4T total / ~95B active). It keeps reasoning on via `reasoning_effort`
-(mode `"effort"`, effort `"high"`); per the Fireworks reasoning guide,
-`reasoning_effort` and the Anthropic-style `thinking` toggle are interchangeable
-(Fireworks maps between them, and maps NIM `enable_thinking` onto
+`/admin/llm-config` override or a fresh isolate). `glm-5p3` carries a 1M-token
+context window and native tool calling. It keeps reasoning on via
+`reasoning_effort` (mode `"effort"`, effort `"high"`); per the Fireworks
+reasoning guide, `reasoning_effort` and the Anthropic-style `thinking` toggle are
+interchangeable (Fireworks maps between them, and maps NIM `enable_thinking` onto
 `reasoning_effort`), so `"high"` works regardless of model family — no reasoning
-change was needed for the swap. Don't reintroduce Groq or the old MiniMax
-endpoint/auth (`MINIMAX_API_KEY`, `reasoning_split`). The current default is
-`qwen3p8-2p4t-a95b`, served by Fireworks via `FIREWORKS_API_KEY`; any
-OpenAI-compatible Fireworks model can be selected at runtime via the override.
+change was needed for the swap. Verified against the live API before the swap:
+`glm-5p3` accepts `reasoning_effort`, emits `reasoning_content`, returns
+`tool_calls` in the same shape, accepts an echoed assistant `reasoning_content`
+on later tool-loop rounds, and still serves the `fireworks-*` perf headers.
+Don't reintroduce Groq or the old MiniMax endpoint/auth (`MINIMAX_API_KEY`,
+`reasoning_split`). The current default is `glm-5p3`, served by Fireworks via
+`FIREWORKS_API_KEY`; any OpenAI-compatible Fireworks model can be selected at
+runtime via the override.
 
 ---
 
