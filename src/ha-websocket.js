@@ -275,9 +275,13 @@ export class HAWebSocketV30 {
   static LLM_REASONING_EFFORT = "low";
   // Muse Spark's raw chain of thought is encrypted and carries no visible
   // text, so a summary is the only thing that can populate the chat UI's
-  // reasoning panel. Set to null to save the summary tokens and accept an
-  // empty panel.
-  static LLM_REASONING_SUMMARY = "auto";
+  // reasoning panel. VERIFIED against the live API: "auto" and "concise"
+  // returned an empty summary array at every effort level tried, and only
+  // "detailed" ever produced text — and then only at higher effort. So Quick
+  // (low) turns show no panel at all, which is the right outcome for "close
+  // the garage", and High turns get a readable summary. Set to null to drop
+  // the request entirely.
+  static LLM_REASONING_SUMMARY = "detailed";
 
   // Baked-in default config object — the lowest-precedence layer for
   // resolveLLMConfig. Kept as a method so the static constants stay the single
