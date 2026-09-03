@@ -37,7 +37,8 @@ var CACHE_TTL = {
   DEVICES: 86400,
   DASHBOARDS: 3600,
   FLOORS: 86400,
-  LABELS: 86400
+  LABELS: 86400,
+  STT_KEYTERMS: 3600
 };
 var CK = {
   STATES: "ha:states",
@@ -49,6 +50,7 @@ var CK = {
   DASHBOARDS: "ha:dashboards",
   FLOORS: "ha:floors",
   LABELS: "ha:labels",
+  STT_KEYTERMS: "ha:stt_keyterms",
   state: (id) => "ha:state:" + id
 };
 var TOOLS = [
@@ -1057,6 +1059,113 @@ async function getDashboardList(env, force) {
   if (result && result.error && result.status === 404) return [{ url_path: null, title: "Home", mode: "storage" }];
   return result;
 }
+// ── Speech-to-text keyterm biasing ──────────────────────────────────────────
+// ElevenLabs Scribe accepts a keyterm list that biases recognition toward
+// domain vocabulary. Without it the model hears "beside lamp" for "bedside
+// lamp" and the agent then burns a full LLM round failing to resolve it.
+//
+// The list is built from live HA data (entity friendly names + area names)
+// plus fixed household vocabulary, and cached in KV. /transcribe only ever
+// READS the cache — building it inline would put a DO round-trip on the
+// critical path of every voice command.
+var STT_KEYTERM_DOMAINS = new Set([
+  "light", "switch", "lock", "cover", "climate", "scene", "script",
+  "fan", "media_player", "input_boolean", "vacuum", "person"
+]);
+// Vocabulary the transcriber has no way to learn from entity names.
+var STT_FIXED_KEYTERMS = [
+  "Ranger", "John", "Sabrina",
+  "Tesla", "Model Y", "precondition", "sentry mode", "charge limit", "charge port",
+  "garage", "main garage", "basement bay", "left basement", "garage entry",
+  "back porch", "front door", "basement door", "basement porch", "deadbolt",
+  "thermostat", "setpoint", "main level", "basement", "upstairs", "downstairs",
+  "drop lights", "bedside lamp", "porch light", "dining room", "living room"
+];
+var STT_KEYTERM_MAX = 1000;
+var STT_KEYTERM_MAXLEN = 50;
+
+function normalizeKeyterm(raw) {
+  if (typeof raw !== "string") return null;
+  const t = raw.replace(/\s+/g, " ").trim();
+  if (t.length < 3 || t.length > STT_KEYTERM_MAXLEN) return null;
+  // Entity ids, MACs, bare numbers and hex blobs are noise, not vocabulary.
+  if (!/[a-z]/i.test(t)) return null;
+  if (/^[0-9a-f]{6,}$/i.test(t)) return null;
+  if (t.includes("_") || t.includes(".")) return null;
+  return t;
+}
+
+async function buildSTTKeyterms(env) {
+  const terms = [];
+  const seen = /* @__PURE__ */ new Set();
+  const push = (raw) => {
+    const t = normalizeKeyterm(raw);
+    if (!t) return;
+    const k = t.toLowerCase();
+    if (seen.has(k)) return;
+    seen.add(k);
+    terms.push(t);
+  };
+
+  for (const t of STT_FIXED_KEYTERMS) push(t);
+
+  try {
+    const areas = await getAreaRegistry(env);
+    if (Array.isArray(areas)) for (const a of areas) push(a && a.name);
+  } catch {}
+
+  try {
+    const states = await getStates(env);
+    if (Array.isArray(states)) {
+      for (const s of states) {
+        const id = s && s.entity_id;
+        if (typeof id !== "string") continue;
+        const domain = id.split(".")[0];
+        if (!STT_KEYTERM_DOMAINS.has(domain)) continue;
+        push(s.attributes && s.attributes.friendly_name);
+      }
+    }
+  } catch {}
+
+  return terms.slice(0, STT_KEYTERM_MAX);
+}
+
+// ── Text-to-speech shaping ──────────────────────────────────────────────────
+// The agent writes for a screen (markdown, entity ids, bullet lists). Spoken
+// aloud those become "asterisk asterisk" and "light dot bedside underscore
+// lamp", so strip them before synthesis.
+var DEFAULT_TTS_VOICE_ID = "21m00Tcm4TlvDq8ikWAM";
+var TTS_MAX_CHARS = 600;
+
+function stripForSpeech(raw) {
+  if (typeof raw !== "string") return "";
+  let t = raw;
+  t = t.replace(/```[\s\S]*?```/g, " ");
+  t = t.replace(/`([^`]*)`/g, "$1");
+  t = t.replace(/\*\*(.+?)\*\*/g, "$1");
+  t = t.replace(/(^|\s)[*_]([^*_\n]+)[*_](?=\s|$)/g, "$1$2");
+  t = t.replace(/^\s*#{1,6}\s*/gm, "");
+  t = t.replace(/^\s*[-*•]\s+/gm, "");
+  // Entity ids read terribly aloud — say the object name instead. Both sides
+  // need 3+ chars so ordinary prose ("7 p.m.", "e.g.") survives untouched.
+  t = t.replace(/\b[a-z_]{3,}\.[a-z0-9_]{3,}\b/g, (m) => m.split(".")[1].replace(/_/g, " "));
+  t = t.replace(/\s*\n+\s*/g, ". ");
+  t = t.replace(/\.\s*\./g, ".");
+  t = t.replace(/\s{2,}/g, " ").trim();
+  if (t.length > TTS_MAX_CHARS) {
+    const cut = t.slice(0, TTS_MAX_CHARS);
+    const lastStop = Math.max(cut.lastIndexOf(". "), cut.lastIndexOf("! "), cut.lastIndexOf("? "));
+    t = lastStop > 120 ? cut.slice(0, lastStop + 1) : cut;
+  }
+  return t;
+}
+
+async function refreshSTTKeyterms(env) {
+  const terms = await buildSTTKeyterms(env);
+  if (terms.length > 0) await cacheSet(env, CK.STT_KEYTERMS, terms, CACHE_TTL.STT_KEYTERMS);
+  return terms;
+}
+
 async function invalidateStates(env) {
   await cacheDel(env, CK.STATES);
 }
@@ -2427,25 +2536,55 @@ var worker_default = {
         else if (ct.includes("wav")) filename = "audio.wav";
         else if (ct.includes("ogg")) filename = "audio.ogg";
 
-        const form = new FormData();
-        form.append("file", audioBlob, filename);
-        form.append("model_id", "scribe_v2");
-        form.append("no_verbatim", "true");
-        form.append("tag_audio_events", "false");
-        form.append("language_code", "eng");
-        form.append("temperature", "0");
+        // Keyterm biasing. Read-only from KV so a cold cache costs nothing on
+        // the voice critical path — it just transcribes unbiased this once and
+        // rebuilds in the background for next time.
+        let keyterms = null;
+        try { keyterms = await cacheGet(env, CK.STT_KEYTERMS); } catch {}
+        if (!Array.isArray(keyterms) || keyterms.length === 0) {
+          keyterms = null;
+          ctx.waitUntil(refreshSTTKeyterms(env).catch(() => {}));
+        }
 
-        const elevResp = await fetch("https://api.elevenlabs.io/v1/speech-to-text", {
+        const buildForm = (withKeyterms) => {
+          const form = new FormData();
+          form.append("file", audioBlob, filename);
+          form.append("model_id", "scribe_v2");
+          form.append("no_verbatim", "true");
+          form.append("tag_audio_events", "false");
+          form.append("language_code", "eng");
+          form.append("temperature", "0");
+          if (withKeyterms && keyterms) form.append("keyterms", JSON.stringify(keyterms));
+          return form;
+        };
+
+        const callScribe = (withKeyterms) => fetch("https://api.elevenlabs.io/v1/speech-to-text", {
           method: "POST",
           headers: { "xi-api-key": env.ELEVENLABS_API_KEY },
-          body: form
+          body: buildForm(withKeyterms)
         });
-        const respText = await elevResp.text();
+
+        const sttStart = Date.now();
+        let usedKeyterms = !!keyterms;
+        let elevResp = await callScribe(usedKeyterms);
+        let respText = await elevResp.text();
+        // A 4xx while sending keyterms means the bias payload was rejected, not
+        // that the audio was bad. Transcription is more important than biasing,
+        // so drop the keyterms and try once more rather than failing the turn.
+        if (!elevResp.ok && usedKeyterms && elevResp.status >= 400 && elevResp.status < 500) {
+          console.warn("transcribe: keyterms rejected (" + elevResp.status + "), retrying without");
+          usedKeyterms = false;
+          elevResp = await callScribe(false);
+          respText = await elevResp.text();
+        }
+        const sttMs = Date.now() - sttStart;
+
         if (!elevResp.ok) {
           return new Response(JSON.stringify({
             error: "ElevenLabs error",
             status: elevResp.status,
-            body: respText.slice(0, 500)
+            body: respText.slice(0, 500),
+            stt_ms: sttMs
           }), {
             status: 502, headers: { ...corsHeaders, "Content-Type": "application/json" }
           });
@@ -2454,15 +2593,108 @@ var worker_default = {
         try { data = JSON.parse(respText); } catch { data = { text: respText }; }
         return new Response(JSON.stringify({
           text: data.text || "",
-          language_code: data.language_code
+          language_code: data.language_code,
+          stt_ms: sttMs,
+          keyterms: usedKeyterms ? keyterms.length : 0
         }), {
-          headers: { ...corsHeaders, "Content-Type": "application/json" }
+          headers: {
+            ...corsHeaders,
+            "Content-Type": "application/json",
+            "Server-Timing": "elevenlabs;dur=" + sttMs
+          }
         });
       } catch (e) {
         return new Response(JSON.stringify({ error: e.message }), {
           status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" }
         });
       }
+    }
+    if (url.pathname === "/tts") {
+      // Text-to-speech proxy for the chat UI's "Speak replies" toggle.
+      // Streams ElevenLabs Flash v2.5 audio straight through to the browser;
+      // the Worker never buffers the whole clip.
+      if (request.method !== "POST") {
+        return new Response("Method not allowed", { status: 405, headers: corsHeaders });
+      }
+      if (!env.ELEVENLABS_API_KEY) {
+        return new Response(JSON.stringify({ error: "ELEVENLABS_API_KEY not configured" }), {
+          status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" }
+        });
+      }
+      try {
+        const body = await request.json();
+        const raw = typeof body.text === "string" ? body.text : "";
+        const text = stripForSpeech(raw);
+        if (!text) {
+          return new Response(JSON.stringify({ error: "Missing or empty 'text' field" }), {
+            status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" }
+          });
+        }
+        const voiceId = env.ELEVENLABS_VOICE_ID || DEFAULT_TTS_VOICE_ID;
+        const elevResp = await fetch(
+          "https://api.elevenlabs.io/v1/text-to-speech/" + encodeURIComponent(voiceId) +
+            "/stream?output_format=mp3_22050_32",
+          {
+            method: "POST",
+            headers: {
+              "xi-api-key": env.ELEVENLABS_API_KEY,
+              "Content-Type": "application/json"
+            },
+            body: JSON.stringify({
+              text,
+              model_id: "eleven_flash_v2_5",
+              voice_settings: { stability: 0.4, similarity_boost: 0.75 }
+            })
+          }
+        );
+        if (!elevResp.ok || !elevResp.body) {
+          const detail = await elevResp.text().catch(() => "");
+          return new Response(JSON.stringify({
+            error: "ElevenLabs TTS error",
+            status: elevResp.status,
+            body: detail.slice(0, 500)
+          }), {
+            status: 502, headers: { ...corsHeaders, "Content-Type": "application/json" }
+          });
+        }
+        return new Response(elevResp.body, {
+          headers: {
+            ...corsHeaders,
+            "Content-Type": "audio/mpeg",
+            "Cache-Control": "no-store"
+          }
+        });
+      } catch (e) {
+        return new Response(JSON.stringify({ error: e.message }), {
+          status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" }
+        });
+      }
+    }
+    if (url.pathname === "/manifest.json") {
+      return new Response(JSON.stringify({
+        name: "HA Agent",
+        short_name: "HA Agent",
+        start_url: "/chat",
+        scope: "/",
+        display: "standalone",
+        orientation: "portrait",
+        background_color: "#070710",
+        theme_color: "#070710",
+        icons: [
+          {
+            src: "https://brands.home-assistant.io/_/homeassistant/icon.png",
+            sizes: "512x512",
+            type: "image/png",
+            purpose: "any"
+          }
+        ]
+      }), {
+        headers: {
+          ...corsHeaders,
+          "Content-Type": "application/manifest+json",
+          "Cache-Control": "public, max-age=3600"
+        }
+      });
     }
     if (url.pathname === "/refresh") {
       try {
@@ -2525,10 +2757,18 @@ var worker_default = {
                 headers: { ...corsHeaders, "Content-Type": "application/json" }
               });
             }
+            // `from` stays "web" — it keys the per-channel chat history, so
+            // splitting it by input method would fork the conversation.
+            // `source` and `tier` ride alongside as hints the DO consumes.
             const streamResp = await stub.fetch("http://do/ai_chat_stream", {
               method: "POST",
               headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ message: body.message, from: "web" })
+              body: JSON.stringify({
+                message: body.message,
+                from: "web",
+                source: body.source === "voice" ? "voice" : "text",
+                tier: body.tier === "high" ? "high" : "quick"
+              })
             });
             return new Response(streamResp.body, {
               headers: {
@@ -2539,7 +2779,12 @@ var worker_default = {
               }
             });
           }
-          const result = await doFetch(env, "/ai_chat", { message: body.message, from: "web" });
+          const result = await doFetch(env, "/ai_chat", {
+            message: body.message,
+            from: "web",
+            source: body.source === "voice" ? "voice" : "text",
+            tier: body.tier === "high" ? "high" : "quick"
+          });
           return new Response(JSON.stringify(result || { error: "Agent not responding" }, null, 2), {
             headers: { ...corsHeaders, "Content-Type": "application/json" }
           });
@@ -3175,6 +3420,8 @@ var worker_default = {
           getFloorRegistry(env, true),
           getLabelRegistry(env, true)
         ]);
+        // Rebuild after the registries so friendly names are current.
+        await refreshSTTKeyterms(env).catch(() => {});
       }
       console.log("Cache pre-warm completed.");
     } catch (error) {

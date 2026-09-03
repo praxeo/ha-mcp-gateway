@@ -15,6 +15,7 @@ export const CHAT_HTML = `<!DOCTYPE html>
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="HA Agent">
+<link rel="manifest" href="/manifest.json">
 <title>HA Agent</title>
 <style>
   @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=DM+Sans:wght@400;500;600;700&display=swap');
@@ -270,26 +271,26 @@ export const CHAT_HTML = `<!DOCTYPE html>
 
   .typing.active { display: flex; align-items: center; }
 
-  .minimax-mark {
+  .thinking-mark {
     width: 56px;
     height: 32px;
     display: block;
   }
 
-  .mm-bar {
+  .think-bar {
     transform-origin: center;
     transform-box: fill-box;
-    animation: mmwave 1.1s ease-in-out infinite;
+    animation: thinkwave 1.1s ease-in-out infinite;
   }
 
-  .mm-bar:nth-child(1) { animation-delay: 0s; }
-  .mm-bar:nth-child(2) { animation-delay: 0.08s; }
-  .mm-bar:nth-child(3) { animation-delay: 0.16s; }
-  .mm-bar:nth-child(4) { animation-delay: 0.24s; }
-  .mm-bar:nth-child(5) { animation-delay: 0.32s; }
-  .mm-bar:nth-child(6) { animation-delay: 0.40s; }
+  .think-bar:nth-child(1) { animation-delay: 0s; }
+  .think-bar:nth-child(2) { animation-delay: 0.08s; }
+  .think-bar:nth-child(3) { animation-delay: 0.16s; }
+  .think-bar:nth-child(4) { animation-delay: 0.24s; }
+  .think-bar:nth-child(5) { animation-delay: 0.32s; }
+  .think-bar:nth-child(6) { animation-delay: 0.40s; }
 
-  @keyframes mmwave {
+  @keyframes thinkwave {
     0%, 100% { transform: scaleY(0.45); }
     50%      { transform: scaleY(1);    }
   }
@@ -441,6 +442,96 @@ export const CHAT_HTML = `<!DOCTYPE html>
   }
 
   /* ── Mic button (hero) ── */
+  /* ── Voice / tier controls ── */
+  .ctl-row {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
+  .seg {
+    display: inline-flex;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: 11px;
+    padding: 2px;
+    gap: 2px;
+  }
+
+  .seg-btn {
+    background: transparent;
+    border: none;
+    color: var(--text-faint);
+    font-family: inherit;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.03em;
+    padding: 7px 13px;
+    border-radius: 9px;
+    cursor: pointer;
+    transition: background 0.16s, color 0.16s;
+    touch-action: manipulation;
+  }
+
+  .seg-btn[aria-pressed="true"] {
+    background: var(--accent-dim);
+    color: var(--text);
+    box-shadow: inset 0 0 0 1px rgba(91, 140, 255, 0.35);
+  }
+
+  .seg-btn:active { transform: scale(0.97); }
+
+  .toggle-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    color: var(--text-faint);
+    border-radius: 11px;
+    padding: 8px 13px;
+    font-family: inherit;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.03em;
+    cursor: pointer;
+    transition: all 0.16s;
+    touch-action: manipulation;
+  }
+
+  .toggle-chip[aria-pressed="true"] {
+    color: var(--text);
+    border-color: rgba(91, 140, 255, 0.45);
+    background: var(--accent-dim);
+  }
+
+  .toggle-chip .chip-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--text-faint);
+    flex-shrink: 0;
+    transition: background 0.16s, box-shadow 0.16s;
+  }
+
+  .toggle-chip[aria-pressed="true"] .chip-dot {
+    background: var(--accent);
+    box-shadow: 0 0 7px rgba(91, 140, 255, 0.8);
+  }
+
+  .toggle-chip:active { transform: scale(0.97); }
+
+  .msg-meta {
+    margin-top: 6px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    letter-spacing: 0.02em;
+    color: var(--text-faint);
+    font-variant-numeric: tabular-nums;
+  }
+
   .mic-row {
     display: grid;
     grid-template-columns: 1fr auto 1fr;
@@ -678,20 +769,20 @@ export const CHAT_HTML = `<!DOCTYPE html>
   </div>
 
   <div class="typing" id="typing">
-    <svg class="minimax-mark" viewBox="0 0 64 40" aria-hidden="true">
+    <svg class="thinking-mark" viewBox="0 0 64 40" aria-hidden="true">
       <defs>
-        <linearGradient id="mmGrad" x1="0" x2="1" y1="0" y2="0">
-          <stop offset="0%" stop-color="#FF4D7E"/>
-          <stop offset="100%" stop-color="#FF6A2E"/>
+        <linearGradient id="thinkGrad" x1="0" x2="1" y1="0" y2="0">
+          <stop offset="0%" stop-color="#5b8cff"/>
+          <stop offset="100%" stop-color="#8b5cff"/>
         </linearGradient>
       </defs>
-      <g fill="url(#mmGrad)">
-        <rect class="mm-bar" x="2"  y="14" width="6" height="14" rx="3"/>
-        <rect class="mm-bar" x="12" y="6"  width="6" height="28" rx="3"/>
-        <rect class="mm-bar" x="22" y="2"  width="6" height="36" rx="3"/>
-        <rect class="mm-bar" x="32" y="10" width="6" height="22" rx="3"/>
-        <rect class="mm-bar" x="42" y="4"  width="6" height="32" rx="3"/>
-        <rect class="mm-bar" x="52" y="12" width="6" height="18" rx="3"/>
+      <g fill="url(#thinkGrad)">
+        <rect class="think-bar" x="2"  y="14" width="6" height="14" rx="3"/>
+        <rect class="think-bar" x="12" y="6"  width="6" height="28" rx="3"/>
+        <rect class="think-bar" x="22" y="2"  width="6" height="36" rx="3"/>
+        <rect class="think-bar" x="32" y="10" width="6" height="22" rx="3"/>
+        <rect class="think-bar" x="42" y="4"  width="6" height="32" rx="3"/>
+        <rect class="think-bar" x="52" y="12" width="6" height="18" rx="3"/>
       </g>
     </svg>
   </div>
@@ -721,6 +812,16 @@ export const CHAT_HTML = `<!DOCTYPE html>
         <svg viewBox="0 0 24 24" fill="currentColor" width="20" height="20">
           <path d="M2 12l20-9-9 20-2-9-9-2z"/>
         </svg>
+      </button>
+    </div>
+    <div class="ctl-row">
+      <div class="seg" role="group" aria-label="Reasoning tier">
+        <button class="seg-btn" type="button" id="tierQuick" aria-pressed="true" onclick="setTier('quick')">Quick</button>
+        <button class="seg-btn" type="button" id="tierHigh" aria-pressed="false" onclick="setTier('high')">High</button>
+      </div>
+      <button class="toggle-chip" type="button" id="speakToggle" aria-pressed="false" onclick="toggleSpeak()">
+        <span class="chip-dot" aria-hidden="true"></span>
+        <span id="speakLabel">Speak replies</span>
       </button>
     </div>
     <div class="mic-row">
@@ -810,20 +911,106 @@ export const CHAT_HTML = `<!DOCTYPE html>
   const ICON_CHECK = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>';
   const ICON_RETRY = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path></svg>';
 
+  // ── Focus discipline ──────────────────────────────────────────────────
+  // A programmatic input.focus() pops the on-screen keyboard over half the
+  // Tesla screen. That is intolerable after a voice command, where the whole
+  // point is not touching the screen. Two independent guards, so neither one
+  // regressing can bring the keyboard back:
+  //   1. suppressRefocus — one-shot, set by any non-typed send (buttons, mic).
+  //   2. lastSendWasVoice — sticky for the whole voice turn, including the
+  //      error and retry paths that also call refocusInput().
+  // A manual tap on the textarea still focuses normally; only programmatic
+  // refocus is suppressed.
   let suppressRefocus = false;
+  let lastSendWasVoice = false;
 
   function sendQuick(text) {
     if (sendBtn.disabled) return; // a send is already in flight
-    // Button-originated sends must not refocus the input afterwards — a
-    // programmatic focus pops the on-screen keyboard over half the Tesla screen.
     suppressRefocus = true;
+    lastSendWasVoice = false;
     input.value = text;
     send();
   }
 
   function refocusInput() {
     if (suppressRefocus) { suppressRefocus = false; return; }
+    if (lastSendWasVoice) return;
     input.focus();
+  }
+
+  // ── Reasoning tier (resets to Quick on every load, by design) ──────────
+  let tier = 'quick';
+  const tierQuickBtn = document.getElementById('tierQuick');
+  const tierHighBtn = document.getElementById('tierHigh');
+
+  function setTier(next) {
+    tier = next === 'high' ? 'high' : 'quick';
+    tierQuickBtn.setAttribute('aria-pressed', String(tier === 'quick'));
+    tierHighBtn.setAttribute('aria-pressed', String(tier === 'high'));
+  }
+
+  // ── Spoken replies (ElevenLabs) ───────────────────────────────────────
+  const speakBtn = document.getElementById('speakToggle');
+  let speakOn = false;
+  try { speakOn = localStorage.getItem('ha_speak_replies') === '1'; } catch {}
+
+  let ttsAudio = null;
+  let audioUnlocked = false;
+
+  function ensureAudio() {
+    if (!ttsAudio) {
+      ttsAudio = new Audio();
+      ttsAudio.preload = 'auto';
+    }
+    return ttsAudio;
+  }
+
+  // Chromium only allows playback started inside a user gesture. A reply
+  // arrives seconds later, well outside that window, so claim the permission
+  // on the tap that starts a turn by playing a silent clip on the same
+  // element we will reuse for real audio.
+  function unlockAudio() {
+    if (audioUnlocked || !speakOn) return;
+    const el = ensureAudio();
+    try {
+      el.src = 'data:audio/mpeg;base64,SUQzBAAAAAAAI1RTU0UAAAAPAAADTGF2ZjU4Ljc2LjEwMAAAAAAAAAAAAAAA//tQxAADB8AhSmxhIIEVCSiJrDCQBTcu3UrAIwUdkRgQbFAZC1CQEwTJ9mjRvBA4UOLD8nKVOWfh+UlK3z/177OXrfOdKl7pyn3Xf//WreyTRUoAWgBgkOAGbZHBgG1OF6zM82DWbZaUmMBptgQhGjsyYqc9ae9XFz280948NMBWInljyzsNRFLPWdnZGWrddDsjK1unuSrVN9jJsK8KuQtQCtMBjCEtImISdNKJOopIpBFpNSMbIHCSRpRR5iakjTiyzLhchUUBwCgyKiweBv/7UsQbg8isVNoMPMjAAAA0gAAABEVFGmgqK////9bP/6XCekAAAAA=';
+      const p = el.play();
+      if (p && typeof p.catch === 'function') p.catch(() => {});
+      audioUnlocked = true;
+    } catch {}
+  }
+
+  function toggleSpeak() {
+    speakOn = !speakOn;
+    speakBtn.setAttribute('aria-pressed', String(speakOn));
+    try { localStorage.setItem('ha_speak_replies', speakOn ? '1' : '0'); } catch {}
+    if (speakOn) {
+      unlockAudio(); // this click is a user gesture — spend it
+    } else if (ttsAudio) {
+      try { ttsAudio.pause(); } catch {}
+    }
+  }
+  speakBtn.setAttribute('aria-pressed', String(speakOn));
+
+  let ttsObjectUrl = null;
+
+  async function speak(text) {
+    if (!speakOn || !text) return;
+    try {
+      const resp = await fetch('/tts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text })
+      });
+      if (!resp.ok) return; // speech is a nicety; never surface its failures
+      const blob = await resp.blob();
+      const el = ensureAudio();
+      if (ttsObjectUrl) URL.revokeObjectURL(ttsObjectUrl);
+      ttsObjectUrl = URL.createObjectURL(blob);
+      el.src = ttsObjectUrl;
+      const p = el.play();
+      if (p && typeof p.catch === 'function') p.catch(() => {});
+    } catch {}
   }
 
   function makeCopyBtn(text) {
@@ -871,7 +1058,7 @@ export const CHAT_HTML = `<!DOCTYPE html>
     return btn;
   }
 
-  function addMsg(role, text, actions) {
+  function addMsg(role, text, actions, meta) {
     if (welcome) welcome.style.display = 'none';
 
     const div = document.createElement('div');
@@ -896,6 +1083,13 @@ export const CHAT_HTML = `<!DOCTYPE html>
         actDiv.className = 'actions-taken';
         actDiv.textContent = '⚡ ' + actions.join(', ');
         div.appendChild(actDiv);
+      }
+
+      if (meta) {
+        const metaDiv = document.createElement('div');
+        metaDiv.className = 'msg-meta';
+        metaDiv.textContent = meta;
+        div.appendChild(metaDiv);
       }
 
       const acts = document.createElement('div');
@@ -945,9 +1139,37 @@ export const CHAT_HTML = `<!DOCTYPE html>
     scrollToBottom();
   }
 
-  async function send() {
+  // ── One SSE reader, used by both the initial attempt and the retry ──────
+  // These loops were duplicated verbatim; any event added to one and not the
+  // other silently worked in one path and not the other.
+  async function consumeChatStream(resp, handlers) {
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      const lines = buf.split('\\n');
+      buf = lines.pop();
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        let evt;
+        try { evt = JSON.parse(line.slice(6)); } catch { continue; }
+        handlers(evt);
+      }
+    }
+  }
+
+  async function send(opts) {
     const text = input.value.trim();
     if (!text) return;
+
+    const isVoice = !!(opts && opts.source === 'voice');
+    const sttMs = opts && typeof opts.sttMs === 'number' ? opts.sttMs : null;
+    const t0 = Date.now();
+    // Sticky for this whole turn, including the error and retry paths below.
+    lastSendWasVoice = isVoice;
 
     lastUserMessage = text;
     input.value = '';
@@ -975,12 +1197,50 @@ export const CHAT_HTML = `<!DOCTYPE html>
       if (statusEl) { msgEl.removeChild(statusEl); statusEl = null; }
     }
 
+    function replyMeta() {
+      const parts = [((Date.now() - t0) / 1000).toFixed(1) + 's'];
+      parts.push(tier === 'high' ? 'High' : 'Quick');
+      if (sttMs !== null) parts.push('voice ' + (sttMs / 1000).toFixed(1) + 's');
+      return parts.join(' · ');
+    }
+
+    function handleEvent(evt) {
+      if (evt.type === 'started') {
+        // server alive — no UI action needed
+      } else if (evt.type === 'reasoning') {
+        addReasoning(evt.text);
+      } else if (evt.type === 'thinking') {
+        showStatus('Thinking…');
+      } else if (evt.type === 'tool_call') {
+        showStatus('⚡ ' + (evt.label || evt.name) + '…');
+      } else if (evt.type === 'tool_result') {
+        showStatus((evt.ok ? '✓ ' : '✗ ') + evt.name);
+      } else if (evt.type === 'reply') {
+        typing.classList.remove('active');
+        clearStatus();
+        const body = evt.text || 'No response.';
+        addMsg('agent', body, null, replyMeta());
+        speak(body);
+      } else if (evt.type === 'error') {
+        typing.classList.remove('active');
+        clearStatus();
+        addMsg('error', evt.message || 'Agent error');
+      }
+    }
+
+    const payload = JSON.stringify({
+      message: text,
+      tier,
+      source: isVoice ? 'voice' : 'text'
+    });
+    const reqInit = {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Accept': 'text/event-stream' },
+      body: payload
+    };
+
     try {
-      const resp = await fetch('/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Accept': 'text/event-stream' },
-        body: JSON.stringify({ message: text })
-      });
+      const resp = await fetch('/chat', reqInit);
 
       if (!resp.ok || !resp.body) {
         typing.classList.remove('active');
@@ -990,44 +1250,7 @@ export const CHAT_HTML = `<!DOCTYPE html>
         return;
       }
 
-      const reader = resp.body.getReader();
-      const decoder = new TextDecoder();
-      let buf = '';
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buf += decoder.decode(value, { stream: true });
-
-        const lines = buf.split('\\n');
-        buf = lines.pop();
-
-        for (const line of lines) {
-          if (!line.startsWith('data: ')) continue;
-          let evt;
-          try { evt = JSON.parse(line.slice(6)); } catch { continue; }
-
-          if (evt.type === 'started') {
-            // server alive — no UI action needed
-          } else if (evt.type === 'reasoning') {
-            addReasoning(evt.text);
-          } else if (evt.type === 'thinking') {
-            showStatus('Thinking…');
-          } else if (evt.type === 'tool_call') {
-            showStatus('⚡ ' + (evt.label || evt.name) + '…');
-          } else if (evt.type === 'tool_result') {
-            showStatus((evt.ok ? '✓ ' : '✗ ') + evt.name);
-          } else if (evt.type === 'reply') {
-            typing.classList.remove('active');
-            clearStatus();
-            addMsg('agent', evt.text || 'No response.');
-          } else if (evt.type === 'error') {
-            typing.classList.remove('active');
-            clearStatus();
-            addMsg('error', evt.message || 'Agent error');
-          }
-        }
-      }
+      await consumeChatStream(resp, handleEvent);
 
       typing.classList.remove('active');
       clearStatus();
@@ -1038,46 +1261,9 @@ export const CHAT_HTML = `<!DOCTYPE html>
         window.__chatRetried = true;
         showStatus('Reconnecting…');
         try {
-          const resp2 = await fetch('/chat', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'Accept': 'text/event-stream' },
-            body: JSON.stringify({ message: text })
-          });
+          const resp2 = await fetch('/chat', reqInit);
           if (resp2.ok && resp2.body) {
-            const reader = resp2.body.getReader();
-            const decoder = new TextDecoder();
-            let buf = '';
-            while (true) {
-              const { done, value } = await reader.read();
-              if (done) break;
-              buf += decoder.decode(value, { stream: true });
-              const lines = buf.split('\\n');
-              buf = lines.pop();
-              for (const line of lines) {
-                if (!line.startsWith('data: ')) continue;
-                let evt;
-                try { evt = JSON.parse(line.slice(6)); } catch { continue; }
-                if (evt.type === 'started') {
-                  // server alive
-                } else if (evt.type === 'reasoning') {
-                  addReasoning(evt.text);
-                } else if (evt.type === 'thinking') {
-                  showStatus('Thinking…');
-                } else if (evt.type === 'tool_call') {
-                  showStatus('⚡ ' + (evt.label || evt.name) + '…');
-                } else if (evt.type === 'tool_result') {
-                  showStatus((evt.ok ? '✓ ' : '✗ ') + evt.name);
-                } else if (evt.type === 'reply') {
-                  typing.classList.remove('active');
-                  clearStatus();
-                  addMsg('agent', evt.text || 'No response.');
-                } else if (evt.type === 'error') {
-                  typing.classList.remove('active');
-                  clearStatus();
-                  addMsg('error', evt.message || 'Agent error');
-                }
-              }
-            }
+            await consumeChatStream(resp2, handleEvent);
             typing.classList.remove('active');
             clearStatus();
             window.__chatRetried = false;
@@ -1161,12 +1347,25 @@ export const CHAT_HTML = `<!DOCTYPE html>
   });
   window.addEventListener('pageshow', () => refreshCovers());
 
-  // ── Voice input (ElevenLabs Scribe) — 3-state machine ──
+  // ── Voice input (ElevenLabs Scribe) ───────────────────────────────────
+  // Tap to start. Recording ends by itself on ~1.2s of silence after speech
+  // (hands stay on the wheel); a second tap still stops it manually. The
+  // transcript is sent immediately — no review step — and the reply never
+  // refocuses the input, so the keyboard stays down.
   const micBtn = document.getElementById('micBtn');
   const micLabel = micBtn.querySelector('.mic-label');
   let mediaRecorder = null;
   let audioChunks = [];
   let micStream = null;
+
+  // Voice-activity detection tuning.
+  const VAD_SILENCE_MS = 1200;   // trailing silence that ends a clip
+  const VAD_MIN_CLIP_MS = 600;   // ignore taps too short to contain words
+  const VAD_MAX_CLIP_MS = 15000; // hard ceiling, so a stuck mic can't run on
+  const VAD_SPEECH_RMS = 0.045;  // above this counts as speech
+  let vadCtx = null;
+  let vadRaf = 0;
+  let vadStopTimer = 0;
 
   function pickMime() {
     if (typeof MediaRecorder === 'undefined') return '';
@@ -1190,7 +1389,7 @@ export const CHAT_HTML = `<!DOCTYPE html>
       micLabel.textContent = 'Tap to speak';
       micBtn.disabled = false;
     } else if (state === 'recording') {
-      micLabel.textContent = 'Send';
+      micLabel.textContent = 'Listening';
       micBtn.disabled = false;
     } else if (state === 'processing') {
       micLabel.textContent = '…';
@@ -1198,6 +1397,77 @@ export const CHAT_HTML = `<!DOCTYPE html>
     }
   }
   setMicState('idle');
+
+  function stopRecording() {
+    if (mediaRecorder && mediaRecorder.state === 'recording') mediaRecorder.stop();
+  }
+
+  function teardownVad() {
+    cancelAnimationFrame(vadRaf);
+    vadRaf = 0;
+    clearTimeout(vadStopTimer);
+    vadStopTimer = 0;
+    if (vadCtx) {
+      const ctx = vadCtx;
+      vadCtx = null;
+      try { ctx.close(); } catch {}
+    }
+  }
+
+  // Watch loudness and end the clip once the speaker stops. Any failure here
+  // (no AudioContext, blocked sample access) degrades to plain tap-to-stop.
+  function startVad(stream) {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    let ctx;
+    try {
+      ctx = new AC();
+      vadCtx = ctx;
+      const source = ctx.createMediaStreamSource(stream);
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 1024;
+      source.connect(analyser);
+      const buf = new Float32Array(analyser.fftSize);
+      const startedAt = Date.now();
+      let sawSpeech = false;
+      let quietSince = 0;
+
+      const tick = () => {
+        if (!vadCtx) return;
+        try {
+          analyser.getFloatTimeDomainData(buf);
+        } catch {
+          teardownVad(); // no sample access — fall back to tap-to-stop
+          return;
+        }
+        let sum = 0;
+        for (let i = 0; i < buf.length; i++) sum += buf[i] * buf[i];
+        const rms = Math.sqrt(sum / buf.length);
+        const now = Date.now();
+        const elapsed = now - startedAt;
+
+        if (rms >= VAD_SPEECH_RMS) {
+          sawSpeech = true;
+          quietSince = 0;
+        } else if (sawSpeech) {
+          if (!quietSince) quietSince = now;
+          if (now - quietSince >= VAD_SILENCE_MS && elapsed >= VAD_MIN_CLIP_MS) {
+            stopRecording();
+            return;
+          }
+        }
+
+        if (elapsed >= VAD_MAX_CLIP_MS) {
+          stopRecording();
+          return;
+        }
+        vadRaf = requestAnimationFrame(tick);
+      };
+      vadRaf = requestAnimationFrame(tick);
+    } catch {
+      teardownVad();
+    }
+  }
 
   micBtn.addEventListener('click', async () => {
     const state = micBtn.getAttribute('data-state');
@@ -1207,6 +1477,9 @@ export const CHAT_HTML = `<!DOCTYPE html>
         addMsg('error', 'Voice input not supported in this browser.');
         return;
       }
+      // This tap is a user gesture: spend it claiming audio playback
+      // permission, because the reply arrives long after the gesture expires.
+      unlockAudio();
       try {
         micStream = await navigator.mediaDevices.getUserMedia({
           audio: {
@@ -1226,6 +1499,7 @@ export const CHAT_HTML = `<!DOCTYPE html>
           if (e.data && e.data.size > 0) audioChunks.push(e.data);
         };
         mediaRecorder.onstop = async () => {
+          teardownVad();
           if (micStream) {
             micStream.getTracks().forEach(t => t.stop());
             micStream = null;
@@ -1239,6 +1513,7 @@ export const CHAT_HTML = `<!DOCTYPE html>
               setMicState('idle');
               return;
             }
+            const sttStart = Date.now();
             const resp = await fetch('/transcribe', {
               method: 'POST',
               headers: { 'Content-Type': recMime },
@@ -1250,30 +1525,37 @@ export const CHAT_HTML = `<!DOCTYPE html>
               throw new Error('HTTP ' + resp.status + (detail ? ' — ' + detail : ''));
             }
             const data = await resp.json();
+            const sttMs = typeof data.stt_ms === 'number' ? data.stt_ms : (Date.now() - sttStart);
             const text = (data.text || '').trim();
             if (text) {
+              // Never focus the input on a voice turn: set both refocus
+              // guards before the request goes out.
+              suppressRefocus = true;
+              lastSendWasVoice = true;
               input.value = text;
               input.style.height = 'auto';
-              send();
+              setMicState('idle');
+              send({ source: 'voice', sttMs });
+              return;
             } else {
               addMsg('error', 'No speech detected.');
             }
           } catch (err) {
             addMsg('error', 'Voice input failed: ' + err.message);
           } finally {
-            setMicState('idle');
+            if (micBtn.getAttribute('data-state') === 'processing') setMicState('idle');
           }
         };
         mediaRecorder.start();
         setMicState('recording');
+        startVad(micStream);
       } catch (err) {
+        teardownVad();
         addMsg('error', 'Mic access denied: ' + err.message);
         setMicState('idle');
       }
     } else if (state === 'recording') {
-      if (mediaRecorder && mediaRecorder.state === 'recording') {
-        mediaRecorder.stop();
-      }
+      stopRecording();
     }
     // 'processing' — button disabled, no-op
   });

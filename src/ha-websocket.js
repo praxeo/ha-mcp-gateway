@@ -3090,7 +3090,11 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
       model: cfg.model,
       messages: HAWebSocketV29.sanitizeMessagesForLLM(messages),
       max_tokens: maxTokens,
-      temperature: jsonMode ? 0.3 : 0.4
+      // The native tool loop (callLLMWithTools) runs at 0. This legacy path
+      // backs the iteration-ceiling synthesis, where the job is to restate
+      // tool results faithfully, not to be creative — so it sits near 0 too.
+      // DO-side: takes effect on the next isolate refresh (class rename).
+      temperature: jsonMode ? 0.1 : 0.1
     };
     // Reasoning control per the resolved config (thinking / effort / none).
     // Fireworks rejects thinking + reasoning_effort together; applyReasoningToBody
