@@ -12,6 +12,7 @@ import {
   stripProviderInternals,
   effortForTier
 } from "./llm-providers.js";
+import { trimChatHistory, byteLength, DO_VALUE_LIMIT_BYTES } from "./chat-history.js";
 import { buildStaticChatSystemPrompt, renderDynamicContext } from "./chat-prompt.js";
 import {
   fnv1aHex,
@@ -81,7 +82,7 @@ function coalesceServiceData(args, nestedKey) {
 //   1. DO storage override  — set live via the /llm_config route (no deploy)
 //   2. env vars             — LLM_ENDPOINT / LLM_MODEL / LLM_REASONING_MODE /
 //                             LLM_REASONING_EFFORT (picked up by a fresh isolate)
-//   3. baked-in defaults    — HAWebSocketV30._defaultLLMConfig()
+//   3. baked-in defaults    — HAWebSocketV31._defaultLLMConfig()
 // These helpers are pure and module-level for unit testing; keep the stub in
 // test/llm-config.test.js in sync.
 // ===========================================================================
@@ -220,7 +221,7 @@ function sanitizeLLMConfigPatch(patch) {
   return { value: out };
 }
 
-export class HAWebSocketV30 {
+export class HAWebSocketV31 {
   // Static config for prioritized entity context building
   static CONTEXT_DOMAIN_PRIORITY = [
     "alarm_control_panel", "climate", "lock", "cover", "binary_sensor",
@@ -288,12 +289,12 @@ export class HAWebSocketV30 {
   // source of truth for the defaults.
   static _defaultLLMConfig() {
     return {
-      endpoint: HAWebSocketV30.LLM_ENDPOINT,
-      model: HAWebSocketV30.LLM_MODEL,
-      provider: HAWebSocketV30.LLM_PROVIDER,
-      api: HAWebSocketV30.LLM_API,
-      reasoning_mode: HAWebSocketV30.LLM_REASONING_MODE,
-      reasoning_effort: HAWebSocketV30.LLM_REASONING_EFFORT
+      endpoint: HAWebSocketV31.LLM_ENDPOINT,
+      model: HAWebSocketV31.LLM_MODEL,
+      provider: HAWebSocketV31.LLM_PROVIDER,
+      api: HAWebSocketV31.LLM_API,
+      reasoning_mode: HAWebSocketV31.LLM_REASONING_MODE,
+      reasoning_effort: HAWebSocketV31.LLM_REASONING_EFFORT
     };
   }
   // Fireworks prompt caching is replica-local. A fixed session-affinity key
@@ -386,7 +387,7 @@ export class HAWebSocketV30 {
     return {
       fired_at_ms: ms,
       fired_at_iso: isoTs,
-      fired_at_central: HAWebSocketV30._formatTimelineTimestamp(isoTs)
+      fired_at_central: HAWebSocketV31._formatTimelineTimestamp(isoTs)
     };
   }
 
@@ -806,7 +807,7 @@ export class HAWebSocketV30 {
       this._llmConfigStored = (await this.state.storage.get("llm_config")) || null;
       this._llmConfigLoaded = true;
     }
-    return resolveLLMConfig(this._llmConfigStored, this.env, HAWebSocketV30._defaultLLMConfig());
+    return resolveLLMConfig(this._llmConfigStored, this.env, HAWebSocketV31._defaultLLMConfig());
   }
 
   // ==========================================================================
@@ -965,12 +966,12 @@ Exception: when the user explicitly says "remember X" or "save a memory" or equi
 
   static climateTriggerMatches(text) {
     if (!text || typeof text !== "string") return false;
-    return HAWebSocketV30.CLIMATE_TRIGGER_RE.test(text);
+    return HAWebSocketV31.CLIMATE_TRIGGER_RE.test(text);
   }
 
   static houseStatusTriggerMatches(text) {
     if (!text || typeof text !== "string") return false;
-    return HAWebSocketV30.HOUSE_STATUS_TRIGGER_RE.test(text);
+    return HAWebSocketV31.HOUSE_STATUS_TRIGGER_RE.test(text);
   }
 
   static _seasonDominant(monthIdx) {
@@ -1068,7 +1069,7 @@ Exception: when the user explicitly says "remember X" or "save a memory" or equi
 
   async _buildClimatePreambleIfNeeded(triggerText, source = "chat") {
     if (this.env.CLIMATE_PREAMBLE_ENABLED === "false") return null;
-    if (!HAWebSocketV30.climateTriggerMatches(triggerText)) return null;
+    if (!HAWebSocketV31.climateTriggerMatches(triggerText)) return null;
     if (!this.connected || !this.authenticated) return null;
 
     const ok = await this._fetchClimateData();
@@ -1080,13 +1081,13 @@ Exception: when the user explicitly says "remember X" or "save a memory" or equi
     const nowStr = nowDate.toLocaleString("en-US", { timeZone: "America/Chicago", timeZoneName: "short" });
     const monthFmt = new Intl.DateTimeFormat("en-US", { timeZone: "America/Chicago", month: "numeric" });
     const monthIdx = parseInt(monthFmt.format(nowDate), 10) - 1;
-    const seasonStr = HAWebSocketV30._seasonDominant(monthIdx);
+    const seasonStr = HAWebSocketV31._seasonDominant(monthIdx);
 
     const tempStr = (w.temperature !== null && w.temperature !== undefined) ? `${w.temperature}°F` : "n/a";
     const condStr = w.state || "unknown";
 
-    const hl = HAWebSocketV30._forecastHighLow(w.forecast);
-    const trend = HAWebSocketV30._forecastTrend(w.forecast);
+    const hl = HAWebSocketV31._forecastHighLow(w.forecast);
+    const trend = HAWebSocketV31._forecastTrend(w.forecast);
     const forecastLine = hl
       ? `Forecast next 12h: high ${hl.high}°F, low ${hl.low}°F, trend ${trend || "stable"}`
       : `Forecast next 12h: unavailable (no forecast attribute)`;
@@ -1125,8 +1126,8 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
 
     if (!this._logInitialized) {
       this.aiLog = await this.loadLogFromStorage();
-      if (this.aiLog.length > HAWebSocketV30.LOG_IN_MEMORY_CAP) {
-        this.aiLog = this.aiLog.slice(-HAWebSocketV30.LOG_IN_MEMORY_CAP);
+      if (this.aiLog.length > HAWebSocketV31.LOG_IN_MEMORY_CAP) {
+        this.aiLog = this.aiLog.slice(-HAWebSocketV31.LOG_IN_MEMORY_CAP);
       }
       this._logInitialized = true;
     }
@@ -1195,7 +1196,7 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
             effective,
             stored_override: this._llmConfigStored || null,
             env_layer: llmConfigFromEnv(this.env),
-            defaults: HAWebSocketV30._defaultLLMConfig()
+            defaults: HAWebSocketV31._defaultLLMConfig()
           }, null, 2), { headers });
         }
 
@@ -1220,7 +1221,7 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
             cfg = resolveLLMConfig(
               { ...(this._llmConfigStored || {}), ...parsed.value },
               this.env,
-              HAWebSocketV30._defaultLLMConfig()
+              HAWebSocketV31._defaultLLMConfig()
             );
           }
           if (!this._apiKeyFor(cfg)) {
@@ -1412,7 +1413,7 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
 
         case "/ai_log": {
           const count = parseInt(url.searchParams.get("count") || "50");
-          if (count > HAWebSocketV30.LOG_IN_MEMORY_CAP) {
+          if (count > HAWebSocketV31.LOG_IN_MEMORY_CAP) {
             const rows = await this._loadAiLogFromD1(count);
             return new Response(JSON.stringify(Array.isArray(rows) ? rows : []), { headers });
           }
@@ -1778,7 +1779,7 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
     if (event.event_type === "automation_triggered" && event.data) {
       const ctx = event.context || {};
       const { fired_at_ms, fired_at_iso, fired_at_central } =
-        HAWebSocketV30._tsFromMs(Date.parse(event.time_fired) || Date.now());
+        HAWebSocketV31._tsFromMs(Date.parse(event.time_fired) || Date.now());
       this._writeAutomationRunToD1({
         automation_id: event.data.entity_id || null,
         automation_name: event.data.name || null,
@@ -1797,7 +1798,7 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
     if (event.event_type === "call_service" && event.data) {
       const ctx = event.context || {};
       const { fired_at_ms, fired_at_iso, fired_at_central } =
-        HAWebSocketV30._tsFromMs(Date.parse(event.time_fired) || Date.now());
+        HAWebSocketV31._tsFromMs(Date.parse(event.time_fired) || Date.now());
       const targets = event.data.service_data ? event.data.service_data.entity_id : null;
       const targetIds = Array.isArray(targets) ? targets.join(",") : (targets || null);
       this._writeServiceCallToD1({
@@ -1836,7 +1837,7 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
       // every real transition lands in the state_changes table.
       if (newState && oldState && newState.state !== oldState.state) {
         const { fired_at_ms, fired_at_iso, fired_at_central } =
-          HAWebSocketV30._tsFromMs(
+          HAWebSocketV31._tsFromMs(
             Date.parse(newState.last_changed || newState.last_updated) || Date.now()
           );
         this._touchLastEventSeen(fired_at_ms);
@@ -1915,25 +1916,25 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
     const out = [];
     for (const [id, s] of this.stateCache) {
       const domain = id.split(".")[0];
-      if (!HAWebSocketV30.SNAPSHOT_DOMAIN_ALLOWLIST.has(domain)) continue;
+      if (!HAWebSocketV31.SNAPSHOT_DOMAIN_ALLOWLIST.has(domain)) continue;
       if (s.state === "unavailable" || s.state === "unknown") continue;
       if (domain === "switch" && isNoisySwitch(id)) continue;
 
       const attrs = s.attributes || {};
       if (domain === "sensor") {
         const deviceClass = attrs.device_class || "";
-        if (HAWebSocketV30.SENSOR_WHITELIST.has(deviceClass)) {
+        if (HAWebSocketV31.SENSOR_WHITELIST.has(deviceClass)) {
           // keep
         } else if (deviceClass === "battery") {
           const pct = parseFloat(s.state);
-          if (isNaN(pct) || pct > HAWebSocketV30.BATTERY_LOW_THRESHOLD) continue;
+          if (isNaN(pct) || pct > HAWebSocketV31.BATTERY_LOW_THRESHOLD) continue;
         } else {
           continue;
         }
       }
 
       const filteredAttrs = {};
-      for (const k of HAWebSocketV30.SNAPSHOT_ATTR_ALLOWLIST) {
+      for (const k of HAWebSocketV31.SNAPSHOT_ATTR_ALLOWLIST) {
         if (attrs[k] !== undefined) {
           filteredAttrs[k] = attrs[k];
         }
@@ -2273,7 +2274,7 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
           attributes_json: this._shouldStoreAttributes(entityId) ? JSON.stringify(curr.attributes || {}) : null,
           fired_at_ms: tsMs,
           fired_at_iso: new Date(tsMs).toISOString(),
-          fired_at_central: HAWebSocketV30._formatTimelineTimestamp(new Date(tsMs).toISOString()),
+          fired_at_central: HAWebSocketV31._formatTimelineTimestamp(new Date(tsMs).toISOString()),
           context_id: null,
           context_parent_id: null,
           context_user_id: null,
@@ -2823,7 +2824,7 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
       if (done) return;
       await this.state.storage.delete("ai_log").catch(() => {});
       await this.state.storage.delete("ai_log_head").catch(() => {});
-      for (let i = 0; i < HAWebSocketV30.LOG_CHUNKS_MAX; i++) {
+      for (let i = 0; i < HAWebSocketV31.LOG_CHUNKS_MAX; i++) {
         await this.state.storage.delete("ai_log_chunk_" + i).catch(() => {});
         await this.state.storage.delete("ai_log_chunk_gen_" + i).catch(() => {});
       }
@@ -2857,8 +2858,8 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
         data: { original_type: entry.type, original_ts: entry.timestamp },
         timestamp: new Date().toISOString(),
       });
-      if (this.aiLog.length > HAWebSocketV30.LOG_IN_MEMORY_CAP) {
-        this.aiLog.splice(0, this.aiLog.length - HAWebSocketV30.LOG_IN_MEMORY_CAP);
+      if (this.aiLog.length > HAWebSocketV31.LOG_IN_MEMORY_CAP) {
+        this.aiLog.splice(0, this.aiLog.length - HAWebSocketV31.LOG_IN_MEMORY_CAP);
       }
     }
   }
@@ -3229,9 +3230,9 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
   static _normalizePerf(perf) {
     const p = perf || {};
     return {
-      server_ttft_ms: HAWebSocketV30._parsePerfMs(p["fireworks-server-time-to-first-token"]),
-      server_total_ms: HAWebSocketV30._parsePerfMs(p["fireworks-server-processing-time"]),
-      perf_cached_tokens: HAWebSocketV30._parseIntOrNull(p["fireworks-cached-prompt-tokens"])
+      server_ttft_ms: HAWebSocketV31._parsePerfMs(p["fireworks-server-time-to-first-token"]),
+      server_total_ms: HAWebSocketV31._parsePerfMs(p["fireworks-server-processing-time"]),
+      perf_cached_tokens: HAWebSocketV31._parseIntOrNull(p["fireworks-cached-prompt-tokens"])
     };
   }
 
@@ -3269,7 +3270,7 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
       : cfg.endpoint;
     const body = {
       model: cfg.model,
-      messages: HAWebSocketV30.sanitizeMessagesForLLM(messages),
+      messages: HAWebSocketV31.sanitizeMessagesForLLM(messages),
       max_tokens: maxTokens,
       // The native tool loop (callLLMWithTools) runs at 0. This legacy path
       // backs the iteration-ceiling synthesis, where the job is to restate
@@ -3289,7 +3290,7 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
       "Authorization": `Bearer ${apiKey}`
     };
     if (cfg.provider === "fireworks") {
-      _headers["x-session-affinity"] = HAWebSocketV30.SESSION_AFFINITY_KEY;
+      _headers["x-session-affinity"] = HAWebSocketV31.SESSION_AFFINITY_KEY;
     }
     const response = await fetch(endpoint, {
       method: "POST",
@@ -3301,7 +3302,7 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
       throw new Error(`${label} API ${response.status}: ${errText.substring(0, 200)}`);
     }
     const data = await response.json();
-    data._perf = HAWebSocketV30._extractPerfHeaders(response.headers);
+    data._perf = HAWebSocketV31._extractPerfHeaders(response.headers);
     const msg = data.choices?.[0]?.message;
     if (msg) {
       let text = (msg.content || "").replace(/<think>[\s\S]*?<\/think>/g, "").trim();
@@ -3321,7 +3322,7 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
   // retained so existing call sites (await this.persistLog()) keep resolving.
   // ==========================================================================
   async loadLogFromStorage() {
-    const fromD1 = await this._loadAiLogFromD1(HAWebSocketV30.LOG_IN_MEMORY_CAP);
+    const fromD1 = await this._loadAiLogFromD1(HAWebSocketV31.LOG_IN_MEMORY_CAP);
     return Array.isArray(fromD1) ? fromD1 : [];
   }
 
@@ -3333,7 +3334,7 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
 
   async clearPersistedLog() {
     await this.state.storage.delete("ai_log").catch(() => {});
-    for (let i = 0; i < HAWebSocketV30.LOG_CHUNKS_MAX; i++) {
+    for (let i = 0; i < HAWebSocketV31.LOG_CHUNKS_MAX; i++) {
       await this.state.storage.delete("ai_log_chunk_" + i).catch(() => {});
       await this.state.storage.delete("ai_log_chunk_gen_" + i).catch(() => {});
     }
@@ -3353,8 +3354,8 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
     const entry = { type, message, data, timestamp: new Date().toISOString() };
     if (source) entry.source = source;
     this.aiLog.push(entry);
-    if (this.aiLog.length > HAWebSocketV30.LOG_IN_MEMORY_CAP) {
-      this.aiLog.splice(0, this.aiLog.length - HAWebSocketV30.LOG_IN_MEMORY_CAP);
+    if (this.aiLog.length > HAWebSocketV31.LOG_IN_MEMORY_CAP) {
+      this.aiLog.splice(0, this.aiLog.length - HAWebSocketV31.LOG_IN_MEMORY_CAP);
     }
     console.log("AI LOG [" + type + (source ? "/" + source : "") + "]:", message);
     this.persistLog().catch((err) => console.error("logAI persist:", err.message));
@@ -3388,7 +3389,7 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
     const timeline = persistentLog
       .filter((e) => ["chat_user", "chat_reply", "action", "action_verified", "notification", "decision", "state_change", "memory_saved", "observation_saved"].includes(e.type))
       .slice(-150)
-      .map((e) => `[${HAWebSocketV30._formatTimelineTimestamp(e.timestamp)}] ${e.type}: ${e.message}`)
+      .map((e) => `[${HAWebSocketV31._formatTimelineTimestamp(e.timestamp)}] ${e.type}: ${e.message}`)
       .join("\n");
 
     // ---- Entity context snapshot ----
@@ -3400,7 +3401,7 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
       if (domain === "switch" && isNoisySwitch(id)) continue;
       if (state.state === "unavailable" || state.state === "unknown") continue;
 
-      if (HAWebSocketV30.CONTEXT_DOMAIN_PRIORITY.includes(domain)) {
+      if (HAWebSocketV31.CONTEXT_DOMAIN_PRIORITY.includes(domain)) {
         const entry = { entity_id: id, friendly_name: attr.friendly_name || id, state: state.state };
         if (domain === "climate") {
           entry.setpoint = attr.temperature ?? null;
@@ -3427,11 +3428,11 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
         byDomain.get(domain).push(entry);
       } else if (domain === "sensor") {
         let include = false;
-        if (HAWebSocketV30.SENSOR_WHITELIST.has(deviceClass)) {
+        if (HAWebSocketV31.SENSOR_WHITELIST.has(deviceClass)) {
           include = true;
         } else if (deviceClass === "battery") {
           const pct = parseFloat(state.state);
-          include = !isNaN(pct) && pct <= HAWebSocketV30.BATTERY_LOW_THRESHOLD;
+          include = !isNaN(pct) && pct <= HAWebSocketV31.BATTERY_LOW_THRESHOLD;
         }
         if (include) {
           const entry = { entity_id: id, friendly_name: attr.friendly_name || id, state: state.state, device_class: deviceClass, unit: attr.unit_of_measurement || null };
@@ -3443,16 +3444,16 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
 
     const contextEntities = [];
     let sensorCount = 0;
-    for (const domain of [...HAWebSocketV30.CONTEXT_DOMAIN_PRIORITY, "sensor"]) {
+    for (const domain of [...HAWebSocketV31.CONTEXT_DOMAIN_PRIORITY, "sensor"]) {
       for (const entry of (byDomain.get(domain) || [])) {
-        if (contextEntities.length >= HAWebSocketV30.MAX_CONTEXT_ENTITIES) break;
+        if (contextEntities.length >= HAWebSocketV31.MAX_CONTEXT_ENTITIES) break;
         if (domain === "sensor") {
-          if (sensorCount >= HAWebSocketV30.MAX_SENSOR_CONTEXT) break;
+          if (sensorCount >= HAWebSocketV31.MAX_SENSOR_CONTEXT) break;
           sensorCount++;
         }
         contextEntities.push(entry);
       }
-      if (contextEntities.length >= HAWebSocketV30.MAX_CONTEXT_ENTITIES) break;
+      if (contextEntities.length >= HAWebSocketV31.MAX_CONTEXT_ENTITIES) break;
     }
 
     // ---- System prompt ----
@@ -3536,11 +3537,11 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
       let responseText = response.choices?.[0]?.message?.content || response.response || "";
       if (!responseText) {
         const rawReasoning = response.choices?.[0]?.message?.reasoning || "";
-        const jsonFallback = HAWebSocketV30.extractFirstJSON(rawReasoning);
+        const jsonFallback = HAWebSocketV31.extractFirstJSON(rawReasoning);
         if (jsonFallback) responseText = jsonFallback;
       }
       let parsed = null;
-      const jsonMatch = HAWebSocketV30.extractFirstJSON(responseText);
+      const jsonMatch = HAWebSocketV31.extractFirstJSON(responseText);
       if (jsonMatch) {
         try {
           parsed = JSON.parse(jsonMatch);
@@ -4540,6 +4541,46 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
   //
   // Returns the raw API response with the assistant message UNMUTATED.
   // ========================================================================
+  // Persist a chat history value, trimmed so it fits the DO's 131072-byte
+  // per-value limit. The reply has already been delivered by the time this
+  // runs, so a failure here is invisible to the user and only shows up as the
+  // agent having forgotten the conversation on the NEXT turn — which is
+  // exactly how this went unnoticed for a while. Hence: trim first, verify the
+  // size, and keep a degraded fallback rather than letting the write throw.
+  async _persistChatHistory(key, messages) {
+    let trimmed;
+    try {
+      trimmed = trimChatHistory(messages);
+    } catch (err) {
+      this.logAI("history_trim_error", err.message, { key }, "chat_history");
+      trimmed = [];
+    }
+    try {
+      await this.state.storage.put(key, trimmed);
+      return trimmed;
+    } catch (err) {
+      // Salvage the current exchange rather than losing the thread entirely.
+      const lastUser = trimmed.map((m) => m.role).lastIndexOf("user");
+      const salvage = trimChatHistory(
+        lastUser === -1 ? trimmed.slice(-2) : trimmed.slice(lastUser),
+        { maxTurns: 1, byteBudget: 16000 }
+      );
+      this.logAI(
+        "history_put_failed",
+        `${err.message} | bytes=${byteLength(trimmed)} limit=${DO_VALUE_LIMIT_BYTES} → salvaged ${salvage.length} msgs`,
+        { key, messages: trimmed.length, bytes: byteLength(trimmed), salvaged: salvage.length },
+        "chat_history"
+      );
+      try {
+        await this.state.storage.put(key, salvage);
+        return salvage;
+      } catch (err2) {
+        this.logAI("history_put_failed_final", err2.message, { key }, "chat_history");
+        return null;
+      }
+    }
+  }
+
   // Resolve the API key for whichever provider the config selects. Returns
   // null when the key isn't configured, so callers can fail with a message
   // naming the missing secret rather than a bare 401 from the provider.
@@ -4558,7 +4599,7 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
     const apiKey = this._apiKeyFor(cfg);
     if (!apiKey) throw new Error(`${label}: ${cfg.api_key_env} not configured`);
 
-    const clean = HAWebSocketV30.sanitizeMessagesForLLM(messages);
+    const clean = HAWebSocketV31.sanitizeMessagesForLLM(messages);
     const isResponses = cfg.api === "responses";
 
     let body;
@@ -4573,8 +4614,8 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
         tools,
         maxTokens,
         effort: effortOverride || baseEffort,
-        summary: HAWebSocketV30.LLM_REASONING_SUMMARY,
-        cacheKey: HAWebSocketV30.SESSION_AFFINITY_KEY
+        summary: HAWebSocketV31.LLM_REASONING_SUMMARY,
+        cacheKey: HAWebSocketV31.SESSION_AFFINITY_KEY
       });
     } else {
       body = {
@@ -4600,7 +4641,7 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
     // Replica pinning is a Fireworks routing hint for its prompt cache; it is
     // meaningless elsewhere, so don't send it to other providers.
     if (cfg.provider === "fireworks") {
-      headers["x-session-affinity"] = HAWebSocketV30.SESSION_AFFINITY_KEY;
+      headers["x-session-affinity"] = HAWebSocketV31.SESSION_AFFINITY_KEY;
     }
 
     const controller = new AbortController();
@@ -4618,7 +4659,7 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
       }
       const raw = await response.json();
       const data = isResponses ? responsesToChatCompletion(raw) : raw;
-      data._perf = HAWebSocketV30._extractPerfHeaders(response.headers);
+      data._perf = HAWebSocketV31._extractPerfHeaders(response.headers);
       return data;
     } catch (err) {
       if (err.name === "AbortError") {
@@ -4761,7 +4802,7 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
           completion_tokens: _usage.completion_tokens || 0,
           cached_tokens: _cached,
           perf: _perf,
-          ...HAWebSocketV30._normalizePerf(_perf)
+          ...HAWebSocketV31._normalizePerf(_perf)
         });
         safeEmit({ type: "reply", text: cleaned });
         return {
@@ -4818,7 +4859,7 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
         completion_tokens: _usage.completion_tokens || 0,
         cached_tokens: _cached,
         perf: _perf,
-        ...HAWebSocketV30._normalizePerf(_perf)
+        ...HAWebSocketV31._normalizePerf(_perf)
       });
       for (const n of _toolNames) _meta.tool_calls_log.push({ name: n, iter });
 
@@ -4915,7 +4956,7 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
         completion_tokens: _synthUsage.completion_tokens || 0,
         cached_tokens: _synthCached,
         perf: _synthPerf,
-        ...HAWebSocketV30._normalizePerf(_synthPerf),
+        ...HAWebSocketV31._normalizePerf(_synthPerf),
         synthesis: true
       });
       const finalMsg = finalResp.choices?.[0]?.message;
@@ -5064,7 +5105,7 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
       if (domain === "switch" && isNoisySwitch(id)) continue;
       if (state.state === "unavailable" || state.state === "unknown") continue;
 
-      if (HAWebSocketV30.CONTEXT_DOMAIN_PRIORITY.includes(domain)) {
+      if (HAWebSocketV31.CONTEXT_DOMAIN_PRIORITY.includes(domain)) {
         const entry = { entity_id: id, friendly_name: attr.friendly_name || id, state: state.state };
         if (domain === "climate") {
           entry.setpoint = attr.temperature ?? null;
@@ -5091,11 +5132,11 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
         byDomain.get(domain).push(entry);
       } else if (domain === "sensor") {
         let include = false;
-        if (HAWebSocketV30.SENSOR_WHITELIST.has(deviceClass)) {
+        if (HAWebSocketV31.SENSOR_WHITELIST.has(deviceClass)) {
           include = true;
         } else if (deviceClass === "battery") {
           const pct = parseFloat(state.state);
-          include = !isNaN(pct) && pct <= HAWebSocketV30.BATTERY_LOW_THRESHOLD;
+          include = !isNaN(pct) && pct <= HAWebSocketV31.BATTERY_LOW_THRESHOLD;
         }
         if (include) {
           const entry = { entity_id: id, friendly_name: attr.friendly_name || id, state: state.state, device_class: deviceClass, unit: attr.unit_of_measurement || null };
@@ -5107,16 +5148,16 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
 
     const contextEntities = [];
     let sensorCount = 0;
-    for (const domain of [...HAWebSocketV30.CONTEXT_DOMAIN_PRIORITY, "sensor"]) {
+    for (const domain of [...HAWebSocketV31.CONTEXT_DOMAIN_PRIORITY, "sensor"]) {
       for (const entry of (byDomain.get(domain) || [])) {
-        if (contextEntities.length >= HAWebSocketV30.MAX_CONTEXT_ENTITIES) break;
+        if (contextEntities.length >= HAWebSocketV31.MAX_CONTEXT_ENTITIES) break;
         if (domain === "sensor") {
-          if (sensorCount >= HAWebSocketV30.MAX_SENSOR_CONTEXT) break;
+          if (sensorCount >= HAWebSocketV31.MAX_SENSOR_CONTEXT) break;
           sensorCount++;
         }
         contextEntities.push(entry);
       }
-      if (contextEntities.length >= HAWebSocketV30.MAX_CONTEXT_ENTITIES) break;
+      if (contextEntities.length >= HAWebSocketV31.MAX_CONTEXT_ENTITIES) break;
     }
     return contextEntities;
   }
@@ -5137,7 +5178,7 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
         return isNaN(t) ? true : t >= cutoff;
       })
       .slice(-15)
-      .map((e) => `[${HAWebSocketV30._formatTimelineTimestamp(e.timestamp)}] ${e.type}${e.source ? "/" + e.source : ""}: ${e.message}`)
+      .map((e) => `[${HAWebSocketV31._formatTimelineTimestamp(e.timestamp)}] ${e.type}${e.source ? "/" + e.source : ""}: ${e.message}`)
       .join("\n");
   }
 
@@ -5175,7 +5216,7 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
     );
     const includeSnapshot =
       !message ||
-      HAWebSocketV30.houseStatusTriggerMatches(message) ||
+      HAWebSocketV31.houseStatusTriggerMatches(message) ||
       highConfidenceEntities.length === 0;
     const snapshot = includeSnapshot ? this._buildHouseStateSnapshot() : "";
     // Only surface gateway health when something is wrong.
@@ -5240,22 +5281,7 @@ ${JSON.stringify({
           { role: "user", content: `[${from}]: ${message}` },
           { role: "assistant", content: fastResult.reply }
         ];
-        // V21: 8 → 6 (prompt trim). V10 found 6 was the edge for 5+ turn
-        // debugging sessions, so 6 is the accepted floor — 5 was rejected
-        // as too aggressive. Covers the 2-3 typical follow-up depth.
-        const MAX_TURNS = 6;
-        const fpUserIdxs = [];
-        for (let i = 0; i < fpNext.length; i++) {
-          if (fpNext[i].role === "user") fpUserIdxs.push(i);
-        }
-        if (fpUserIdxs.length > MAX_TURNS) {
-          fpNext.splice(0, fpUserIdxs[fpUserIdxs.length - MAX_TURNS]);
-        }
-        const HISTORY_BYTE_CAP = 110000;
-        while (fpNext.length > 2 && JSON.stringify(fpNext).length > HISTORY_BYTE_CAP) {
-          fpNext.shift();
-        }
-        await this.state.storage.put(fpHistoryKey, fpNext);
+        await this._persistChatHistory(fpHistoryKey, fpNext);
       } catch (_) {}
       {
         const fpTotal = Date.now() - _t0;
@@ -5439,18 +5465,12 @@ ${JSON.stringify({
       const reply = result.reply && result.reply.trim() || "Done.";
       this.logAI("chat_reply", reply.substring(0, 300), { from, full_reply: reply, channel: channelKey }, "native_loop");
 
-      const TOOL_CONTENT_CAP = 4000;
-      const loopAdditions = result.messages.slice(1 + oldHistoryLen + 1).map((m) => {
-        if (m.role === "tool" && typeof m.content === "string" && m.content.length > TOOL_CONTENT_CAP) {
-          return { ...m, content: m.content.substring(0, TOOL_CONTENT_CAP) + "…[truncated]" };
-        }
-        // Drop encrypted reasoning blobs before persisting: they are large,
-        // only meaningful within the turn that produced them, and bound to the
-        // provider that issued them — keeping them would bloat every later
-        // prompt and break a mid-conversation provider switch.
-        if (m.role === "assistant") return stripProviderInternals(m);
-        return m;
-      });
+      // Content caps and the reasoning strip both happen in trimChatHistory
+      // now; this pass only drops the provider-bound replay blobs, which must
+      // not survive into the array that gets reused.
+      const loopAdditions = result.messages.slice(1 + oldHistoryLen + 1).map((m) => (
+        m.role === "assistant" ? stripProviderInternals(m) : m
+      ));
       while (loopAdditions.length > 0) {
         const last = loopAdditions[loopAdditions.length - 1];
         const pendingTools = last.role === "assistant" && Array.isArray(last.tool_calls) && last.tool_calls.length > 0;
@@ -5468,20 +5488,7 @@ ${JSON.stringify({
         { role: "user", content: `[${from}]: ${message}` },
         ...loopAdditions
       ];
-      // V10: see fast-path note above.
-      const MAX_TURNS = 8;
-      const userIdxs = [];
-      for (let i = 0; i < nextHistory.length; i++) {
-        if (nextHistory[i].role === "user") userIdxs.push(i);
-      }
-      if (userIdxs.length > MAX_TURNS) {
-        nextHistory.splice(0, userIdxs[userIdxs.length - MAX_TURNS]);
-      }
-      const HISTORY_BYTE_CAP = 110000;
-      while (nextHistory.length > 2 && JSON.stringify(nextHistory).length > HISTORY_BYTE_CAP) {
-        nextHistory.shift();
-      }
-      await this.state.storage.put(historyKey, nextHistory);
+      await this._persistChatHistory(historyKey, nextHistory);
       this.logAI(
         "chat",
         `done | exec=${result.actions_taken.length} iter=${result.iterations}${result.error ? " err=" + result.error : ""}`,

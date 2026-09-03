@@ -51,7 +51,7 @@ binding = "CF_VERSION_METADATA"
 
 [[durable_objects.bindings]]
 name = "HA_WS"
-class_name = "HAWebSocketV30"
+class_name = "HAWebSocketV31"
 
 [[migrations]]
 tag = "v1"
@@ -460,6 +460,24 @@ renamed_classes = [
 tag = "v30"
 renamed_classes = [
   { from = "HAWebSocketV29", to = "HAWebSocketV30" }
+]
+
+# v31 — chat-history trimming fix. DO storage rejects any value over 131072
+# bytes; the old trimmer measured JSON.stringify().length (UTF-16 units, not
+# bytes), only capped `tool` messages so a large assistant reasoning_content
+# was never trimmed, and stopped shifting at length > 2. Three writes failed on
+# 2026-09-02 at 139-148 KB — the reply was delivered but history was not saved,
+# so the next turn silently lost the thread. Trimming now happens in
+# src/chat-history.js: real byte accounting, per-message caps, reasoning
+# stripped from persisted turns, and trimming at whole-turn boundaries so a
+# tool result is never orphaned from the call it answers (which the Responses
+# API rejects outright). Both the fast path and the LLM path now share one
+# trimmer and one MAX_TURNS, having previously used 6 and 8 on the same key.
+# DO-side code, so this rename forces a fresh isolate. Storage preserved.
+[[migrations]]
+tag = "v31"
+renamed_classes = [
+  { from = "HAWebSocketV30", to = "HAWebSocketV31" }
 ]
 
 # Two cron triggers:
