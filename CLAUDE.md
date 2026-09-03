@@ -41,9 +41,9 @@ Windows**.
 
 ```powershell
 npm install          # dependencies (only devDependency is vitest)
-npm test             # vitest run — 8 suites (forensic filter, light sanitizer,
+npm test             # vitest run — 9 suites (forensic filter, light sanitizer,
                      #   scheduler, fast path, coalesce, llm-config,
-                     #   llm-providers, speech-shaping)
+                     #   llm-providers, speech-shaping, chat-history)
 ```
 
 - **Deploy is git-driven.** A push to `main` triggers a **Cloudflare Workers
@@ -59,12 +59,13 @@ npm test             # vitest run — 8 suites (forensic filter, light sanitizer
   overwritten on every build. All source lives in `src/`.
 - A deploy reconciles bindings, cron triggers, and Durable Object migrations
   with Cloudflare.
-- Tests run with `vitest` — 8 suites under `test/` (166 cases): the forensic
+- Tests run with `vitest` — 9 suites under `test/` (207 cases): the forensic
   noise filter (`should-log-state-change`), the light-service sanitizer, the
   scheduler, the cover fast path, the flat-arg coalescer, the runtime
   LLM-config helpers (`llm-config`), the provider adapters (`llm-providers` —
   imports the real module, no stub), and the TTS/keyterm helpers
-  (`speech-shaping`). Add tests alongside these when changing pure, testable
+  (`speech-shaping`), and the persisted-history trimmer (`chat-history` —
+  also imports the real module). Add tests alongside these when changing pure, testable
   logic; the stubbed helpers keep a synced copy in their test — when you change
   one of those functions, update its stub in the same commit or the suite is
   testing code that no longer exists.
@@ -80,13 +81,13 @@ npm test             # vitest run — 8 suites (forensic filter, light sanitizer
    (`src/ha-websocket.js`) do not.** To force a fresh DO isolate you must rename
    the DO class via a `renamed_classes` migration in `wrangler.toml` and update
    `class_name` in the `durable_objects.bindings`. The class is currently
-   `HAWebSocketV30` — it has been renamed 29 times for exactly this reason.
+   `HAWebSocketV31` — it has been renamed 30 times for exactly this reason.
    Procedure for any DO-side change you need live:
-   - bump the class name (`HAWebSocketV30` → `HAWebSocketV31`) in the `export
-     class` line in `src/ha-websocket.js`, every `HAWebSocketV30.` static
+   - bump the class name (`HAWebSocketV31` → `HAWebSocketV32`) in the `export
+     class` line in `src/ha-websocket.js`, every `HAWebSocketV31.` static
      reference, the `export {}` at the file end, and the `worker.js` import;
-   - add a `[[migrations]]` block with `tag = "v31"` and
-     `renamed_classes = [{ from = "HAWebSocketV30", to = "HAWebSocketV31" }]`;
+   - add a `[[migrations]]` block with `tag = "v32"` and
+     `renamed_classes = [{ from = "HAWebSocketV31", to = "HAWebSocketV32" }]`;
    - update `class_name` in `[[durable_objects.bindings]]`.
    **Exception — the LLM config is now runtime-configurable** (V29, extended
    in V30 to the provider and wire format): the chat/
@@ -156,7 +157,7 @@ Cloudflare Worker  (src/worker.js)
    │   CHAT_HTML UI, ElevenLabs STT proxy, multi-kind knowledge backfill,
    │   scheduled() cron handler
    ▼
-Durable Object  HAWebSocketV30  (src/ha-websocket.js)
+Durable Object  HAWebSocketV31  (src/ha-websocket.js)
    │   singleton "ha-websocket-singleton" — persistent HA WebSocket,
    │   in-memory stateCache, hibernation snapshot, chat tool loop,
    │   cover fast path, forensic D1 writers, reconnect backfill
@@ -182,7 +183,8 @@ addresses the same instance by the fixed name `ha-websocket-singleton`.
 | Path | Role |
 |---|---|
 | `src/worker.js` | Worker entry. MCP handler (`TOOLS` — 82 entries — + `handleTool` dispatch, `getAgentToolset`, `DANGEROUS_TOOLS`), HTTP routes, embedded `CHAT_HTML`, ElevenLabs STT proxy, KV cache helpers, per-kind `build*Docs`, `backfillKnowledge`, `scheduled()` cron handler. |
-| `src/ha-websocket.js` | The Durable Object class `HAWebSocketV30`. Persistent HA WS, `stateCache`, chat path (`chatWithAgentNative`), native tool loop (`runNativeToolLoop`), tool dispatch (`executeNativeTool`), action executor (`executeAIAction`), prompt builders, fast path, forensic D1 writers, reconnect backfill, `alarm()` keepalive. `_sanitizeLightServiceData` strips unsupported color descriptors from `light.turn_on` / `light.toggle` calls before they reach HA. ~6000 lines — the bulk of the system. |
+| `src/ha-websocket.js` | The Durable Object class `HAWebSocketV31`. Persistent HA WS, `stateCache`, chat path (`chatWithAgentNative`), native tool loop (`runNativeToolLoop`), tool dispatch (`executeNativeTool`), action executor (`executeAIAction`), prompt builders, fast path, forensic D1 writers, reconnect backfill, `alarm()` keepalive. `_sanitizeLightServiceData` strips unsupported color descriptors from `light.turn_on` / `light.toggle` calls before they reach HA. ~6000 lines — the bulk of the system. |
+| `src/chat-history.js` | Persisted-history trimming (V31). Real byte accounting against the DO's 131072-byte per-value limit, per-message caps, reasoning stripped from stored turns, and trimming at whole-turn boundaries so a tool result is never orphaned from its call. Both save paths go through `trimChatHistory`. Pure and unit-tested. |
 | `src/llm-providers.js` | Provider adapters (V30). `LLM_PROVIDERS` (fireworks/meta), endpoint derivation, per-provider effort clamping, and the Chat-Completions ↔ Responses-API translation (`chatMessagesToResponsesInput`, `buildResponsesBody`, `responsesToChatCompletion`). Pure and unit-tested. |
 | `src/agent-tools.js` | OpenAI-format tool schemas for the chat agent: `NATIVE_AGENT_TOOLS` (19 = 6 action + 13 read), `CHAT_ALLOWED_TOOL_NAMES`, `NATIVE_ACTION_TOOL_NAMES`. |
 | `src/vectorize-schema.js` | Shared Vectorize schema + helpers: `vectorIdFor`, `topicTagFor`, `fnv1aHex`, per-kind embed-text builders, `isNoisyEntity` / `isNoisySwitch` / `isNoisyService`, `buildMetadata`. Imported by both `worker.js` and `ha-websocket.js`. |
@@ -321,7 +323,7 @@ pure) with three layers, highest precedence first:
 2. **env vars** — `LLM_ENDPOINT` / `LLM_MODEL` / `LLM_PROVIDER` / `LLM_API` /
    `LLM_REASONING_MODE` / `LLM_REASONING_EFFORT` (a fresh isolate picks these up).
 3. **baked-in defaults** — the static class constants in `src/ha-websocket.js`,
-   exposed via `HAWebSocketV30._defaultLLMConfig()`:
+   exposed via `HAWebSocketV31._defaultLLMConfig()`:
 
 ```js
 static LLM_ENDPOINT = "https://api.meta.ai/v1/responses";
@@ -424,7 +426,7 @@ touching the adapter.
 
 ## Bindings, secrets, and flags
 
-**Bindings** (`wrangler.toml`): `HA_WS` (DO `HAWebSocketV30`), `HA_CACHE` (KV),
+**Bindings** (`wrangler.toml`): `HA_WS` (DO `HAWebSocketV31`), `HA_CACHE` (KV),
 `KNOWLEDGE` (Vectorize `ha-knowledge`), `AI` (Workers AI), `DB` (D1 `ha_db`),
 `CF_VERSION_METADATA`.
 

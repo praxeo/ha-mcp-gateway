@@ -1,4 +1,4 @@
-import { HAWebSocketV30 } from "./ha-websocket.js";
+import { HAWebSocketV31 } from "./ha-websocket.js";
 import { CHAT_HTML } from "./chat-ui.html.js";
 import {
   ALL_KINDS,
@@ -3513,6 +3513,6 @@ var worker_default = {
   }
 };
 export {
-  HAWebSocketV30,
+  HAWebSocketV31,
   worker_default as default
 };
