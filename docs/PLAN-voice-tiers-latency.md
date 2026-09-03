@@ -1,13 +1,14 @@
 # Plan — faster, more accurate Ranger: two reasoning tiers, Tesla-first voice, GUI
 
-Status: **plan only, nothing implemented.** Written 2026-09-03 against `main`
-at `40444c9`, revised the same day after John's decisions (§0). Every
-file/line reference was checked against that commit. Numbers in §1 come from
+Status: **Phase 0 is built and pushed (§10); Phases 1–2 are still plan only.**
+Written 2026-09-03 against `main` at `40444c9`, revised the same day after
+John's decisions (§0). Every file/line reference was checked against that
+commit, so line numbers predate the Phase 0 diff. Numbers in §1 come from
 the live `ai_log` (`chat_timing_ms` rows, Aug 31 – Sep 3, 2026).
 
 Sections: 0 Decisions · 1 Where the time goes · 2 Latency · 3 Reasoning tiers ·
 4 Accuracy (fewer mistakes) · 5 Voice · 6 GUI · 7 Telemetry & eval ·
-8 Sequencing · 9 Remaining assumptions.
+8 Sequencing · 9 Remaining assumptions · 10 Phase 0 as built.
 
 ---
 
@@ -453,7 +454,7 @@ Worker/UI-side changes go live on push. Group so each phase is one deploy.
 
 | Phase | Scope | Rename? |
 |---|---|---|
-| **0 — Worker + UI, no rename** | **Keyboard-pop fix first** (ship it alone if need be); VAD auto-stop → auto-send; keyterms + STT timing in `/transcribe`; voice-mode toggle (Tesla UA default); "Speak replies" toggle + `/tts` route + ElevenLabs playback + autoplay unlock; Quick/High toggle (sent, ignored until Phase 1); neutral typing indicator; SSE reader de-dup; latency badge; `callLLM` temperatures to 0.1. | no |
+| **0 — Worker + UI, no rename** — **SHIPPED** (see §10) | Keyboard-pop fix; VAD auto-stop → auto-send; keyterms + STT timing in `/transcribe`; "Speak replies" toggle + `/tts` route + ElevenLabs playback + autoplay unlock; Quick/High toggle (sent, ignored until Phase 1); neutral typing indicator; SSE reader de-dup; latency badge; `manifest.json`; `callLLM` temperatures to 0.1. | no |
 | **1 — V30: grammar, tiers, correctness** | Intent grammar classes 1–7 + tests; L5 status fast path; A3 entity pre-flight + alias table; A4 field validation; two tiers + router + escalation + per-request `tier` (web and MCP `ai_chat`); `[voice]` prompt rule; A1 history fix + L6 reasoning strip + MAX_TURNS reconcile; L3 parallel context; L4 short-circuit extension; A5 registry via WS; telemetry fields. | **yes** |
 | **2 — V31: streaming and polish** | L1 streaming deltas; sentence-chunked TTS; status bar + chips; `/admin/latency`; golden-utterance live eval; A7 prompt trims; macros once scripts are confirmed. | **yes** |
 
@@ -470,6 +471,68 @@ questions ~5–6 s spoken; forensic questions unchanged on High.
 1. "Take the temperatures down" is read as sampling temperature. The chat
    loop is already at 0, so the only change is the legacy `callLLM` 0.3/0.4 →
    0.1. If it meant "less reasoning by default", the Quick tier is that.
-2. Voice mode defaults on when the browser identifies as Tesla and is a
-   toggle elsewhere. If you'd rather it be a plain toggle everywhere, that's
-   a one-line change in Phase 0.
+2. Superseded by what shipped — see §10. Phase 0 has no separate voice-mode
+   toggle: keyboard suppression is unconditional on voice sends, and spoken
+   replies are their own toggle.
+
+---
+
+## 10. Phase 0 as built
+
+Shipped as Worker + UI only, so it goes live on push with no Durable Object
+rename. What differs from the plan above, and why:
+
+- **No separate "voice mode" toggle.** The keyboard suppression it was going to
+  gate is now unconditional for voice-originated sends, which is what actually
+  mattered; the `[voice]` prompt rule it was also going to gate is Phase 1
+  work. A toggle that gated nothing would have been a control with no effect.
+  Every request already carries `source: "voice" | "text"`, so Phase 1's prompt
+  rule has its input flowing today.
+- **Keyboard fix, two independent guards** (`src/chat-ui.html.js`):
+  `suppressRefocus` (one-shot, set by mic and button sends) and
+  `lastSendWasVoice` (sticky for the whole turn, so the error and retry paths
+  that also call `refocusInput()` are covered). Each `send()` sets the sticky
+  guard for its own turn, so a later typed send refocuses normally again.
+  Manual taps on the textarea still focus — only programmatic refocus is
+  suppressed.
+- **`/transcribe` keyterms fail open.** The route reads the keyterm list from
+  KV only, never building it inline, so a cold cache costs the voice path
+  nothing. A 4xx while sending keyterms retries once without them: biasing is
+  worth having, but never at the cost of losing the transcription.
+- **`stripForSpeech`** shapes replies before synthesis — markdown, code fences
+  and entity ids out, since "light dot bedside underscore lamp" is unusable
+  aloud. Both sides of an entity id need 3+ characters so ordinary prose
+  ("7 p.m.", "e.g.", "71.5 degrees") is left alone.
+- **Autoplay unlock** spends the mic tap (and the Speak-replies tap) on a
+  silent clip, because the reply arrives long after Chromium's user-activation
+  window closes.
+- **`callLLM` temperature 0.1** is DO-side, so it only takes effect at the V30
+  rename in Phase 1. Noted in a comment at the call site.
+
+Verified in Chromium against the real `CHAT_HTML` with a stub Worker, using a
+fake audio device so the whole mic path ran (`getUserMedia` -> `MediaRecorder`
+-> `/transcribe` -> auto-send -> SSE reply -> `/tts`):
+
+| Check | Result |
+|---|---|
+| Focus after a **voice** send | `document.activeElement` is `BODY`, not the input |
+| Focus after a typed send | input refocused, as before |
+| Focus after a cover-button send | not focused |
+| Typed send following a voice send | input refocused again |
+| Voice turn payload | `{source: "voice", tier: "quick"}` |
+| VAD | AudioContext created while recording, torn down on stop |
+| Spoken replies | `/tts` called once with the shaped reply text |
+| Latency badge | "0.1s / Quick / voice 0.8s" |
+| Page errors | none |
+
+Unit coverage for the new pure helpers is in `test/speech-shaping.test.js`
+(18 cases; suite total 116). The Tesla itself is still the real test for the
+keyboard and for autoplay — that browser is the only one that matters here.
+
+### Operating notes
+
+- `ELEVENLABS_VOICE_ID` is a new optional secret. Unset, `/tts` uses a stock
+  ElevenLabs voice; set it to pick the voice: `wrangler secret put ELEVENLABS_VOICE_ID`.
+- Spoken replies default **off** and persist per browser in `localStorage`.
+- The tier toggle resets to Quick on every page load, by design, and the DO
+  ignores the `tier` field until Phase 1.
