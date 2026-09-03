@@ -98,26 +98,48 @@ npm test             # vitest run — 8 suites (forensic filter, light sanitizer
    per-event `scriptVersion.id` to the latest deploy) or by comparing
    `/admin/version` (Worker) against the DO `/version` route.
 
-2. **Never edit `dist/`.** It is generated.
+2. **A DO migration makes the PR's branch check go red, and that is expected.**
+   Workers Builds runs `npx wrangler versions upload` on non-production
+   branches. A versioned upload **cannot apply Durable Object migrations**:
 
-3. **Pooling discipline.** Every Workers AI embedding call must use
+   ```
+   ✘ [ERROR] Version upload failed. You attempted to upload a version of a
+     Worker that includes a Durable Object migration, but migrations must be
+     fully applied via a non-versioned deployment. [code: 10211]
+   ```
+
+   So any PR that renames the DO class (i.e. every PR that needs gotcha #1)
+   will show a failing `Workers Builds` check on its branch, no matter how
+   correct it is. The build itself succeeds — read the log and confirm the
+   failure is `10211` at the upload step, not a real build error. The migration
+   applies when the PR merges to `main`, because the production branch runs
+   `wrangler deploy`. Don't "fix" the check by dropping the migration: that
+   ships renamed-class code that the pinned isolate never loads.
+
+   Verify locally before merging with `wrangler deploy --dry-run --outdir=...`,
+   which validates config, bindings and migration syntax without contacting the
+   API. A failed versioned upload changes nothing in production.
+
+3. **Never edit `dist/`.** It is generated.
+
+4. **Pooling discipline.** Every Workers AI embedding call must use
    `pooling: "cls"`. The `ha-knowledge` Vectorize index was built with cls
    pooling; mismatched pooling between backfill and query produces near-random
    rankings.
 
-4. **Cloudflare Access fronts the Worker.** A direct `curl` /
+5. **Cloudflare Access fronts the Worker.** A direct `curl` /
    `Invoke-RestMethod` hits the Access login page, not the app. Use
    `cloudflared access curl` or a service token for any HTTP probe.
 
-5. **PowerShell quoting.** To POST JSON, write the body to a UTF-8-**without-BOM**
+6. **PowerShell quoting.** To POST JSON, write the body to a UTF-8-**without-BOM**
    temp file and use `--data-binary "@file"`. Inline JSON on the PowerShell
    command line gets mangled. See the smoke-test snippets in `README.md`.
 
-6. **Production is live.** There is no staging. A deploy — including a `git
+7. **Production is live.** There is no staging. A deploy — including a `git
    push` to `main` — changes the behavior of a real, occupied house. Don't
    push speculative changes to `main`.
 
-7. **Commit hygiene.** Commit messages in this repo follow
+8. **Commit hygiene.** Commit messages in this repo follow
    `type(scope): VNN — summary` (e.g. `feat(do): V29 — runtime LLM config + Qwen 3.7 Plus default`). The
    `VNN` matches the DO migration tag when the change is DO-side.
 

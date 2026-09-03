@@ -17,6 +17,24 @@ switched **mid-conversation** with history intact.
 
 ---
 
+## The PR's branch check will be red, and that is expected
+
+Workers Builds runs `npx wrangler versions upload` on non-production branches,
+and a versioned upload cannot apply a Durable Object migration:
+
+```
+✘ [ERROR] Version upload failed. You attempted to upload a version of a Worker
+  that includes a Durable Object migration, but migrations must be fully
+  applied via a non-versioned deployment. [code: 10211]
+```
+
+The bundle builds fine; only the upload step is refused. The migration applies
+on merge to `main`, which runs `wrangler deploy`. See CLAUDE.md gotcha #2 — this
+affects every PR that renames the DO class, which is every PR that needs a fresh
+isolate. A failed versioned upload changes nothing in production.
+
+---
+
 ## Before you deploy: set the secret first
 
 > **The order matters.** V30 ships with `meta` as the baked default. If the
