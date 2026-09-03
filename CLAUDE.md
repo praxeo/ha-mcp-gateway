@@ -17,9 +17,9 @@ Assistant smart home to LLMs. It:
 - streams every meaningful HA event into a queryable D1 **forensic log**,
 - exposes the whole surface as an **MCP server** (`POST /mcp`) for clients like
   Claude Desktop and Claude Code,
-- runs a built-in **chat agent** — "Ranger," GLM 5.2 Fast on Fireworks
-  (runtime-configurable; see LLM configuration) with reasoning enabled and a
-  native tool-calling loop — reachable at a web
+- runs a built-in **chat agent** — "Ranger," Meta Muse Spark 1.3 (contributor)
+  on the Responses API (runtime-configurable; see LLM configuration) with
+  reasoning enabled and a native tool-calling loop — reachable at a web
   `/chat` UI and via the `ai_chat` MCP tool,
 - short-circuits deterministic cover (garage/bay door) commands via a sub-500ms
   fast path that skips the LLM entirely.
@@ -41,8 +41,9 @@ Windows**.
 
 ```powershell
 npm install          # dependencies (only devDependency is vitest)
-npm test             # vitest run — 6 suites (forensic filter, light sanitizer,
-                     #   scheduler, fast path, coalesce, llm-config)
+npm test             # vitest run — 8 suites (forensic filter, light sanitizer,
+                     #   scheduler, fast path, coalesce, llm-config,
+                     #   llm-providers, speech-shaping)
 ```
 
 - **Deploy is git-driven.** A push to `main` triggers a **Cloudflare Workers
@@ -58,11 +59,15 @@ npm test             # vitest run — 6 suites (forensic filter, light sanitizer
   overwritten on every build. All source lives in `src/`.
 - A deploy reconciles bindings, cron triggers, and Durable Object migrations
   with Cloudflare.
-- Tests run with `vitest` — 6 suites under `test/` (98 cases): the forensic
+- Tests run with `vitest` — 8 suites under `test/` (166 cases): the forensic
   noise filter (`should-log-state-change`), the light-service sanitizer, the
-  scheduler, the cover fast path, the flat-arg coalescer, and the runtime
-  LLM-config helpers (`llm-config`). Add tests alongside these when changing
-  pure, testable logic; the pure helpers keep a synced stub copy in their test.
+  scheduler, the cover fast path, the flat-arg coalescer, the runtime
+  LLM-config helpers (`llm-config`), the provider adapters (`llm-providers` —
+  imports the real module, no stub), and the TTS/keyterm helpers
+  (`speech-shaping`). Add tests alongside these when changing pure, testable
+  logic; the stubbed helpers keep a synced copy in their test — when you change
+  one of those functions, update its stub in the same commit or the suite is
+  testing code that no longer exists.
 
 ---
 
@@ -75,16 +80,17 @@ npm test             # vitest run — 6 suites (forensic filter, light sanitizer
    (`src/ha-websocket.js`) do not.** To force a fresh DO isolate you must rename
    the DO class via a `renamed_classes` migration in `wrangler.toml` and update
    `class_name` in the `durable_objects.bindings`. The class is currently
-   `HAWebSocketV29` — it has been renamed 28 times for exactly this reason.
+   `HAWebSocketV30` — it has been renamed 29 times for exactly this reason.
    Procedure for any DO-side change you need live:
-   - bump the class name (`HAWebSocketV29` → `HAWebSocketV30`) in the `export
-     class` line in `src/ha-websocket.js`, every `HAWebSocketV29.` static
+   - bump the class name (`HAWebSocketV30` → `HAWebSocketV31`) in the `export
+     class` line in `src/ha-websocket.js`, every `HAWebSocketV30.` static
      reference, the `export {}` at the file end, and the `worker.js` import;
-   - add a `[[migrations]]` block with `tag = "v30"` and
-     `renamed_classes = [{ from = "HAWebSocketV29", to = "HAWebSocketV30" }]`;
+   - add a `[[migrations]]` block with `tag = "v31"` and
+     `renamed_classes = [{ from = "HAWebSocketV30", to = "HAWebSocketV31" }]`;
    - update `class_name` in `[[durable_objects.bindings]]`.
-   **Exception — the LLM config is now runtime-configurable** (V29): the chat/
-   agent model, endpoint, and reasoning mode can be swapped live via the
+   **Exception — the LLM config is now runtime-configurable** (V29, extended
+   in V30 to the provider and wire format): the chat/
+   agent model, endpoint, provider, and reasoning mode can be swapped live via the
    `/admin/llm-config` route (DO storage override) with no rename or redeploy.
    See the LLM configuration section. A model swap no longer needs this dance.
    DO storage (snapshot, chat history, memory, cursors) is preserved across
@@ -92,26 +98,48 @@ npm test             # vitest run — 6 suites (forensic filter, light sanitizer
    per-event `scriptVersion.id` to the latest deploy) or by comparing
    `/admin/version` (Worker) against the DO `/version` route.
 
-2. **Never edit `dist/`.** It is generated.
+2. **A DO migration makes the PR's branch check go red, and that is expected.**
+   Workers Builds runs `npx wrangler versions upload` on non-production
+   branches. A versioned upload **cannot apply Durable Object migrations**:
 
-3. **Pooling discipline.** Every Workers AI embedding call must use
+   ```
+   ✘ [ERROR] Version upload failed. You attempted to upload a version of a
+     Worker that includes a Durable Object migration, but migrations must be
+     fully applied via a non-versioned deployment. [code: 10211]
+   ```
+
+   So any PR that renames the DO class (i.e. every PR that needs gotcha #1)
+   will show a failing `Workers Builds` check on its branch, no matter how
+   correct it is. The build itself succeeds — read the log and confirm the
+   failure is `10211` at the upload step, not a real build error. The migration
+   applies when the PR merges to `main`, because the production branch runs
+   `wrangler deploy`. Don't "fix" the check by dropping the migration: that
+   ships renamed-class code that the pinned isolate never loads.
+
+   Verify locally before merging with `wrangler deploy --dry-run --outdir=...`,
+   which validates config, bindings and migration syntax without contacting the
+   API. A failed versioned upload changes nothing in production.
+
+3. **Never edit `dist/`.** It is generated.
+
+4. **Pooling discipline.** Every Workers AI embedding call must use
    `pooling: "cls"`. The `ha-knowledge` Vectorize index was built with cls
    pooling; mismatched pooling between backfill and query produces near-random
    rankings.
 
-4. **Cloudflare Access fronts the Worker.** A direct `curl` /
+5. **Cloudflare Access fronts the Worker.** A direct `curl` /
    `Invoke-RestMethod` hits the Access login page, not the app. Use
    `cloudflared access curl` or a service token for any HTTP probe.
 
-5. **PowerShell quoting.** To POST JSON, write the body to a UTF-8-**without-BOM**
+6. **PowerShell quoting.** To POST JSON, write the body to a UTF-8-**without-BOM**
    temp file and use `--data-binary "@file"`. Inline JSON on the PowerShell
    command line gets mangled. See the smoke-test snippets in `README.md`.
 
-6. **Production is live.** There is no staging. A deploy — including a `git
+7. **Production is live.** There is no staging. A deploy — including a `git
    push` to `main` — changes the behavior of a real, occupied house. Don't
    push speculative changes to `main`.
 
-7. **Commit hygiene.** Commit messages in this repo follow
+8. **Commit hygiene.** Commit messages in this repo follow
    `type(scope): VNN — summary` (e.g. `feat(do): V29 — runtime LLM config + Qwen 3.7 Plus default`). The
    `VNN` matches the DO migration tag when the change is DO-side.
 
@@ -128,7 +156,7 @@ Cloudflare Worker  (src/worker.js)
    │   CHAT_HTML UI, ElevenLabs STT proxy, multi-kind knowledge backfill,
    │   scheduled() cron handler
    ▼
-Durable Object  HAWebSocketV29  (src/ha-websocket.js)
+Durable Object  HAWebSocketV30  (src/ha-websocket.js)
    │   singleton "ha-websocket-singleton" — persistent HA WebSocket,
    │   in-memory stateCache, hibernation snapshot, chat tool loop,
    │   cover fast path, forensic D1 writers, reconnect backfill
@@ -154,7 +182,8 @@ addresses the same instance by the fixed name `ha-websocket-singleton`.
 | Path | Role |
 |---|---|
 | `src/worker.js` | Worker entry. MCP handler (`TOOLS` — 82 entries — + `handleTool` dispatch, `getAgentToolset`, `DANGEROUS_TOOLS`), HTTP routes, embedded `CHAT_HTML`, ElevenLabs STT proxy, KV cache helpers, per-kind `build*Docs`, `backfillKnowledge`, `scheduled()` cron handler. |
-| `src/ha-websocket.js` | The Durable Object class `HAWebSocketV29`. Persistent HA WS, `stateCache`, chat path (`chatWithAgentNative`), native tool loop (`runNativeToolLoop`), tool dispatch (`executeNativeTool`), action executor (`executeAIAction`), prompt builders, fast path, forensic D1 writers, reconnect backfill, `alarm()` keepalive. `_sanitizeLightServiceData` strips unsupported color descriptors from `light.turn_on` / `light.toggle` calls before they reach HA. ~6000 lines — the bulk of the system. |
+| `src/ha-websocket.js` | The Durable Object class `HAWebSocketV30`. Persistent HA WS, `stateCache`, chat path (`chatWithAgentNative`), native tool loop (`runNativeToolLoop`), tool dispatch (`executeNativeTool`), action executor (`executeAIAction`), prompt builders, fast path, forensic D1 writers, reconnect backfill, `alarm()` keepalive. `_sanitizeLightServiceData` strips unsupported color descriptors from `light.turn_on` / `light.toggle` calls before they reach HA. ~6000 lines — the bulk of the system. |
+| `src/llm-providers.js` | Provider adapters (V30). `LLM_PROVIDERS` (fireworks/meta), endpoint derivation, per-provider effort clamping, and the Chat-Completions ↔ Responses-API translation (`chatMessagesToResponsesInput`, `buildResponsesBody`, `responsesToChatCompletion`). Pure and unit-tested. |
 | `src/agent-tools.js` | OpenAI-format tool schemas for the chat agent: `NATIVE_AGENT_TOOLS` (19 = 6 action + 13 read), `CHAT_ALLOWED_TOOL_NAMES`, `NATIVE_ACTION_TOOL_NAMES`. |
 | `src/vectorize-schema.js` | Shared Vectorize schema + helpers: `vectorIdFor`, `topicTagFor`, `fnv1aHex`, per-kind embed-text builders, `isNoisyEntity` / `isNoisySwitch` / `isNoisyService`, `buildMetadata`. Imported by both `worker.js` and `ha-websocket.js`. |
 | `migrations/000{1,2,3}_*.sql` | D1 schema. 0001 indexes legacy tables; 0002 creates the forensic log tables; 0003 de-dupes `state_changes` and adds the backfill-idempotency unique index. |
@@ -283,23 +312,36 @@ also calls `_fireDueScheduledActions` to fire any due scheduled tasks. The
 
 ## LLM configuration
 
-**Runtime-configurable since V29.** The effective config is resolved at call
-time by `resolveLLMConfig` (module-level, pure) with three layers, highest
-precedence first:
+**Runtime-configurable since V29; provider + wire format added in V30.** The
+effective config is resolved at call time by `resolveLLMConfig` (module-level,
+pure) with three layers, highest precedence first:
 
 1. **DO storage override** — `state.storage` key `llm_config`, set live via the
    `/admin/llm-config` route (worker) → `/llm_config` (DO). No deploy, no rename.
-2. **env vars** — `LLM_ENDPOINT` / `LLM_MODEL` / `LLM_REASONING_MODE` /
-   `LLM_REASONING_EFFORT` (a fresh isolate picks these up).
+2. **env vars** — `LLM_ENDPOINT` / `LLM_MODEL` / `LLM_PROVIDER` / `LLM_API` /
+   `LLM_REASONING_MODE` / `LLM_REASONING_EFFORT` (a fresh isolate picks these up).
 3. **baked-in defaults** — the static class constants in `src/ha-websocket.js`,
-   exposed via `HAWebSocketV29._defaultLLMConfig()`:
+   exposed via `HAWebSocketV30._defaultLLMConfig()`:
 
 ```js
-static LLM_ENDPOINT = "https://api.fireworks.ai/inference/v1/chat/completions";
-static LLM_MODEL = "accounts/fireworks/models/glm-5p3";    // GLM 5.3
+static LLM_ENDPOINT = "https://api.meta.ai/v1/responses";
+static LLM_MODEL = "muse-spark-1.3-contributor";
+static LLM_PROVIDER = "meta";             // "meta" | "fireworks"
+static LLM_API = "responses";             // "responses" | "chat"
 static LLM_REASONING_MODE = "effort";     // "thinking" | "effort" | "none"
-static LLM_REASONING_EFFORT = "high";     // used only when mode === "effort"
+static LLM_REASONING_EFFORT = "low";      // baseline = the Quick tier
+static LLM_REASONING_SUMMARY = "auto";    // Responses-only; null = blank panel
 ```
+
+**`MODEL_API_KEY` is required** now that `meta` is the default. Without it every
+chat turn fails with `MODEL_API_KEY not configured`. Set the secret BEFORE the
+DO refreshes onto V30.
+
+**Reasoning tiers.** The chat UI sends `tier` on every request and
+`effortForTier` maps it: `quick` → `low` (the default, reset on every page
+load), `high` → `high`. It overrides the config's baseline effort for that turn
+only. Muse Spark additionally accepts `minimal` and `xhigh`, and rejects
+`none` — the adapter omits the reasoning block instead of sending it.
 
 Both call sites (`callLLM`, `callLLMWithTools`) go through `await
 this._getLLMConfig()` and use the resolved `cfg.endpoint` / `cfg.model`, so they
@@ -314,18 +356,37 @@ unchanged. The pure helpers have unit coverage in `test/llm-config.test.js`
 
 Operating the runtime config:
 
+Two providers are wired: `fireworks` (wire format `chat`) and `meta` (the Meta
+Model API — Muse Spark — wire format `responses`). **The endpoint and the
+API-key secret are DERIVED from the provider/api pair** unless an endpoint is
+set explicitly, so switching provider is one field, not three. An `api` never
+set explicitly follows the provider's default; that is deliberate, since
+inheriting `chat` from the baked defaults would leave a switch to `meta`
+pointed at the wrong wire format. See `docs/MUSE-SPARK.md` for the procedure.
+
 ```text
 GET  /admin/llm-config                          # effective + stored + env + defaults
 POST /admin/llm-config  {"model":"accounts/fireworks/models/minimax-m3",
                          "reasoning_mode":"thinking"}   # set override (merged)
 POST /admin/llm-config  {"reset":true}          # clear override → back to env/defaults
+POST /admin/llm-config  {"provider":"meta",
+                         "model":"muse-spark-1.3-contributor"}  # → Responses API
+POST /admin/llm-selftest {"provider":"meta","model":"muse-spark-1.3-contributor"}
+                                                # probe a candidate; does NOT store it
 ```
 
+**Always run `/admin/llm-selftest` before making a new provider or model live.**
+It sends one small tool-calling request through the real `callLLMWithTools` path
+and reports whether tool calls round-trip in the expected shape and whether
+reasoning replay items came back. This is a live house; a model that cannot call
+tools correctly fails at the point where it is asked to open a door.
+
 The override is validated by `sanitizeLLMConfigPatch` (only `endpoint`, `model`,
-`reasoning_mode`, `reasoning_effort`; enums enforced). A set updates the
+`provider`, `api`, `reasoning_mode`, `reasoning_effort`; enums enforced). A set updates the
 in-process cache, so even the pinned live isolate honors it on the next call.
 
-The API key is `env.FIREWORKS_API_KEY`. Provider history (kept here because it
+The API key follows the resolved provider: `MODEL_API_KEY` for `meta`,
+`FIREWORKS_API_KEY` for `fireworks` (`_apiKeyFor`). Provider history (kept here because it
 explains the migration tags): originally MiniMax → gpt-oss-120b on Groq (V13–15)
 → MiniMax again (V16) → DeepSeek V4 Flash on Fireworks (V17–V26) → MiniMax M3 on
 Fireworks (V27–V28) → Qwen 3.7 Plus on Fireworks (V29, runtime-configurable) →
@@ -347,16 +408,31 @@ Don't reintroduce Groq or the old MiniMax endpoint/auth (`MINIMAX_API_KEY`,
 `FIREWORKS_API_KEY`; any OpenAI-compatible Fireworks model can be selected at
 runtime via the override.
 
+**V30 moved the default off Fireworks** to Meta Muse Spark 1.3 (contributor
+tier) on the Responses API — the only surface that carries reasoning between
+turns, which is what a multi-round tool loop needs. Fireworks/GLM 5.3 remains
+one config POST away for rollback:
+`{"provider":"fireworks","model":"accounts/fireworks/models/glm-5p3"}`.
+The Responses API has several rules that fail hard if broken (`strict` defaults
+true; reasoning items must be followed by a message or call; assistant text
+before a tool call must be tagged `phase: "commentary"`; there is no
+`reasoning_content` on output). All of them are handled in
+`src/llm-providers.js` and explained in `docs/MUSE-SPARK.md` — read that before
+touching the adapter.
+
 ---
 
 ## Bindings, secrets, and flags
 
-**Bindings** (`wrangler.toml`): `HA_WS` (DO `HAWebSocketV29`), `HA_CACHE` (KV),
+**Bindings** (`wrangler.toml`): `HA_WS` (DO `HAWebSocketV30`), `HA_CACHE` (KV),
 `KNOWLEDGE` (Vectorize `ha-knowledge`), `AI` (Workers AI), `DB` (D1 `ha_db`),
 `CF_VERSION_METADATA`.
 
 **Secrets** (`wrangler secret put`): `HA_URL`, `HA_TOKEN`, `FIREWORKS_API_KEY`,
-`ELEVENLABS_API_KEY` (optional, for `/transcribe`), `MCP_AUTH_TOKEN` (optional).
+`MODEL_API_KEY` (**required** — Meta Model API / Muse Spark, the default
+provider since V30), `ELEVENLABS_API_KEY` (optional, for `/transcribe`
+and `/tts`), `ELEVENLABS_VOICE_ID` (optional, picks the spoken-reply voice),
+`MCP_AUTH_TOKEN` (optional).
 
 **Flags**: `USE_NATIVE_TOOL_LOOP` (`"true"` — the chat path),
 `USE_VECTOR_ENTITY_RETRIEVAL` (`"true"` — vector context build, flat-list
@@ -374,6 +450,9 @@ MCP JSON-RPC), plus admin endpoints: `/admin/bugs`, `/admin/bugs/clear`, `/admin
 `/admin/token-usage` (GET — per-day chat token totals from `ai_log`; `?days=N`
 1–30, `?format=json|markdown`), `/admin/version`,
 `/admin/llm-config` (GET/POST — runtime LLM config),
+`/admin/llm-selftest` (GET/POST — one probe request through the real
+`callLLMWithTools` path; POST a config patch to test a candidate provider/model
+WITHOUT storing it),
 `/admin/index-stats`, `/admin/reindex-observations`,
 `/admin/cleanup-stale-vectors`, `/admin/rebuild-knowledge`.
 
@@ -389,6 +468,10 @@ query routes, etc.) — reached only via `doFetch` from the Worker.
   no build step beyond esbuild bundling.
 - LLM endpoint/model/effort live in static class constants; the two call sites
   (`callLLM`, `callLLMWithTools`) must not drift. Change the constant.
+- Provider-specific wire details belong in `src/llm-providers.js`, not in the
+  call sites. `callLLMWithTools` always RETURNS a Chat-Completions-shaped
+  object, whichever provider served it, so `runNativeToolLoop` and the stored
+  `chat_history` stay provider-neutral and switching mid-conversation works.
 - Forensic D1 writes are deliberately fire-and-forget — never make the WS event
   handler `await` a D1 write. Failures increment `_d1WriteFailures`.
 - `executeNativeTool` and `handleTool` are the two dispatchers. A new chat tool

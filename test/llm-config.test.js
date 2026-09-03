@@ -1,5 +1,5 @@
 /**
- * Unit tests for the runtime LLM config helpers (V29):
+ * Unit tests for the runtime LLM config helpers (V30):
  * resolveLLMConfig, applyReasoningToBody, sanitizeLLMConfigPatch, and the
  * env-layer extractor llmConfigFromEnv.
  *
@@ -9,22 +9,38 @@
  * defaults. Fireworks rejects sending `thinking` and `reasoning_effort`
  * together, so applyReasoningToBody must emit at most one.
  *
+ * V30 added provider/api resolution: the config now names a provider
+ * ("fireworks" | "meta") and a wire format ("chat" | "responses"), the
+ * endpoint is DERIVED from that pair unless set explicitly, and the API key
+ * env var follows the provider. Those helpers live in src/llm-providers.js and
+ * are imported here rather than stubbed.
+ *
  * These functions are pure. Keep these stubs in sync with the module-level
  * helpers in src/ha-websocket.js.
  */
 import { describe, it, expect } from "vitest";
+import {
+  LLM_PROVIDERS,
+  LLM_APIS,
+  LLM_REASONING_EFFORTS as PROVIDER_EFFORTS,
+  isKnownProvider,
+  endpointFor,
+  clampEffortForProvider
+} from "../src/llm-providers.js";
 
 // ---- stubs mirrored from src/ha-websocket.js ----
 
 const LLM_REASONING_MODES = new Set(["thinking", "effort", "none"]);
-const LLM_REASONING_EFFORTS = new Set(["low", "medium", "high", "none"]);
+const LLM_REASONING_EFFORTS = PROVIDER_EFFORTS;
 
 // Baked-in defaults — mirror HAWebSocketV29._defaultLLMConfig().
 const DEFAULTS = {
-  endpoint: "https://api.fireworks.ai/inference/v1/chat/completions",
-  model: "accounts/fireworks/models/glm-5p3",
+  endpoint: "https://api.meta.ai/v1/responses",
+  model: "muse-spark-1.3-contributor",
+  provider: "meta",
+  api: "responses",
   reasoning_mode: "effort",
-  reasoning_effort: "high"
+  reasoning_effort: "low"
 };
 
 function llmConfigFromEnv(env) {
@@ -32,6 +48,8 @@ function llmConfigFromEnv(env) {
   const out = {};
   if (typeof e.LLM_ENDPOINT === "string" && e.LLM_ENDPOINT.trim()) out.endpoint = e.LLM_ENDPOINT.trim();
   if (typeof e.LLM_MODEL === "string" && e.LLM_MODEL.trim()) out.model = e.LLM_MODEL.trim();
+  if (typeof e.LLM_PROVIDER === "string" && isKnownProvider(e.LLM_PROVIDER.trim())) out.provider = e.LLM_PROVIDER.trim();
+  if (typeof e.LLM_API === "string" && LLM_APIS.has(e.LLM_API.trim())) out.api = e.LLM_API.trim();
   if (typeof e.LLM_REASONING_MODE === "string" && LLM_REASONING_MODES.has(e.LLM_REASONING_MODE.trim())) {
     out.reasoning_mode = e.LLM_REASONING_MODE.trim();
   }
@@ -54,16 +72,35 @@ function resolveLLMConfig(stored, env, defaults) {
   const model = pick("model");
   const mode = pick("reasoning_mode");
   const effort = pick("reasoning_effort");
+  const provider = pick("provider");
+  const api = pick("api");
   const safeMode = LLM_REASONING_MODES.has(mode.value) ? mode.value : base.reasoning_mode;
-  const safeEffort = LLM_REASONING_EFFORTS.has(effort.value) ? effort.value : base.reasoning_effort;
+  const rawEffort = LLM_REASONING_EFFORTS.has(effort.value) ? effort.value : base.reasoning_effort;
+  const safeProvider = isKnownProvider(provider.value) ? provider.value : base.provider;
+  // Only an EXPLICIT api (override or env) pins the wire format. Inheriting it
+  // from the baked defaults would leave a provider switch pointed at the wrong
+  // format — e.g. selecting meta would keep "chat" and never reach the
+  // Responses API. An unset api follows whatever the provider recommends.
+  const explicitApi = api.source === "default" ? null : api.value;
+  const safeApi = (explicitApi && LLM_APIS.has(explicitApi))
+    ? explicitApi
+    : LLM_PROVIDERS[safeProvider].default_api;
+  const safeEffort = clampEffortForProvider(safeProvider, rawEffort);
+  const explicitEndpoint = endpoint.source === "default" ? null : endpoint.value;
+  const safeEndpoint = endpointFor(safeProvider, safeApi, explicitEndpoint) || base.endpoint;
   return {
-    endpoint: endpoint.value,
+    endpoint: safeEndpoint,
     model: model.value,
+    provider: safeProvider,
+    api: safeApi,
     reasoning_mode: safeMode,
     reasoning_effort: safeEffort,
+    api_key_env: LLM_PROVIDERS[safeProvider].key_env,
     source: {
-      endpoint: endpoint.source,
+      endpoint: explicitEndpoint ? endpoint.source : "derived",
       model: model.source,
+      provider: provider.source,
+      api: explicitApi ? api.source : "derived",
       reasoning_mode: mode.source,
       reasoning_effort: effort.source
     }
@@ -87,7 +124,7 @@ function sanitizeLLMConfigPatch(patch) {
   if (!patch || typeof patch !== "object" || Array.isArray(patch)) {
     return { error: "body must be a JSON object" };
   }
-  const allowed = new Set(["endpoint", "model", "reasoning_mode", "reasoning_effort"]);
+  const allowed = new Set(["endpoint", "model", "reasoning_mode", "reasoning_effort", "provider", "api"]);
   const out = {};
   for (const [k, v] of Object.entries(patch)) {
     if (k === "reset") continue;
@@ -104,6 +141,12 @@ function sanitizeLLMConfigPatch(patch) {
     } else if (k === "reasoning_effort") {
       if (!LLM_REASONING_EFFORTS.has(v)) return { error: `reasoning_effort must be one of ${[...LLM_REASONING_EFFORTS].join(", ")}` };
       out.reasoning_effort = v;
+    } else if (k === "provider") {
+      if (!isKnownProvider(v)) return { error: `provider must be one of ${Object.keys(LLM_PROVIDERS).join(", ")}` };
+      out.provider = v;
+    } else if (k === "api") {
+      if (!LLM_APIS.has(v)) return { error: `api must be one of ${[...LLM_APIS].join(", ")}` };
+      out.api = v;
     }
   }
   if (Object.keys(out).length === 0) return { error: "no recognized config fields to set" };
@@ -113,30 +156,48 @@ function sanitizeLLMConfigPatch(patch) {
 // ---- tests ----
 
 describe("resolveLLMConfig — layering", () => {
-  it("returns baked-in defaults (GLM 5.3 glm-5p3) with no override or env", () => {
+  it("returns baked-in defaults (Muse Spark 1.3 contributor) with no override or env", () => {
     const cfg = resolveLLMConfig(null, {}, DEFAULTS);
-    expect(cfg.model).toBe("accounts/fireworks/models/glm-5p3");
-    expect(cfg.endpoint).toBe(DEFAULTS.endpoint);
+    expect(cfg.model).toBe("muse-spark-1.3-contributor");
+    expect(cfg.endpoint).toBe("https://api.meta.ai/v1/responses");
+    expect(cfg.api).toBe("responses");
+    expect(cfg.api_key_env).toBe("MODEL_API_KEY");
     expect(cfg.reasoning_mode).toBe("effort");
-    expect(cfg.reasoning_effort).toBe("high");
+    expect(cfg.reasoning_effort).toBe("low");
+    // endpoint reports "derived" when it follows the provider/api pair rather
+    // than being pinned explicitly (V30).
     expect(cfg.source).toEqual({
-      endpoint: "default", model: "default", reasoning_mode: "default", reasoning_effort: "default"
+      endpoint: "derived", model: "default", provider: "default", api: "derived",
+      reasoning_mode: "default", reasoning_effort: "default"
     });
+  });
+
+  it("rolling back to Fireworks is one config POST", () => {
+    const cfg = resolveLLMConfig(
+      { provider: "fireworks", model: "accounts/fireworks/models/glm-5p3" },
+      {},
+      DEFAULTS
+    );
+    expect(cfg.api).toBe("chat");
+    expect(cfg.endpoint).toBe("https://api.fireworks.ai/inference/v1/chat/completions");
+    expect(cfg.api_key_env).toBe("FIREWORKS_API_KEY");
+    // low is valid on Fireworks too, so the tier baseline survives the switch
+    expect(cfg.reasoning_effort).toBe("low");
   });
 
   it("env vars override defaults", () => {
     const env = {
-      LLM_MODEL: "accounts/fireworks/models/minimax-m3",
+      LLM_MODEL: "muse-spark-1.3",
       LLM_REASONING_MODE: "effort",
       LLM_REASONING_EFFORT: "medium"
     };
     const cfg = resolveLLMConfig(null, env, DEFAULTS);
-    expect(cfg.model).toBe("accounts/fireworks/models/minimax-m3");
+    expect(cfg.model).toBe("muse-spark-1.3");
     expect(cfg.reasoning_mode).toBe("effort");
     expect(cfg.reasoning_effort).toBe("medium");
-    expect(cfg.endpoint).toBe(DEFAULTS.endpoint); // untouched → default
+    expect(cfg.endpoint).toBe(DEFAULTS.endpoint); // untouched → derived from provider
     expect(cfg.source.model).toBe("env");
-    expect(cfg.source.endpoint).toBe("default");
+    expect(cfg.source.endpoint).toBe("derived");
   });
 
   it("stored override beats both env and defaults", () => {
@@ -157,7 +218,8 @@ describe("resolveLLMConfig — layering", () => {
     expect(cfg.endpoint).toBe("https://example.test/v1/chat/completions"); // env
     expect(cfg.reasoning_mode).toBe("effort"); // default
     expect(cfg.source).toEqual({
-      endpoint: "env", model: "override", reasoning_mode: "default", reasoning_effort: "default"
+      endpoint: "env", model: "override", provider: "default", api: "derived",
+      reasoning_mode: "default", reasoning_effort: "default"
     });
   });
 
@@ -165,7 +227,7 @@ describe("resolveLLMConfig — layering", () => {
     const stored = { reasoning_mode: "bogus", reasoning_effort: "ludicrous" };
     const cfg = resolveLLMConfig(stored, {}, DEFAULTS);
     expect(cfg.reasoning_mode).toBe("effort");
-    expect(cfg.reasoning_effort).toBe("high");
+    expect(cfg.reasoning_effort).toBe("low");
   });
 
   it("ignores bad env enum values (treated as absent)", () => {
@@ -277,5 +339,88 @@ describe("llmConfigFromEnv — only present, valid keys contribute", () => {
   it("returns an empty object for empty env", () => {
     expect(llmConfigFromEnv({})).toEqual({});
     expect(llmConfigFromEnv(null)).toEqual({});
+  });
+});
+
+describe("resolveLLMConfig — provider and wire format (V30)", () => {
+  it("defaults to Meta Muse Spark over the Responses API", () => {
+    const cfg = resolveLLMConfig(null, {}, DEFAULTS);
+    expect(cfg.provider).toBe("meta");
+    expect(cfg.api).toBe("responses");
+    expect(cfg.api_key_env).toBe("MODEL_API_KEY");
+    expect(cfg.endpoint).toBe("https://api.meta.ai/v1/responses");
+  });
+
+  it("switching provider moves the endpoint and the key with it", () => {
+    // The whole point: one field flips the provider, and the endpoint and
+    // secret follow. Setting three fields by hand is how they drift apart.
+    const cfg = resolveLLMConfig({ provider: "fireworks" }, {}, DEFAULTS);
+    expect(cfg.provider).toBe("fireworks");
+    expect(cfg.api).toBe("chat");
+    expect(cfg.endpoint).toBe("https://api.fireworks.ai/inference/v1/chat/completions");
+    expect(cfg.api_key_env).toBe("FIREWORKS_API_KEY");
+    expect(cfg.source.endpoint).toBe("derived");
+  });
+
+  it("an explicit endpoint still wins over the derived one", () => {
+    const cfg = resolveLLMConfig(
+      { provider: "meta", endpoint: "https://proxy.internal/v1/responses" },
+      {},
+      DEFAULTS
+    );
+    expect(cfg.endpoint).toBe("https://proxy.internal/v1/responses");
+    expect(cfg.source.endpoint).toBe("override");
+  });
+
+  it("meta over the chat wire format targets meta's chat endpoint", () => {
+    const cfg = resolveLLMConfig({ provider: "meta", api: "chat" }, {}, DEFAULTS);
+    expect(cfg.endpoint).toBe("https://api.meta.ai/v1/chat/completions");
+  });
+
+  it("clamps a Meta-only effort when rolling back to Fireworks", () => {
+    const cfg = resolveLLMConfig({ provider: "fireworks", reasoning_effort: "xhigh" }, {}, DEFAULTS);
+    expect(cfg.reasoning_effort).toBe("high");
+  });
+
+  it("reads provider and api from env", () => {
+    const cfg = resolveLLMConfig(null, { LLM_PROVIDER: "meta", LLM_API: "responses" }, DEFAULTS);
+    expect(cfg.provider).toBe("meta");
+    expect(cfg.source.provider).toBe("env");
+    expect(cfg.endpoint).toBe("https://api.meta.ai/v1/responses");
+  });
+
+  it("clamps an effort the provider cannot accept", () => {
+    // xhigh exists on Meta but not Fireworks; it must narrow, not disable.
+    const meta = resolveLLMConfig({ reasoning_effort: "xhigh" }, {}, DEFAULTS);
+    expect(meta.reasoning_effort).toBe("xhigh");
+    const fw = resolveLLMConfig({ provider: "fireworks", reasoning_effort: "xhigh" }, {}, DEFAULTS);
+    expect(fw.reasoning_effort).toBe("high");
+  });
+
+  it("falls back to the default provider when storage holds a bogus one", () => {
+    const cfg = resolveLLMConfig({ provider: "skynet" }, {}, DEFAULTS);
+    expect(cfg.provider).toBe("meta");
+  });
+});
+
+describe("sanitizeLLMConfigPatch — provider and api (V30)", () => {
+  it("accepts the one-line rollback to Fireworks", () => {
+    const r = sanitizeLLMConfigPatch({ provider: "fireworks", model: "accounts/fireworks/models/glm-5p3" });
+    expect(r.error).toBeUndefined();
+    expect(r.value).toEqual({ provider: "fireworks", model: "accounts/fireworks/models/glm-5p3" });
+  });
+
+  it("accepts an explicit api", () => {
+    expect(sanitizeLLMConfigPatch({ api: "responses" }).value).toEqual({ api: "responses" });
+  });
+
+  it("rejects an unknown provider or api", () => {
+    expect(sanitizeLLMConfigPatch({ provider: "openai" }).error).toMatch(/provider must be one of/);
+    expect(sanitizeLLMConfigPatch({ api: "grpc" }).error).toMatch(/api must be one of/);
+  });
+
+  it("accepts the wider effort range now that Meta supports it", () => {
+    expect(sanitizeLLMConfigPatch({ reasoning_effort: "xhigh" }).value).toEqual({ reasoning_effort: "xhigh" });
+    expect(sanitizeLLMConfigPatch({ reasoning_effort: "minimal" }).value).toEqual({ reasoning_effort: "minimal" });
   });
 });

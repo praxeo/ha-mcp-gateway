@@ -1,4 +1,4 @@
-import { HAWebSocketV29 } from "./ha-websocket.js";
+import { HAWebSocketV30 } from "./ha-websocket.js";
 import { CHAT_HTML } from "./chat-ui.html.js";
 import {
   ALL_KINDS,
@@ -3122,6 +3122,34 @@ var worker_default = {
     // (JSON body) sets the stored override and { "reset": true } clears it.
     // Lets the chat/agent model, endpoint, and reasoning mode be swapped live
     // (e.g. Qwen ↔ MiniMax) without the DO-rename migration dance.
+    if (url.pathname === "/admin/llm-selftest") {
+      // Probe a provider/model with one tiny tool-calling request before
+      // trusting it with the house. POST an optional config patch to test a
+      // candidate without storing it; GET tests whatever is live.
+      if (request.method !== "GET" && request.method !== "POST") {
+        return new Response("Method not allowed", { status: 405, headers: corsHeaders });
+      }
+      let patch = null;
+      if (request.method === "POST") {
+        patch = await request.json().catch(() => null);
+      }
+      const stub = getDO(env);
+      if (!stub) {
+        return new Response(JSON.stringify({ error: "Agent not available" }), {
+          status: 503, headers: { ...corsHeaders, "Content-Type": "application/json" }
+        });
+      }
+      const doResp = await stub.fetch("http://do/llm_selftest", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(patch || {})
+      });
+      const text = await doResp.text();
+      return new Response(text, {
+        status: doResp.status,
+        headers: { ...corsHeaders, "Content-Type": "application/json" }
+      });
+    }
     if (url.pathname === "/admin/llm-config") {
       if (request.method !== "GET" && request.method !== "POST") {
         return new Response("Method not allowed", { status: 405 });
@@ -3485,6 +3513,6 @@ var worker_default = {
   }
 };
 export {
-  HAWebSocketV29,
+  HAWebSocketV30,
   worker_default as default
 };
