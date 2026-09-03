@@ -17,9 +17,9 @@ Assistant smart home to LLMs. It:
 - streams every meaningful HA event into a queryable D1 **forensic log**,
 - exposes the whole surface as an **MCP server** (`POST /mcp`) for clients like
   Claude Desktop and Claude Code,
-- runs a built-in **chat agent** — "Ranger," GLM 5.2 Fast on Fireworks
-  (runtime-configurable; see LLM configuration) with reasoning enabled and a
-  native tool-calling loop — reachable at a web
+- runs a built-in **chat agent** — "Ranger," Meta Muse Spark 1.3 (contributor)
+  on the Responses API (runtime-configurable; see LLM configuration) with
+  reasoning enabled and a native tool-calling loop — reachable at a web
   `/chat` UI and via the `ai_chat` MCP tool,
 - short-circuits deterministic cover (garage/bay door) commands via a sub-500ms
   fast path that skips the LLM entirely.
@@ -302,11 +302,24 @@ pure) with three layers, highest precedence first:
    exposed via `HAWebSocketV30._defaultLLMConfig()`:
 
 ```js
-static LLM_ENDPOINT = "https://api.fireworks.ai/inference/v1/chat/completions";
-static LLM_MODEL = "accounts/fireworks/models/glm-5p3";    // GLM 5.3
+static LLM_ENDPOINT = "https://api.meta.ai/v1/responses";
+static LLM_MODEL = "muse-spark-1.3-contributor";
+static LLM_PROVIDER = "meta";             // "meta" | "fireworks"
+static LLM_API = "responses";             // "responses" | "chat"
 static LLM_REASONING_MODE = "effort";     // "thinking" | "effort" | "none"
-static LLM_REASONING_EFFORT = "high";     // used only when mode === "effort"
+static LLM_REASONING_EFFORT = "low";      // baseline = the Quick tier
+static LLM_REASONING_SUMMARY = "auto";    // Responses-only; null = blank panel
 ```
+
+**`MODEL_API_KEY` is required** now that `meta` is the default. Without it every
+chat turn fails with `MODEL_API_KEY not configured`. Set the secret BEFORE the
+DO refreshes onto V30.
+
+**Reasoning tiers.** The chat UI sends `tier` on every request and
+`effortForTier` maps it: `quick` → `low` (the default, reset on every page
+load), `high` → `high`. It overrides the config's baseline effort for that turn
+only. Muse Spark additionally accepts `minimal` and `xhigh`, and rejects
+`none` — the adapter omits the reasoning block instead of sending it.
 
 Both call sites (`callLLM`, `callLLMWithTools`) go through `await
 this._getLLMConfig()` and use the resolved `cfg.endpoint` / `cfg.model`, so they
@@ -350,7 +363,8 @@ The override is validated by `sanitizeLLMConfigPatch` (only `endpoint`, `model`,
 `provider`, `api`, `reasoning_mode`, `reasoning_effort`; enums enforced). A set updates the
 in-process cache, so even the pinned live isolate honors it on the next call.
 
-The API key is `env.FIREWORKS_API_KEY`. Provider history (kept here because it
+The API key follows the resolved provider: `MODEL_API_KEY` for `meta`,
+`FIREWORKS_API_KEY` for `fireworks` (`_apiKeyFor`). Provider history (kept here because it
 explains the migration tags): originally MiniMax → gpt-oss-120b on Groq (V13–15)
 → MiniMax again (V16) → DeepSeek V4 Flash on Fireworks (V17–V26) → MiniMax M3 on
 Fireworks (V27–V28) → Qwen 3.7 Plus on Fireworks (V29, runtime-configurable) →
@@ -372,6 +386,18 @@ Don't reintroduce Groq or the old MiniMax endpoint/auth (`MINIMAX_API_KEY`,
 `FIREWORKS_API_KEY`; any OpenAI-compatible Fireworks model can be selected at
 runtime via the override.
 
+**V30 moved the default off Fireworks** to Meta Muse Spark 1.3 (contributor
+tier) on the Responses API — the only surface that carries reasoning between
+turns, which is what a multi-round tool loop needs. Fireworks/GLM 5.3 remains
+one config POST away for rollback:
+`{"provider":"fireworks","model":"accounts/fireworks/models/glm-5p3"}`.
+The Responses API has several rules that fail hard if broken (`strict` defaults
+true; reasoning items must be followed by a message or call; assistant text
+before a tool call must be tagged `phase: "commentary"`; there is no
+`reasoning_content` on output). All of them are handled in
+`src/llm-providers.js` and explained in `docs/MUSE-SPARK.md` — read that before
+touching the adapter.
+
 ---
 
 ## Bindings, secrets, and flags
@@ -381,8 +407,8 @@ runtime via the override.
 `CF_VERSION_METADATA`.
 
 **Secrets** (`wrangler secret put`): `HA_URL`, `HA_TOKEN`, `FIREWORKS_API_KEY`,
-`MODEL_API_KEY` (optional — Meta Model API / Muse Spark; required only when the
-resolved provider is `meta`), `ELEVENLABS_API_KEY` (optional, for `/transcribe`
+`MODEL_API_KEY` (**required** — Meta Model API / Muse Spark, the default
+provider since V30), `ELEVENLABS_API_KEY` (optional, for `/transcribe`
 and `/tts`), `ELEVENLABS_VOICE_ID` (optional, picks the spoken-reply voice),
 `MCP_AUTH_TOKEN` (optional).
 

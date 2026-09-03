@@ -19,7 +19,8 @@ import {
   chatMessagesToResponsesInput,
   buildResponsesBody,
   responsesToChatCompletion,
-  stripProviderInternals
+  stripProviderInternals,
+  effortForTier
 } from "../src/llm-providers.js";
 
 describe("provider registry", () => {
@@ -131,7 +132,11 @@ describe("chatMessagesToResponsesInput", () => {
     ]);
     expect(instructions).toBe("You are Ranger.");
     expect(input).toHaveLength(1);
-    expect(input[0]).toEqual({ type: "message", role: "user", content: "Lock the front door" });
+    expect(input[0]).toEqual({
+      type: "message",
+      role: "user",
+      content: [{ type: "input_text", text: "Lock the front door" }]
+    });
   });
 
   it("joins multiple system messages", () => {
@@ -198,6 +203,66 @@ describe("chatMessagesToResponsesInput", () => {
     expect(input.map((i) => i.type)).toEqual(["message", "function_call"]);
   });
 
+  it("tags assistant text preceding a tool call as commentary", () => {
+    // Replaying that text as an ordinary final answer immediately before a
+    // function_call is rejected with HTTP 400 — the server will not silently
+    // reinterpret it.
+    const { input } = chatMessagesToResponsesInput([
+      {
+        role: "assistant",
+        content: "Let me check the weather first.",
+        tool_calls: [{ id: "c1", function: { name: "f", arguments: "{}" } }]
+      }
+    ]);
+    expect(input[0].phase).toBe("commentary");
+  });
+
+  it("leaves a final answer with no phase", () => {
+    const { input } = chatMessagesToResponsesInput([
+      { role: "assistant", content: "All five locks are locked." }
+    ]);
+    expect(input[0].phase).toBeUndefined();
+  });
+
+  it("drops a reasoning item that would sit directly before a user message", () => {
+    // The API rejects that ordering; dropping the orphan is explicitly allowed
+    // and costs only that turn's chain of thought.
+    const { input } = chatMessagesToResponsesInput([
+      { role: "assistant", content: "", _reasoning_items: [{ type: "reasoning", encrypted_content: "x" }] },
+      { role: "user", content: "still there?" }
+    ]);
+    expect(input.map((i) => i.type)).toEqual(["message"]);
+    expect(input[0].role).toBe("user");
+  });
+
+  it("drops a trailing reasoning item with nothing after it", () => {
+    const { input } = chatMessagesToResponsesInput([
+      { role: "user", content: "hi" },
+      { role: "assistant", content: "", _reasoning_items: [{ type: "reasoning", encrypted_content: "x" }] }
+    ]);
+    expect(input.map((i) => i.type)).toEqual(["message"]);
+  });
+
+  it("keeps reasoning that is followed by an assistant message", () => {
+    const { input } = chatMessagesToResponsesInput([
+      { role: "assistant", content: "Done.", _reasoning_items: [{ type: "reasoning", encrypted_content: "x" }] }
+    ]);
+    expect(input.map((i) => i.type)).toEqual(["reasoning", "message"]);
+  });
+
+  it("always gives a replayed reasoning item a summary array", () => {
+    // Required on input even when empty.
+    const { input } = chatMessagesToResponsesInput([
+      {
+        role: "assistant",
+        content: "",
+        _reasoning_items: [{ type: "reasoning", encrypted_content: "x" }],
+        tool_calls: [{ id: "c1", function: { name: "f", arguments: "{}" } }]
+      }
+    ]);
+    expect(input[0].summary).toEqual([]);
+  });
+
   it("omits an empty assistant message rather than sending a blank turn", () => {
     const { input } = chatMessagesToResponsesInput([{ role: "assistant", content: "   " }]);
     expect(input).toEqual([]);
@@ -205,7 +270,16 @@ describe("chatMessagesToResponsesInput", () => {
 
   it("stringifies non-string content", () => {
     const { input } = chatMessagesToResponsesInput([{ role: "user", content: { a: 1 } }]);
-    expect(input[0].content).toBe('{"a":1}');
+    expect(input[0].content[0].text).toBe('{"a":1}');
+  });
+
+  it("types user text as input_text and replayed assistant text as output_text", () => {
+    const { input } = chatMessagesToResponsesInput([
+      { role: "user", content: "hi" },
+      { role: "assistant", content: "hello" }
+    ]);
+    expect(input[0].content[0].type).toBe("input_text");
+    expect(input[1].content[0].type).toBe("output_text");
   });
 
   it("skips malformed entries instead of throwing", () => {
@@ -239,6 +313,36 @@ describe("buildResponsesBody", () => {
   it("omits the reasoning block entirely when no effort is given", () => {
     const body = buildResponsesBody({ model: "m", messages, maxTokens: 100, effort: null });
     expect(body.reasoning).toBeUndefined();
+  });
+
+  it("omits the reasoning block for effort 'none' — Muse Spark rejects it", () => {
+    const body = buildResponsesBody({ model: "m", messages, maxTokens: 100, effort: "none" });
+    expect(body.reasoning).toBeUndefined();
+  });
+
+  it("asks for a reasoning summary when one is requested", () => {
+    // Muse Spark's raw reasoning is encrypted and has no visible text, so the
+    // summary is the only thing that can populate the UI's reasoning panel.
+    const body = buildResponsesBody({ model: "m", messages, maxTokens: 100, effort: "low", summary: "auto" });
+    expect(body.reasoning).toEqual({ effort: "low", summary: "auto" });
+  });
+
+  it("sets a prompt cache key when given one", () => {
+    const body = buildResponsesBody({ model: "m", messages, maxTokens: 100, cacheKey: "ha-mcp-gateway" });
+    expect(body.prompt_cache_key).toBe("ha-mcp-gateway");
+  });
+
+  it("never sends temperature or top_p — Muse Spark is tuned for its defaults", () => {
+    const body = buildResponsesBody({ model: "m", messages, maxTokens: 100, effort: "low" });
+    expect(body.temperature).toBeUndefined();
+    expect(body.top_p).toBeUndefined();
+  });
+
+  it("does not combine encrypted replay with previous_response_id", () => {
+    const body = buildResponsesBody({ model: "m", messages, maxTokens: 100 });
+    expect(body.previous_response_id).toBeUndefined();
+    expect(body.store).toBe(false);
+    expect(body.include).toEqual(["reasoning.encrypted_content"]);
   });
 
   it("omits tools when none are supplied", () => {
@@ -276,6 +380,18 @@ describe("responsesToChatCompletion", () => {
       output: [{ type: "function_call", call_id: "c1", name: "f", arguments: { a: 1 } }]
     });
     expect(out.choices[0].message.tool_calls[0].function.arguments).toBe('{"a":1}');
+  });
+
+  it("reads reasoning text from the summary, which is all Muse Spark exposes", () => {
+    const out = responsesToChatCompletion({
+      output: [{
+        type: "reasoning",
+        encrypted_content: "blob",
+        summary: [{ type: "summary_text", text: "Checked both locks." }]
+      }]
+    });
+    expect(out.choices[0].message.reasoning_content).toBe("Checked both locks.");
+    expect(out.choices[0].message._reasoning_items[0].encrypted_content).toBe("blob");
   });
 
   it("surfaces reasoning text and keeps the raw items for replay", () => {
@@ -392,5 +508,18 @@ describe("full tool-calling round trip", () => {
     const persisted = stripProviderInternals(assistantMsg);
     expect(persisted._reasoning_items).toBeUndefined();
     expect(JSON.stringify(persisted)).not.toContain("enc-1");
+  });
+});
+
+describe("effortForTier", () => {
+  it("maps the UI's two positions to reasoning effort", () => {
+    expect(effortForTier("quick")).toBe("low");
+    expect(effortForTier("high")).toBe("high");
+  });
+
+  it("falls back for an absent or unknown tier", () => {
+    expect(effortForTier(undefined, null)).toBeNull();
+    expect(effortForTier("turbo", "low")).toBe("low");
+    expect(effortForTier(null, "medium")).toBe("medium");
   });
 });

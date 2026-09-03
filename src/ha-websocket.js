@@ -9,7 +9,8 @@ import {
   clampEffortForProvider,
   buildResponsesBody,
   responsesToChatCompletion,
-  stripProviderInternals
+  stripProviderInternals,
+  effortForTier
 } from "./llm-providers.js";
 import { buildStaticChatSystemPrompt, renderDynamicContext } from "./chat-prompt.js";
 import {
@@ -243,14 +244,21 @@ export class HAWebSocketV30 {
   // the two call sites can't drift. Default model is GLM 5.3 (`glm-5p3`)
   // on Fireworks — 1M context, native tool calling. Runtime-swappable
   // via /admin/llm-config; reasoning behavior below is unchanged.
-  static LLM_ENDPOINT = "https://api.fireworks.ai/inference/v1/chat/completions";
-  static LLM_MODEL = "accounts/fireworks/models/glm-5p3";
-  // Provider + wire format. "fireworks"/"chat" is the baked default; Meta's
-  // Muse Spark runs as provider "meta" over api "responses" and is selected at
-  // runtime via /admin/llm-config (no deploy, no DO rename). See
-  // src/llm-providers.js for the adapters and docs/MUSE-SPARK.md to switch.
-  static LLM_PROVIDER = "fireworks";
-  static LLM_API = "chat";
+  // V30 default: Meta Muse Spark 1.3 (contributor tier) over the Responses
+  // API. The endpoint is DERIVED from provider+api, so this constant is only
+  // the fallback for an unknown pair — do not point it somewhere else and
+  // expect the request to follow.
+  //
+  // REQUIRES the MODEL_API_KEY secret. Without it every chat turn fails with
+  // "MODEL_API_KEY not configured"; set the secret before deploying this.
+  //
+  // Fireworks/GLM 5.3 remains fully wired for rollback and is one config POST
+  // away: {"provider":"fireworks","model":"accounts/fireworks/models/glm-5p3"}.
+  // See docs/MUSE-SPARK.md.
+  static LLM_ENDPOINT = "https://api.meta.ai/v1/responses";
+  static LLM_MODEL = "muse-spark-1.3-contributor";
+  static LLM_PROVIDER = "meta";
+  static LLM_API = "responses";
   // Reasoning control. Fireworks rejects sending `thinking` and
   // `reasoning_effort` together, so exactly one is applied per request based on
   // LLM_REASONING_MODE: "thinking" → thinking:{type:"enabled"}; "effort" →
@@ -261,7 +269,15 @@ export class HAWebSocketV30 {
   // model families. Reasoning still returns in reasoning_content, so the
   // extraction / SSE stream / prior-turn re-feed are unchanged.
   static LLM_REASONING_MODE = "effort";
-  static LLM_REASONING_EFFORT = "high";
+  // Baseline effort = the Quick tier. The UI's tier toggle overrides this
+  // per request (quick → low, high → high) and resets to Quick on every page
+  // load, so an ordinary command never pays for reasoning it does not need.
+  static LLM_REASONING_EFFORT = "low";
+  // Muse Spark's raw chain of thought is encrypted and carries no visible
+  // text, so a summary is the only thing that can populate the chat UI's
+  // reasoning panel. Set to null to save the summary tokens and accept an
+  // empty panel.
+  static LLM_REASONING_SUMMARY = "auto";
 
   // Baked-in default config object — the lowest-precedence layer for
   // resolveLLMConfig. Kept as a method so the static constants stay the single
@@ -1567,7 +1583,7 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
 
         case "/ai_chat": {
           const body = await request.json();
-          const response = await this.chatWithAgent(body.message, body.from || "default");
+          const response = await this.chatWithAgent(body.message, body.from || "default", null, { tier: body.tier });
           return new Response(JSON.stringify(response), { headers });
         }
 
@@ -1588,7 +1604,7 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
 
           this.chatWithAgent(body.message, body.from || "default", (event) => {
             write(`data: ${JSON.stringify(event)}\n\n`);
-          }).then(() => {
+          }, { tier: body.tier }).then(() => {
             clearInterval(keepalive);
             writer.close();
           }).catch((err) => {
@@ -3347,13 +3363,13 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
   // AI Agent — Chat Interface
   // JSON mode + prose pass-through + targeted retry + honest failure
   // ========================================================================
-  async chatWithAgent(message, from = "default", onEvent = null) {
+  async chatWithAgent(message, from = "default", onEvent = null, opts = {}) {
     const _cfg = await this._getLLMConfig();
     if (!this._apiKeyFor(_cfg)) return { error: `${_cfg.api_key_env} not configured` };
 
     // Phase 2 feature flag — native tool-calling path. Flag off = no-op, legacy runs.
     if (this.env.USE_NATIVE_TOOL_LOOP === "true") {
-      return await this.chatWithAgentNative(message, from, onEvent);
+      return await this.chatWithAgentNative(message, from, onEvent, opts);
     }
 
     const now = new Date();
@@ -4532,7 +4548,7 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
   // One request, whichever wire format the resolved config selects. ALWAYS
   // returns a Chat-Completions-shaped object — the Responses API branch
   // normalizes on the way out — so runNativeToolLoop stays provider-agnostic.
-  async callLLMWithTools(messages, tools, maxTokens = 16384, timeoutMs = 45000) {
+  async callLLMWithTools(messages, tools, maxTokens = 16384, timeoutMs = 45000, effortOverride = null) {
     const cfg = await this._getLLMConfig();
     const label = (LLM_PROVIDERS[cfg.provider] && LLM_PROVIDERS[cfg.provider].label) || cfg.provider;
     const apiKey = this._apiKeyFor(cfg);
@@ -4545,14 +4561,16 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
     if (isResponses) {
       // "none" means genuinely no reasoning; omit the block entirely rather
       // than sending an effort the provider would have to interpret.
-      const effort = cfg.reasoning_mode === "none" ? null
+      const baseEffort = cfg.reasoning_mode === "none" ? null
         : (cfg.reasoning_mode === "thinking" ? "high" : cfg.reasoning_effort);
       body = buildResponsesBody({
         model: cfg.model,
         messages: clean,
         tools,
         maxTokens,
-        effort
+        effort: effortOverride || baseEffort,
+        summary: HAWebSocketV30.LLM_REASONING_SUMMARY,
+        cacheKey: HAWebSocketV30.SESSION_AFFINITY_KEY
       });
     } else {
       body = {
@@ -4566,8 +4584,9 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
         max_tokens: maxTokens,
         temperature: 0
       };
-      // Reasoning control per the resolved config (see callLLM).
-      applyReasoningToBody(body, cfg);
+      // Reasoning control per the resolved config (see callLLM). A tier
+      // override replaces only the effort level, never the mode.
+      applyReasoningToBody(body, effortOverride ? { ...cfg, reasoning_effort: effortOverride } : cfg);
     }
 
     const headers = {
@@ -4617,7 +4636,10 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
       onEvent = null,
       allowedTools = NATIVE_AGENT_TOOLS,
       hallucinationGuard = true,
-      maxTokens = 16384
+      maxTokens = 16384,
+      // Reasoning effort for this turn, from the request's tier. null leaves
+      // the resolved config's effort in place.
+      effort = null
     } = options;
     const messages = [...initialMessages];
     if (systemPrompt && (messages.length === 0 || messages[0].role !== "system")) {
@@ -4647,7 +4669,7 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
       safeEmit({ type: "thinking" });
       const _modelStart = Date.now();
       try {
-        response = await this.callLLMWithTools(messages, allowedTools, maxTokens);
+        response = await this.callLLMWithTools(messages, allowedTools, maxTokens, 45000, effort);
       } catch (err) {
         this.logAI("error", "Native loop API call failed: " + err.message, { iteration: iter }, "native_loop");
         safeEmit({ type: "error", message: err.message });
@@ -4872,7 +4894,7 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
     });
     try {
       const _synthStart = Date.now();
-      const finalResp = await this.callLLMWithTools(messages, [], maxTokens);
+      const finalResp = await this.callLLMWithTools(messages, [], maxTokens, 45000, effort);
       const _synthEnd = Date.now();
       const _synthUsage = finalResp.usage || {};
       const _synthPerf = finalResp._perf || {};
@@ -5173,7 +5195,7 @@ ${JSON.stringify({
   // Native chat (Phase 2) — flag-gated sibling of chatWithAgent.
   // Returns { reply, actions_taken, error? } — mirrors legacy chat contract.
   // ========================================================================
-  async chatWithAgentNative(message, from = "default", onEvent = null) {
+  async chatWithAgentNative(message, from = "default", onEvent = null, opts = {}) {
     // FAST PATH: deterministic cover commands skip the LLM entirely.
     // Sub-500ms response for "open the garage", "close the basement bay", etc.
     // Always uses explicit open_cover or close_cover, never toggle.
@@ -5353,7 +5375,10 @@ ${JSON.stringify({
         onEvent,
         allowedTools: NATIVE_AGENT_TOOLS.filter(t => CHAT_ALLOWED_TOOL_NAMES.has(t.function.name)),
         hallucinationGuard: true,
-        maxTokens: 4096
+        maxTokens: 4096,
+        // Quick (the UI default, reset on every page load) reasons at "low";
+        // High is the per-session opt-in for forensic and trend questions.
+        effort: effortForTier(opts && opts.tier, null)
       });
       const _t6 = Date.now();
       // Intent classification — used to bucket latency by request shape so

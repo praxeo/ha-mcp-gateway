@@ -449,8 +449,11 @@ renamed_classes = [
 # Translation lives in src/llm-providers.js and normalizes Responses output back
 # into Chat Completions shape, so runNativeToolLoop and the stored chat_history
 # format are unchanged and a provider can be switched mid-conversation.
-# Baked default stays Fireworks/GLM 5.3; Muse Spark is selected at runtime via
-# /admin/llm-config after /admin/llm-selftest passes. DO-side code, so the
+# V30 also MOVES THE DEFAULT off Fireworks to Meta Muse Spark 1.3 (contributor)
+# on the Responses API, with reasoning effort driven by the chat UI's tier
+# toggle (quick -> low, high -> high). This REQUIRES the MODEL_API_KEY secret:
+# set it before this migration lands or every chat turn fails. Fireworks/GLM 5.3
+# stays wired for rollback via a single /admin/llm-config POST. DO-side code, so the
 # persistent HA WS would otherwise pin the live isolate to stale V29 — this
 # rename forces a fresh isolate. Storage preserved, llm_config override included.
 [[migrations]]

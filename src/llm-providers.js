@@ -88,6 +88,22 @@ export function clampEffortForProvider(provider, effort) {
   return "medium";
 }
 
+// ── Reasoning tiers ────────────────────────────────────────────────────────
+// The UI exposes two positions and the request carries one of them. Quick is
+// the default on every page load; High is a per-session opt-in for forensic
+// and trend questions, where the extra reasoning is worth the wait.
+export const LLM_TIERS = {
+  quick: "low",
+  high: "high"
+};
+
+export function effortForTier(tier, fallback) {
+  if (typeof tier === "string" && Object.prototype.hasOwnProperty.call(LLM_TIERS, tier)) {
+    return LLM_TIERS[tier];
+  }
+  return fallback;
+}
+
 // ── Tool schema translation ────────────────────────────────────────────────
 // Chat Completions nests the definition under `function`; the Responses API
 // puts the same fields at the top level of the tool object.
@@ -144,15 +160,25 @@ export function chatMessagesToResponsesInput(messages) {
     }
 
     if (m.role === "assistant") {
-      // Replay the provider's own reasoning items first — they must precede
-      // the function calls they produced.
-      if (Array.isArray(m._reasoning_items)) {
-        for (const item of m._reasoning_items) input.push(item);
+      // Reasoning first — it must precede the calls it produced.
+      for (const item of Array.isArray(m._reasoning_items) ? m._reasoning_items : []) {
+        input.push(normalizeReasoningItem(item));
       }
+      const toolCalls = Array.isArray(m.tool_calls) ? m.tool_calls : [];
       if (typeof m.content === "string" && m.content.trim()) {
-        input.push({ type: "message", role: "assistant", content: m.content });
+        const msg = {
+          type: "message",
+          role: "assistant",
+          content: [{ type: "output_text", text: m.content }]
+        };
+        // Assistant text that precedes a function_call is intermediate
+        // commentary, and the API rejects it (HTTP 400) if replayed as an
+        // ordinary final answer. Text with no call following it IS the final
+        // answer and must carry no phase.
+        if (toolCalls.length) msg.phase = "commentary";
+        input.push(msg);
       }
-      for (const tc of Array.isArray(m.tool_calls) ? m.tool_calls : []) {
+      for (const tc of toolCalls) {
         input.push({
           type: "function_call",
           call_id: tc.id,
@@ -163,27 +189,74 @@ export function chatMessagesToResponsesInput(messages) {
       continue;
     }
 
-    // user (and anything else) — plain message item
+    // user (and anything else) — an input message
     input.push({
       type: "message",
       role: m.role || "user",
-      content: typeof m.content === "string" ? m.content : JSON.stringify(m.content ?? "")
+      content: [{
+        type: "input_text",
+        text: typeof m.content === "string" ? m.content : JSON.stringify(m.content ?? "")
+      }]
     });
   }
 
-  return { instructions: instructionParts.join("\n\n"), input };
+  return {
+    instructions: instructionParts.join("\n\n"),
+    input: dropOrphanReasoning(input)
+  };
+}
+
+// A reasoning input item must carry a `summary` array even when empty, and its
+// `id` is optional on replay because `encrypted_content` carries the state.
+// Anything else on the item is dropped: replaying a bare id without the
+// encrypted content is rejected as a missing/expired reference.
+export function normalizeReasoningItem(item) {
+  const out = { type: "reasoning", summary: Array.isArray(item?.summary) ? item.summary : [] };
+  if (item && typeof item.encrypted_content === "string") out.encrypted_content = item.encrypted_content;
+  if (item && typeof item.id === "string") out.id = item.id;
+  return out;
+}
+
+// Every reasoning item must be followed by an assistant message or a
+// function_call before the next user/system/developer message, or the request
+// is rejected (HTTP 400). Rather than fabricate an assistant turn the model
+// never produced, drop the orphan — dropping reasoning is explicitly allowed
+// and costs only that turn's chain of thought.
+export function dropOrphanReasoning(input) {
+  const out = [];
+  for (let i = 0; i < input.length; i++) {
+    const item = input[i];
+    if (item && item.type === "reasoning") {
+      const next = input[i + 1];
+      const ok = next && (
+        next.type === "function_call" ||
+        (next.type === "message" && next.role === "assistant") ||
+        next.type === "reasoning"
+      );
+      if (!ok) continue;
+    }
+    out.push(item);
+  }
+  // A run of reasoning items is only valid if the run itself ends in a message
+  // or a call; walk backwards once to clear a trailing run.
+  for (let i = out.length - 1; i >= 0; i--) {
+    if (out[i] && out[i].type === "reasoning") out.splice(i, 1);
+    else break;
+  }
+  return out;
 }
 
 // ── Request building ───────────────────────────────────────────────────────
-export function buildResponsesBody({ model, messages, tools, maxTokens, effort }) {
+export function buildResponsesBody({ model, messages, tools, maxTokens, effort, summary, cacheKey }) {
   const { instructions, input } = chatMessagesToResponsesInput(messages);
   const body = {
     model,
     input,
     // Stateless: this gateway keeps its own history in DO storage, so there is
-    // no reason to have the provider persist conversations server-side.
-    // `include` then returns the encrypted reasoning blob that makes multi-turn
-    // reasoning replay work without that server-side state.
+    // no reason for the provider to persist conversations. `include` then
+    // returns the encrypted reasoning blob that makes multi-turn reasoning
+    // replay work without that server-side state. (These two cannot be
+    // combined with previous_response_id — pick one source of prior context.)
     store: false,
     include: ["reasoning.encrypted_content"],
     parallel_tool_calls: true
@@ -191,11 +264,30 @@ export function buildResponsesBody({ model, messages, tools, maxTokens, effort }
   if (instructions) body.instructions = instructions;
   if (Array.isArray(tools) && tools.length) body.tools = chatToolsToResponsesTools(tools);
   if (Number.isFinite(maxTokens)) body.max_output_tokens = maxTokens;
-  if (effort) body.reasoning = { effort };
+  // Muse Spark rejects effort "none" outright, and omitting the block entirely
+  // is the documented way to leave reasoning at the model's own default.
+  if (effort && effort !== "none") {
+    body.reasoning = { effort };
+    // Muse Spark's raw chain of thought is encrypted and carries no visible
+    // text, so without a summary there is literally nothing to show in the
+    // UI's reasoning panel. The summary is the only human-readable form.
+    if (summary) body.reasoning.summary = summary;
+  }
+  // Groups requests so the long, byte-identical system+tools prefix stays warm
+  // in the provider's prompt cache — the Responses-API counterpart to the
+  // Fireworks session-affinity header.
+  if (cacheKey) body.prompt_cache_key = cacheKey;
+  // NOTE: temperature/top_p are deliberately NOT set. Muse Spark is tuned for
+  // its defaults and performs best there; the chat-format branch still sends
+  // temperature 0 because that is right for the models it serves.
   return body;
 }
 
 // ── Response translation: Responses output → Chat Completions shape ────────
+// Note: Responses output messages carry no `reasoning_content` — that field is
+// a Chat Completions concept. It is synthesized here from the reasoning items'
+// summaries so the rest of the gateway (SSE `reasoning` events, the UI panel)
+// keeps working unchanged across providers.
 // The tool loop reads `choices[0].message` and `usage.{prompt,completion}_tokens`,
 // so normalize to exactly that. Reasoning arrives as its own output items;
 // their text is surfaced as `reasoning_content` (what the SSE stream and the
@@ -225,16 +317,22 @@ export function responsesToChatCompletion(data) {
 
     if (item.type === "reasoning") {
       reasoningItems.push(item);
-      for (const c of Array.isArray(item.content) ? item.content : []) {
-        if (c && typeof c.text === "string") reasoningParts.push(c.text);
-      }
+      // Muse Spark's raw chain of thought is encrypted and the reasoning item
+      // carries no visible content, so `summary` is normally the only readable
+      // text here. `content` is still read for providers that do expose it.
       for (const sroot of Array.isArray(item.summary) ? item.summary : []) {
         if (sroot && typeof sroot.text === "string") reasoningParts.push(sroot.text);
+      }
+      for (const c of Array.isArray(item.content) ? item.content : []) {
+        if (c && typeof c.text === "string") reasoningParts.push(c.text);
       }
       continue;
     }
 
     if (item.type === "message") {
+      // Commentary and final-answer text are merged into one content string.
+      // The replay side re-derives `phase` from whether tool calls follow, so
+      // the distinction survives the round trip without being stored.
       const content = item.content;
       if (typeof content === "string") {
         textParts.push(content);
