@@ -1,13 +1,29 @@
-# Plan — faster, more accurate Ranger: model tiers, voice, GUI
+# Plan — faster, more accurate Ranger: two reasoning tiers, Tesla-first voice, GUI
 
 Status: **plan only, nothing implemented.** Written 2026-09-03 against `main`
-at `40444c9`. Every file/line reference was checked against that commit.
-Numbers in §1 come from the live `ai_log` (`chat_timing_ms` rows, Aug 31 –
-Sep 3, 2026).
+at `40444c9`, revised the same day after John's decisions (§0). Every
+file/line reference was checked against that commit. Numbers in §1 come from
+the live `ai_log` (`chat_timing_ms` rows, Aug 31 – Sep 3, 2026).
 
-Sections: 1 Where the time goes · 2 Latency · 3 Intelligence tiers + OpenAI ·
-4 Accuracy (fewer mistakes) · 5 Voice commands · 6 GUI · 7 Telemetry & eval ·
-8 Sequencing (which phases need a DO rename) · 9 Open questions for John.
+Sections: 0 Decisions · 1 Where the time goes · 2 Latency · 3 Reasoning tiers ·
+4 Accuracy (fewer mistakes) · 5 Voice · 6 GUI · 7 Telemetry & eval ·
+8 Sequencing · 9 Remaining assumptions.
+
+---
+
+## 0. Decisions (John, 2026-09-03)
+
+| Question | Decision | What it changes |
+|---|---|---|
+| Who uses it, where | John only; phone sometimes, **Tesla browser primarily** | Voice mode is the primary UX, designed for the Tesla screen |
+| OpenAI | **No.** Stay in the Fireworks ecosystem | No provider adapter, no Responses API work, one API key |
+| Tiers | **Quick = GLM 5.3 effort low. High = GLM 5.3 effort high.** | Two tiers, same model: prefix cache is shared, router is trivial |
+| Temperatures | "Take them down some" | Chat loop is already at 0; the legacy `callLLM` 0.3/0.4 comes down (§2 L2) |
+| Voice safety policy | N/A for now | No confirm-first class; unlock and night-time garage stay on the LLM path as today |
+| Toggle persistence | **Reset to Quick** each session | No localStorage for tier; High is per-session opt-in |
+| Spoken replies | **ElevenLabs voice**; **auto-send when recording stops** | `/tts` proxy, audio playback in voice mode, silence auto-stop → send |
+| Is 3 s too slow in the car | **Yes** | The deterministic command grammar moves to Phase 1, ahead of streaming |
+| Goodnight / leaving macros | Probably exist; not important now | Deferred |
 
 ---
 
@@ -26,7 +42,7 @@ Sections: 1 Where the time goes · 2 Latency · 3 Intelligence tiers + OpenAI ·
 | Completion tokens per LLM iteration (median) | **719** (58–2 558) |
 | Output speed, GLM 5.3 on Fireworks | **~67 tok/s** (37–134) |
 | Prompt tokens, first iteration (median) | 19 k (10.7 k at start of an evening → 30 k by the end) |
-| Prefix-cache hit on the *first* iteration of a turn | 4 of 16 turns |
+| Prefix-cache hit on the *first* iteration of a turn | 4 of 16 |
 | Iterations per turn | 1–3 |
 
 The arithmetic that matters: **719 tokens ÷ 67 tok/s ≈ 10.7 s per iteration.**
@@ -47,9 +63,10 @@ not latency (details in §4):
   sense", model re-polled and corrected itself. 24 s + 23 s for a question the
   `stateCache` can answer in 0 ms.
 
-So the levers, in order of payoff: **(a)** stop generating 700 reasoning tokens
-for simple turns (tiers), **(b)** stream so perceived latency = TTFT, **(c)**
-answer deterministic commands/status from the cache with no LLM at all,
+So the levers, in order of payoff for a driver: **(a)** answer commands and
+status from the cache with no LLM at all (the grammar, §5 V4), **(b)** stop
+generating 700 reasoning tokens for ordinary turns (Quick tier at effort low),
+**(c)** stream so perceived latency = TTFT and speech can start early,
 **(d)** fix the history overflow so the agent stops forgetting.
 
 ---
@@ -63,7 +80,7 @@ does `await response.json()`); the browser gets `started` → `thinking` → sil
 → one atomic `reply`. Perceived latency equals total latency.
 
 Plan:
-- `callLLMWithTools` gets a `stream: true` mode that parses the provider's SSE,
+- `callLLMWithTools` gets a `stream: true` mode that parses Fireworks' SSE,
   accumulates `content` / `reasoning_content` / `tool_calls` deltas, and calls
   `onDelta({type:"reasoning"|"content", text})`.
 - `runNativeToolLoop` forwards deltas as new SSE events `delta` (content) and
@@ -74,26 +91,24 @@ Plan:
   overwrites the bubble.
 - Tool-call iterations still buffer (nothing useful to show), but the reasoning
   panel fills live, which reads as progress.
-- Perceived latency for a chat-only turn drops from ~11 s to ~1–2 s (TTFT +
-  reasoning time when effort is low).
+- In voice mode, streaming lets TTS start on the first complete sentence
+  (§5 V3, second step) instead of after the whole reply.
 
-Both Fireworks and OpenAI Chat Completions stream in the same
-`choices[0].delta` shape; the Responses API (§3) streams typed events — the
-adapter normalizes.
-
-### L2 — Fewer reasoning tokens by default
+### L2 — Fewer reasoning tokens by default, and temperatures
 
 `reasoning_effort: "high"` (`ha-websocket.js:214`) is the default for every
-turn, including "when will it rain again?" (181 tokens, 4.5 s — that one was
-fine) and "what's the status of the house?" (591 tokens, 10.9 s). The tier
-system in §3 makes this per-request. Expected: Standard tier at effort `low`
-roughly halves generation time on the same model; Quick tier at `none` on a
-250 tok/s model brings single-tool turns to ~2–3 s.
+turn, including "when will it rain again?" (181 tokens, 4.5 s) and "what's the
+status of the house?" (591 tokens, 10.9 s). The two-tier design in §3 makes
+the default `low`. Expected: roughly half the generation time on the same
+model for ordinary turns; High stays available for forensic questions.
 
-Also extend the effort enum. `LLM_REASONING_EFFORTS` (`ha-websocket.js:78`) is
-`low|medium|high|none`; add `minimal` and `xhigh` (OpenAI accepts
-`none|minimal|low|medium|high|xhigh|max`; Fireworks accepts `low|medium|high`
-and maps `none`). Provider adapter clamps to what the provider supports.
+Temperatures: the chat tool loop already runs `temperature: 0` (confirmed in
+the `fireworks-sampling-options` header on every logged turn: `temperature
+0.0, top_k 20, top_p 0.95`). The only nonzero values are in the legacy
+`callLLM` (`ha-websocket.js:3093`: 0.3 for JSON mode, 0.4 otherwise), which the
+chat path does not use but the iteration-ceiling synthesis and any future
+non-tool call would. Bring both to 0.1 so nothing drifts. If "temperatures"
+meant the reasoning level, the tier change already does that.
 
 ### L3 — Parallelize the pre-LLM phase (~0.75 s → ~0.3 s)
 
@@ -101,17 +116,16 @@ and maps `none`). Provider adapter clamps to what the provider supports.
 (`:5062`) and `_buildClimatePreambleIfNeeded` (`:5065`) are three serial awaits
 that share no inputs. `Promise.all` them. Inside `_buildNativeContextEntities`
 the embedding call (`:2830`) is serial before four parallel Vectorize queries —
-unavoidable, but the Quick tier can skip retrieval entirely when the request
-matched a grammar intent (§5) and only needs the snapshot.
+unavoidable, but a grammar hit skips retrieval entirely.
 
 ### L4 — Extend the post-tool short-circuit
 
 `ha-websocket.js:4592-4645` already skips the wrap-up LLM call for a single
 `light.*` / `switch.*` / `lock.*` / `scene.turn_on` call and synthesizes
 "Done — X." Extend the allow-list to `cover.*`, `climate.set_temperature`
-(synthesize "Set main level to 71°."), `script.turn_on`, `fan.*`,
+(synthesize "Set main level to 71."), `script.turn_on`, `fan.*`,
 `media_player.*` volume/pause, and `schedule_action` ("Scheduled: X at 8:05 PM").
-Each extension saves one full iteration (~5–10 s at effort high).
+Each extension saves one full iteration (~5 s at effort low).
 
 ### L5 — Deterministic answers for status questions (no LLM)
 
@@ -120,11 +134,12 @@ already renders locks, covers, climate, presence, power, Tesla from
 `stateCache`. Add a read fast path next to `_tryDeterministicFastPath`:
 short questions that match a narrow grammar ("what doors are unlocked", "is
 the house locked", "is the garage open", "who's home", "what's the temperature
-inside", "is the Tesla charging/plugged in") get a templated answer in <100 ms.
-Anything with forensic markers or that doesn't match cleanly falls through to
-the LLM exactly as today. This is the same bail-guard discipline the cover
-fast path uses (`ha-websocket.js:480-513`), and it fixes the "unlocked doors"
-mistake at the root: the answer is the truth table, not a paraphrase.
+inside", "is the Tesla charging/plugged in") get a templated answer in <100 ms,
+phrased for speech ("Two doors are unlocked: basement and back porch."). Anything
+with forensic markers or that doesn't match cleanly falls through to the LLM
+exactly as today. Same bail-guard discipline as the cover fast path
+(`ha-websocket.js:480-513`). Fixes the "unlocked doors" mistake at the root:
+the answer is the truth table, not a paraphrase.
 
 ### L6 — Persisted history bloat
 
@@ -133,124 +148,80 @@ message in history carries its `reasoning_content` (preserved by
 `sanitizeMessagesForLLM`, `ha-websocket.js:3026`, and stored via
 `loopAdditions`, `:5199`). Fireworks needs `reasoning_content` **within** a
 tool-loop turn; it does not need it from prior turns. Strip it (or cap it at
-~300 chars) when building `nextHistory` (`:5218`). Cuts prefill, cuts the
-110 KB cap pressure (§4 A1), and makes cross-provider history portable (§3).
+~300 chars) when building `nextHistory` (`:5218`). Cuts prefill and cuts the
+110 KB cap pressure (§4 A1).
 
-### L7 — STT latency is unmeasured
+### L7 — STT and TTS latency must be measured
 
 `/transcribe` (`src/worker.js:2407`) has no timing, no timeout, and the UI has no
-timer. Add `stt_ms` (client) and a `Server-Timing` header (worker) so the
-voice round-trip can be seen. Scribe v2 batch on a 3-second clip is typically
-~1 s; if measurements show >1.5 s, Scribe v2 Realtime (WebSocket, ~150 ms) is
-the upgrade — but it needs a browser-side WS with a scoped ElevenLabs token,
-so measure first.
+timer. Add `stt_ms`, `tts_first_audio_ms` (client) and `Server-Timing`
+headers (worker). Scribe v2 batch on a 3-second clip is typically ~1 s; if
+measurements show >1.5 s, Scribe v2 Realtime (WebSocket, ~150 ms) is the
+upgrade — measure first.
 
 ---
 
-## 3. Intelligence tiers + OpenAI
+## 3. Reasoning tiers (two, same model)
 
-### The toggle
-
-Three tiers plus Auto. Every request carries `tier` (UI → `/chat` body →
-Worker whitelist at `src/worker.js:2531` → DO `/ai_chat_stream` → `chatWithAgent`
-→ `runNativeToolLoop`), and the DO resolves it to a concrete
-`{provider, endpoint, model, reasoning}`.
-
-| Tier | Job | Recommended model | Reasoning | Target |
+| Tier | Job | Model | Reasoning | Target |
 |---|---|---|---|---|
-| ⚡ **Quick** | single commands, status reads, scheduling, "turn X on for an hour" | DeepSeek V4 Flash on Fireworks (`deepseek-v4-flash-0731`, $0.22 / $0.66 per M, ~256 tok/s, 0.6 s TTFT) — ran V17–V26 and handled the tool chain | `none` | < 3 s |
-| ● **Standard** | default; multi-step reads, weather, memory, anything not obviously trivial | GLM 5.3 (today's model) | `effort: low` (try `medium` if quality drops) | < 8 s |
-| ◆ **Deep** | forensic / "trends over the last few days" / debugging HA / anything with `query_*` tools | GPT-5.6 Sol via OpenAI Responses API, or GLM 5.3 at `high` if OpenAI isn't added | `high` | quality over speed |
-| **Auto** (default) | router below picks | | | |
+| **Quick** (default, every session) | everything that isn't forensic: commands the grammar missed, status, weather, scheduling, memory | GLM 5.3 (`glm-5p3`) | `effort: low` | < 6 s spoken, < 2 s to first streamed token |
+| **High** (per-session opt-in) | forensic / "trends over the last few days" / debugging HA / anything with `query_*` tools | GLM 5.3 | `effort: high` | quality over speed |
 
-Alternative Quick candidates, for the record: GPT-5.6 Luna ($0.20 / $1.20,
-~0.7 s TTFT, ~90 tok/s — cheaper than Terra but *slower output* than DeepSeek
-V4 Flash), GLM 5.2 Fast (230 tok/s but $2.10 / $6.60), GLM 5.3 Flash ($0.15 /
-$0.50 but only ~41 tok/s per Artificial Analysis — cheap, not fast).
+Same model in both tiers means one API key, one prompt cache, one set of tool
+schemas, and no message-format differences. The tier is just the
+`reasoning_effort` value on that request.
 
-### Router (Auto)
+If Quick at ~67 tok/s still feels slow after the grammar and streaming land,
+the one-line fallback is DeepSeek V4 Flash on Fireworks
+(`deepseek-v4-flash-0731`, ~256 tok/s, ran V17–V26 and handled the tool chain)
+as the Quick model. Not planned; noted so the decision is recorded.
 
-Ordered, first match wins; all pure functions in a new `src/tier-router.js`
-with vitest coverage like the fast-path tests:
+### Router
 
-1. Cover fast path / status fast path / intent grammar (§5) → **no LLM**.
-2. Explicit UI tier → use it.
+Ordered, first match wins; pure functions in a new `src/tier-router.js` with
+vitest coverage like the fast-path tests:
+
+1. Cover fast path / status fast path / intent grammar (§5 V4) → **no LLM**.
+2. UI toggle set to High for this session → **High**.
 3. Forensic markers (the existing regex at `ha-websocket.js:486`: when /
    history / how often / last time / summarize / explain …) or trend words
-   (trend, habit, pattern, why, debug, root cause, "last N days") → **Deep**.
-4. Short imperative (≤ 12 words, starts with a verb, one clause) or a state
-   question that missed the status grammar → **Quick**.
-5. Everything else → **Standard**.
+   (trend, habit, pattern, why, debug, root cause, "last N days") → **High**.
+4. Everything else → **Quick**.
 
-**Escalation** keeps Auto safe: if a Quick-tier turn (a) returns a tool error,
-(b) exceeds 2 iterations, or (c) ends without a tool call on an imperative
-request, re-run the same turn at Standard and emit an SSE `escalated` event so
-the UI can show "↑ standard". Misrouting then costs seconds, not correctness.
+**Escalation** keeps Quick safe: if a Quick turn (a) returns a tool error the
+model can't recover from in one more iteration, or (b) hits the 6-iteration
+ceiling, re-run the same turn at High and emit an SSE `escalated` event so
+the UI shows "↑ high". Misrouting costs seconds, not correctness.
 
-### Config shape (extends the V29 runtime config, no rename to change it)
+### Config shape (extends the V29 runtime config; no rename needed to change it)
 
 ```json
 {
-  "default_tier": "auto",
-  "tiers": {
-    "quick":    { "provider": "fireworks", "model": "accounts/fireworks/models/deepseek-v4-flash-0731", "reasoning_mode": "none" },
-    "standard": { "provider": "fireworks", "model": "accounts/fireworks/models/glm-5p3", "reasoning_mode": "effort", "reasoning_effort": "low" },
-    "deep":     { "provider": "openai", "api": "responses", "model": "gpt-5.6-sol", "reasoning_mode": "effort", "reasoning_effort": "high" }
-  }
+  "model": "accounts/fireworks/models/glm-5p3",
+  "reasoning_mode": "effort",
+  "tiers": { "quick": { "reasoning_effort": "low" }, "high": { "reasoning_effort": "high" } },
+  "default_tier": "quick"
 }
 ```
 
-- `resolveLLMConfig` (`ha-websocket.js:100`) gains `tier` resolution; the
-  existing flat keys (`model`, `reasoning_mode`, …) stay valid and mean
-  "standard", so the current override keeps working.
-- `sanitizeLLMConfigPatch` (`:151`) allow-list grows: `provider` (`fireworks|openai`),
-  `api` (`chat|responses`), `default_tier`, `tiers.*`. Keys, never secrets.
-- `GET /admin/llm-config` reports the resolved table per tier.
+- `resolveLLMConfig` (`ha-websocket.js:100`) gains `tier` resolution; tier
+  entries may override `model` / `reasoning_mode` too, so a Quick-model swap
+  later is a config POST, not a deploy.
+- `sanitizeLLMConfigPatch` (`:151`) allow-list grows: `default_tier`, `tiers.*`.
+- `LLM_REASONING_EFFORTS` (`:78`) is `low|medium|high|none` — sufficient.
+- Per-request `tier` flows UI → `/chat` body → Worker whitelist
+  (`src/worker.js:2531`) → DO `/ai_chat_stream` → `chatWithAgent` →
+  `runNativeToolLoop`. The MCP `ai_chat` tool gets an optional `tier` arg too
+  (Claude Code asking a forensic question can pick High).
 - Per-turn telemetry gains `tier`, `tier_source` (`ui|router|escalated`),
-  `provider`, `model` — today the model is not logged at all.
+  `model`, `reasoning_effort` — today the model is not logged at all.
 
-### Provider adapter — what's Fireworks-coupled today
-
-Adding OpenAI is not just an endpoint change. These are the coupling points
-(all single choke points, so it's tractable):
-
-| Coupling | Where |
-|---|---|
-| `Authorization: Bearer ${env.FIREWORKS_API_KEY}` hardcoded | `ha-websocket.js:3106`, `:4372`; guard at `:3183` |
-| `x-session-affinity` header (Fireworks replica pinning) | `:3107`, `:4373` |
-| `fireworks-*` perf headers → `server_ttft_ms` | `_extractPerfHeaders` `:3040`, `_normalizePerf` `:3057` |
-| `thinking: {type:"enabled"}` mode (OpenAI 400s on it) | `applyReasoningToBody` `:134` |
-| `reasoning_content` echoed on assistant messages (OpenAI rejects unknown fields) | `sanitizeMessagesForLLM` `:3019` |
-| Error strings / field names `fireworks_ms`, `fireworks_tool_loop` | `:4380`, `:4387`, `:5178` |
-
-Plan: new `src/llm-providers.js` exporting `buildRequest(cfg, messages, tools,
-opts)`, `parseResponse`, `parseStream` for two adapters —
-
-- **`fireworks-chat`**: today's code, moved.
-- **`openai-responses`**: required for GPT-5.6 with tools *and* reasoning.
-  OpenAI's `/v1/chat/completions` rejects function tools combined with any
-  `reasoning_effort` other than `none` for the 5.6 family ("use /v1/responses
-  or set reasoning_effort to 'none'"). Responses API differences the adapter
-  owns: `input` items instead of `messages`; flat tool schema
-  `{type:"function", name, parameters}`; tool results as
-  `function_call_output` items; reasoning returned as `reasoning` items that
-  must be passed back on the next iteration (use `store:false` +
-  `include:["reasoning.encrypted_content"]` so nothing lives on OpenAI's side);
-  `reasoning: {effort}`; `max_output_tokens`; typed stream events
-  (`response.output_text.delta`, `response.function_call_arguments.delta`,
-  `response.completed` with `usage`). Prompt caching is automatic on the
-  stable prefix; add `prompt_cache_key: "ha-mcp-gateway"`.
-- Secrets: `OPENAI_API_KEY` via `wrangler secret put`. The guard at `:3183`
-  checks the key the resolved tier needs.
-- History is stored provider-neutral (role/content/tool_calls only, per L6),
-  converted at call time, so switching tiers mid-conversation works.
-
-Cost reality check for Sol: a Deep turn today runs 20–90 k prompt tokens and
-2–3 k completion tokens across iterations. At $4 / $20 per M that is roughly
-$0.10–$0.40 per deep question (less with cache hits at $0.40 per M cached
-input). Fine for a handful a day; not for the default tier — which is exactly
-why Auto routes only forensic/trend questions there. OpenAI "Fast mode" (2×
-price, ~2.5× speed) is available on Sol if Deep answers feel slow.
+**Not doing: OpenAI.** Recorded for the future: GPT-5.6 via
+`/v1/chat/completions` rejects function tools combined with any
+`reasoning_effort` other than `none`; reasoning + tools needs the Responses
+API and therefore a provider adapter for auth, message shape, reasoning
+items, and stream events. That is the cost if this is ever revisited.
 
 ---
 
@@ -280,7 +251,7 @@ the model's `entity_id` straight to HA. Add a pre-flight: if the id is not in
 (Bedside Lamp), …"}` using friendly-name fuzzy match (trigram or
 Levenshtein over `friendly_name` + object_id). The model self-corrects in one
 iteration instead of confabulating or erroring at HA. Same check in
-`get_state`.
+`get_state`. The same matcher backs the grammar's name resolution (§5 V4).
 
 **A4 — Service field names go unvalidated** (`todo.add_item` was called with
 `summary` instead of `item` → HA rejected). The services catalog is already
@@ -298,13 +269,12 @@ it's the tool the agent reached for when asked to fix the Tesla tracker.
 **A6 — Voice mis-hearings.** §5 V1 (keyterms) + A3 (fuzzy entity match) +
 alias table (§5 V4) together cover "beside lamp".
 
-**A7 — Prompt says "Be concise" but reasoning isn't.** The static prompt is
-~9.4 k tokens with tool schemas (`chat-prompt.js` 14 KB + `getAgentContext`
-4.3 KB + 19 schemas 19 KB). Two trims that don't touch behavioral rules: the
-2 000-char TESLA MODEL Y block (`chat-prompt.js:105`) can move behind
-`get_house_topology`-style on-demand retrieval; the stale "last 2h" timeline
-comment (`chat-prompt.js:155`) vs 1 h cutoff (`ha-websocket.js:4891`) should be
-made true. Prefix cache means this mostly saves cost, not time — do it last.
+**A7 — Static prompt size.** ~9.4 k tokens with tool schemas
+(`chat-prompt.js` 14 KB + `getAgentContext` 4.3 KB + 19 schemas 19 KB). Two
+trims that don't touch behavioral rules: the 2 000-char TESLA MODEL Y block
+(`chat-prompt.js:105`) can move behind on-demand retrieval; the stale "last 2h"
+timeline comment (`chat-prompt.js:155`) vs 1 h cutoff (`ha-websocket.js:4891`)
+should be made true. Prefix cache means this mostly saves cost, not time. Last.
 
 **A8 — Presence flap (BUGS `#6f87e35d`)** is an HA-side tracker config problem
 (`device_tracker.tesla_model_y_route` reporting home at gps_accuracy 0); the
@@ -312,7 +282,7 @@ gateway fix is A5 so the agent can actually apply the registry change.
 
 ---
 
-## 5. Voice commands
+## 5. Voice (Tesla-first)
 
 ### What exists
 
@@ -320,7 +290,7 @@ Tap-to-toggle mic (`src/chat-ui.html.js:1203-1279`), whole-clip POST to
 `/transcribe` (Scribe v2, `language_code: eng`, `no_verbatim`, **no keyterms**,
 `worker.js:2430-2437`), transcript auto-sent with no review, no VAD, no TTS, no
 wake word, and the voice path calls `send()` without `suppressRefocus`, which is
-the Tesla keyboard pop John asked about on Sep 1.
+the Tesla keyboard pop from Sep 1.
 
 ### V1 — Keyterm biasing (cheapest accuracy win)
 
@@ -328,125 +298,134 @@ Scribe v2 batch accepts up to 1 000 `keyterms` (≤ 50 chars each). Build the
 list server-side from `stateCache`: friendly names of every controllable
 entity (light, switch, lock, cover, climate, scene, script, fan,
 media_player), area names, household names (John, Sabrina, Ranger), Tesla
-terms (precondition, sentry, charge limit), and the fast-path vocabulary.
-Cache in KV with the registry refresh (15-min cycle). Send on every
-`/transcribe`. Expect "beside lamp" → "bedside lamp".
+terms (precondition, sentry, charge limit), and the grammar vocabulary. Cache
+in KV with the registry refresh (15-min cycle). Send on every `/transcribe`.
 
-### V2 — Silence auto-stop
+### V2 — Silence auto-stop, then auto-send (decided)
 
 Client-side VAD via `AudioContext` + `AnalyserNode` RMS: stop recording after
-~1.2 s of silence following speech, minimum clip 0.6 s, hard cap 15 s. Keeps
-tap-to-start; removes the second tap (which is what a driver or someone holding
-a baby needs). Keep the manual tap-to-stop as fallback.
+~1.2 s of silence following speech, minimum clip 0.6 s, hard cap 15 s, then
+transcribe and send with no review step. Tap-to-stop stays as a manual
+override; a tap during the "sending…" moment cancels.
 
-### V3 — Voice mode (Tesla / hands-busy)
+### V3 — Voice mode with ElevenLabs spoken replies (decided)
 
-A persistent toggle (localStorage) that:
-- never focuses the textarea (fixes the keyboard pop: set `suppressRefocus` in
-  the mic `onstop` path, `chat-ui.html.js:1256`),
-- tags the request `source: "voice"` so the DO prepends `[voice]` to the user
-  turn and the prompt rule says: ≤ 2 sentences, no markdown, no lists, spell
-  out times,
-- speaks the reply with `speechSynthesis` (free, offline, works in Tesla's
-  Chromium) — optional ElevenLabs TTS later if the voice matters,
-- shows the transcript in the user bubble with a tap-to-edit affordance and a
-  3-second "sending…" window to cancel a mis-hearing before it fires,
-- uses a bigger mic target and larger type.
+Voice mode is on by default when the UA is the Tesla browser and toggleable
+elsewhere (persisted; tier is not). In voice mode:
 
-### V4 — Voice command grammar (deterministic, no LLM)
+- **No textarea focus** (set `suppressRefocus` in the mic `onstop` path,
+  `chat-ui.html.js:1256`). Fixes the keyboard pop.
+- **`source: "voice"`** on the request → the DO prepends `[voice]` to the user
+  turn and a static prompt rule says: ≤ 2 sentences, no markdown, no lists,
+  spell out times, say the entity's friendly name not its id. Grammar and
+  status fast-path replies are already speech-shaped.
+- **`/tts` Worker route** proxying ElevenLabs
+  `POST /v1/text-to-speech/{voice_id}/stream` with `eleven_flash_v2_5`
+  (~75 ms model latency), `optimize_streaming_latency`, `output_format`
+  `mp3_22050_32` (small, Tesla-safe), text capped at ~600 chars. Uses the
+  existing `ELEVENLABS_API_KEY`; voice id via a new `ELEVENLABS_VOICE_ID`
+  var. Strip markdown and entity ids before synthesis.
+- **Autoplay unlock.** Chromium's user-activation window expires before a
+  reply arrives, so create the `<audio>` element and play a silent buffer on
+  the mic tap; later `src` swaps then play without a gesture. Verify on the
+  Tesla first — it's the one browser that matters.
+- **Playback**: first step, fetch the stream on the `reply` event and play.
+  Second step (after L1): send sentence-sized chunks to `/tts` as `delta`
+  events complete sentences and queue them, so speech starts ~1 s after the
+  first token instead of after the whole reply.
+- Cost is one TTS call per spoken reply; replies are short by rule, so this
+  stays well inside ElevenLabs' plan character budget. Speak only in voice
+  mode.
+- Larger type, bigger mic target, transcript shown in the user bubble.
 
-Promote `_tryDeterministicFastPath` into `src/intent-grammar.js`: a small
-table-driven grammar with the same bail guards, unit-tested like the cover
-path. Commands worth fast-pathing in this house, grouped by risk:
+### V4 — Command grammar (deterministic, no LLM) — **Phase 1, ahead of streaming**
 
-*Safe, fire immediately (Quick tier fallback if the grammar misses):*
-- "open / close the (main) garage", "basement bay", "left basement" — today.
-- "lock the front door / back porch / basement / garage entry / lock up /
-  lock everything" → `lock.lock` (lock is safe; unlock is not).
-- "turn on/off the <friendly name or alias>", "<name> on/off", "dim <name> to
-  50", "<area> lights off" → resolve via alias table then fuzzy friendly name
-  (A3), else fall through.
-- "set the AC / main level / basement to 71", "AC up/down 2" → `climate.set_temperature`
-  on the mapped thermostat (QUICK FACTS already maps them).
-- "goodnight", "I'm leaving", "we're home", "movie time" → HA scripts/scenes
-  (create them in HA; grammar maps phrase → `script.turn_on`).
-- "turn off the drop lights in an hour", "AC down 2 for an hour" →
-  `call_service` + `schedule_action` (the compound pattern the prompt already
-  teaches; the grammar can do it without a model).
-- "cancel that", "never mind" → cancel the most recent scheduled action.
+Promote `_tryDeterministicFastPath` into `src/intent-grammar.js`: table-driven,
+same bail guards (question / forensic marker / length), unit-tested like the
+cover path (`test/try-deterministic-fast-path.test.js`). Order of
+implementation reflects car use:
 
-*Status (read fast path, §2 L5):* "is the house locked / secure", "what's
-open", "who's home", "is the Tesla charging / plugged in / how much charge",
-"what's the temperature inside / outside", "is the garage open".
+1. **Covers** (today): open / close the (main) garage, basement bay, left basement.
+2. **Locks, lock only**: "lock the front door / back porch / basement / garage
+   entry", "lock up", "lock everything" → `lock.lock`. Unlock stays on the
+   LLM path (no policy decided yet, so no new voice-only exposure).
+3. **Status** (L5): "is the house locked / secure", "what's open", "who's
+   home", "is the Tesla charging / plugged in / how much charge", "what's the
+   temperature inside / outside", "is the garage open".
+4. **Lights / switches**: "turn on/off the <name>", "<name> off", "dim <name>
+   to 50", "<area> lights off" → alias table → fuzzy friendly-name match (A3)
+   → `light.*` / `switch.*`. Ambiguous match (two names within a small score
+   gap) → fall through to the LLM.
+5. **Climate**: "set the AC / main level / basement to 71", "AC up/down 2" →
+   `climate.set_temperature` on the mapped thermostat (QUICK FACTS already
+   holds the mapping; move it into the grammar table).
+6. **Timed**: "turn off the drop lights in an hour", "AC down 2 for an hour" →
+   `call_service` + `schedule_action` without a model.
+7. **Undo**: "cancel that", "never mind" → cancel the most recent scheduled action.
+8. **Macros** ("goodnight", "I'm leaving", "we're home") → `script.turn_on` once
+   the scripts are confirmed. Deferred.
 
-*Requires confirmation (spoken "yes" or tap):* "unlock <door>", "open the
-garage" between 10 PM and 5 AM, "disarm". The grammar returns
-`{needs_confirmation, action}`; the UI shows a confirm chip and re-sends with
-`confirm_token`.
+Every grammar hit logs `intent_tag: "grammar:<class>"` so hit rate and false
+positives are auditable in `ai_log`, and every grammar reply is one short
+spoken sentence.
 
-*Never fast-path, always LLM:* anything with forensic markers, "why", multi-
-clause requests, unknown names.
+**Alias table:** "call the bedside lamp 'my lamp'" writes a structured
+`entity_aliases` map in DO storage that the grammar and A3 consult first.
+Learned once, used at 0 ms.
 
-**Alias table:** "call the bedside lamp 'my lamp'" → `save_memory` already
-exists; add a structured `entity_aliases` DO storage map that the grammar and
-A3 consult first. Aliases learned once are used at 0 ms forever.
+### V5 — Not worth doing yet
 
-### V5 — Things not worth doing yet
-
-- Wake word in a browser: unreliable, battery-hostile, and Tesla's browser
-  won't keep the mic open. Tap-to-talk + VAD is the honest ceiling.
-- Scribe v2 Realtime WebSocket: only if L7 measurements show batch STT > 1.5 s.
+Wake word in a browser (unreliable, battery-hostile, Tesla won't keep the mic
+open) and Scribe v2 Realtime (only if L7 shows batch STT > 1.5 s).
 
 ---
 
 ## 6. GUI
 
-- **Tier control**: a 4-segment toggle in the composer (Auto · ⚡ · ● · ◆),
-  sticky in localStorage, sent as `tier` on every request. The reply footer
-  shows what actually ran: "2.1 s · Quick · DeepSeek V4 Flash" (or "↑ escalated
-  to Standard"). This makes the latency work visible and lets John A/B by feel.
+- **Tier control**: a two-position toggle in the composer (Quick · High),
+  **resets to Quick on every page load**, sent as `tier` on every request.
+  The reply footer shows what ran: "1.8 s · Quick" or "↑ escalated to High".
+- **Voice mode** (V3): mic-first layout on the Tesla, spoken replies,
+  transcript in the user bubble, a small "sending…" cancel window after
+  auto-stop.
 - **Streaming bubble** (L1) with a live reasoning panel; the final `reply`
   event replaces the text.
 - **Persistent tool trace**: today `showStatus` (`chat-ui.html.js:964`) reuses
   one element so tool calls overwrite each other and vanish at reply time.
   Render a collapsed "3 tool calls · get_state ×2, query_state_history" line
-  under the bubble instead. Cheap and it's the audit trail for "why did it say
-  that".
-- **Voice mode** (V3): toggle, transcript-edit, confirm chips, TTS.
+  under the bubble instead.
 - **Status bar**: generalize `/covers` (`worker.js:2477`, two hardcoded
   entities) into `/status-bar` returning locks, covers, climate setpoints and
   presence from `stateCache`; render as pills above the transcript. Tapping a
-  pill sends the matching command through the grammar (lock pill → "lock the
-  front door").
-- **Quick-action chips** generated from context: unlocked doors → "Lock the
-  back porch"; open garage after dark → "Close the garage"; pending scheduled
-  actions → "Cancel".
-- **Latency badge + STT timer** (L7) so regressions are seen, not guessed.
+  pill sends the matching grammar command (lock pill → "lock the front door").
+- **Quick-action chips** from context: unlocked doors → "Lock the back porch";
+  open garage after dark → "Close the garage"; pending scheduled actions →
+  "Cancel".
+- **Latency badge + STT/TTS timers** (L7) so regressions are seen, not guessed.
 - **Housekeeping**: the typing indicator is the MiniMax brand bar
   (`chat-ui.html.js:680-697`) — replace with a neutral one; `Clear` only clears
-  the DOM, add a "clear server history" that hits a DO route; add a
-  `manifest.json` so the phone install has an icon and standalone mode.
+  the DOM, add a "clear server history" DO route; add a `manifest.json` for the
+  phone install.
 - Fold the duplicated SSE reader (`chat-ui.html.js:993-1028` and the retry copy
-  at `:1035-1097`) into one function before adding `delta` handling, or every
-  event change has to be made twice.
+  at `:1035-1097`) into one function before adding `delta` handling.
 
 ---
 
 ## 7. Telemetry & evaluation
 
-- Add to `chat_timing_ms`: `tier`, `tier_source`, `provider`, `model`,
-  `escalated`, `stt_ms` (from the client via a `client_timing` field on the
-  next request or a `navigator.sendBeacon` to `/chat/timing`), `first_delta_ms`.
-- `/admin/latency?days=N`: p50/p90 total and first-delta **per tier and per
-  intent_tag**, plus escalation rate and fast-path hit rate. Same shape as
-  `/admin/token-usage` (`worker.js:2704`).
+- Add to `chat_timing_ms`: `tier`, `tier_source`, `model`, `reasoning_effort`,
+  `escalated`, `source` (`voice|text`), `stt_ms`, `tts_first_audio_ms`,
+  `first_delta_ms` (client timings arrive as a `client_timing` field on the
+  next request or a `navigator.sendBeacon` to `/chat/timing`).
+- `/admin/latency?days=N`: p50/p90 total and first-delta **per tier, per
+  source, and per intent_tag**, plus escalation rate and grammar hit rate.
+  Same shape as `/admin/token-usage` (`worker.js:2704`).
 - **Golden utterance set**: `test/fixtures/utterances.json` — ~40 real
   messages from `ai_log` (the ones above plus the BUGS.md ones) each with the
-  expected route (fast_path / status / quick / standard / deep) and, for
-  commands, the expected `domain.service` + entity. Two vitest suites: the
+  expected route (grammar class / status / quick / high) and, for commands,
+  the expected `domain.service` + entity. Two vitest suites: the
   router/grammar (pure, runs on every `npm test`) and an opt-in live suite
   (`LIVE_EVAL=1`) that replays them against the real DO and diffs tool calls.
-  This is what makes "fewer mistakes" measurable before and after a model swap.
 
 ---
 
@@ -457,35 +436,23 @@ Worker/UI-side changes go live on push. Group so each phase is one deploy.
 
 | Phase | Scope | Rename? |
 |---|---|---|
-| **0 — quick wins, Worker + UI only** | Tesla refocus fix; keyterms in `/transcribe` + STT timing; tier toggle in the UI (sent but ignored until Phase 1); neutral typing indicator; SSE reader de-dup; latency badge from `started`→`reply`. | no |
-| **1 — V30: correctness + tiers + streaming** | A1 history fix + L6 reasoning strip + MAX_TURNS reconcile; L3 parallel context; tier config + router + escalation + per-request `tier`; effort enum; L1 streaming deltas; L4 short-circuit extension; A3 entity pre-flight + alias table; A4 service-field validation; L5/A2 status fast path; A5 registry via WS; telemetry fields. Ship Quick = DeepSeek V4 Flash, Standard = GLM 5.3 low, Deep = GLM 5.3 high. | **yes** |
-| **2 — V31: OpenAI** | `src/llm-providers.js` with the Responses adapter; `OPENAI_API_KEY`; Deep = GPT-5.6 Sol; `/admin/latency`; golden-utterance live eval to compare Deep on Sol vs GLM high. | **yes** |
-| **3 — voice** | Intent grammar module + tests; VAD auto-stop; voice mode + TTS + transcript edit + confirm chips; status bar + chips. Grammar is DO-side (rename); UI parts are not. | grammar yes / UI no |
+| **0 — Worker + UI, no rename** | Tesla refocus fix; keyterms + STT timing in `/transcribe`; `/tts` route + ElevenLabs playback + autoplay unlock; VAD auto-stop → auto-send; voice-mode toggle (Tesla UA default); Quick/High toggle (sent, ignored until Phase 1); neutral typing indicator; SSE reader de-dup; latency badge; `callLLM` temperatures to 0.1. | no |
+| **1 — V30: grammar, tiers, correctness** | Intent grammar classes 1–7 + tests; L5 status fast path; A3 entity pre-flight + alias table; A4 field validation; two tiers + router + escalation + per-request `tier` (web and MCP `ai_chat`); `[voice]` prompt rule; A1 history fix + L6 reasoning strip + MAX_TURNS reconcile; L3 parallel context; L4 short-circuit extension; A5 registry via WS; telemetry fields. | **yes** |
+| **2 — V31: streaming and polish** | L1 streaming deltas; sentence-chunked TTS; status bar + chips; `/admin/latency`; golden-utterance live eval; A7 prompt trims; macros once scripts are confirmed. | **yes** |
 
-Phase 1 is the one that changes what the house does; test the grammar and
+Phase 1 is the one that changes what the house does: test the grammar and
 trimmer in vitest first, then verify against `/admin/version` that the V30
-isolate is live before judging any latency numbers.
+isolate is live before judging any latency numbers. Expected after Phase 1:
+garage / lock / light / status commands from the car in ~200 ms; ordinary
+questions ~5–6 s spoken; forensic questions unchanged on High.
 
 ---
 
-## 9. Open questions for John
+## 9. Remaining assumptions (say if either is wrong)
 
-1. **Who talks to it, and from where?** Tesla browser, phone, both? Does
-   Sabrina use voice? (Drives how aggressive Voice mode and TTS should be.)
-2. **OpenAI: yes or no?** Adding a key and paying ~$0.10–0.40 per deep
-   question for Sol — worth it, or keep Deep on GLM 5.3 high and spend the
-   effort on the Quick tier? Phase 2 is skippable.
-3. **Quick-tier model preference**: DeepSeek V4 Flash on Fireworks (known-good
-   with the tool chain, one API key) vs GPT-5.6 Luna (second provider,
-   slower output, cheaper input)?
-4. **Voice safety policy**: which commands may never fire from voice without
-   a confirm — unlock, open garage at night, anything else? Any that should
-   be voice-only allowed for John and not Sabrina?
-5. **Should the tier toggle be sticky** across sessions, or reset to Auto?
-6. **TTS**: browser voice is free and instant; ElevenLabs TTS sounds better
-   and costs a call per reply. Which?
-7. **Latency targets you'd accept**: ~3 s for commands and ~8 s for questions
-   is what the plan aims at. Is 3 s already too slow for garage/lock commands
-   in the car (in which case the grammar in V4 matters more than the tiers)?
-8. **Scenes/scripts for macros** ("goodnight", "I'm leaving"): do these exist
-   in HA already, or should the plan include creating them?
+1. "Take the temperatures down" is read as sampling temperature. The chat
+   loop is already at 0, so the only change is the legacy `callLLM` 0.3/0.4 →
+   0.1. If it meant "less reasoning by default", the Quick tier is that.
+2. Voice mode defaults on when the browser identifies as Tesla and is a
+   toggle elsewhere. If you'd rather it be a plain toggle everywhere, that's
+   a one-line change in Phase 0.
