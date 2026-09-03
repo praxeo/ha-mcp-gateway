@@ -1,5 +1,16 @@
 // ha-websocket.js — multi-kind knowledge index + write-through + native vector_search
 import { NATIVE_AGENT_TOOLS, NATIVE_TOOL_NAMES, NATIVE_ACTION_TOOL_NAMES, CHAT_ALLOWED_TOOL_NAMES } from "./agent-tools.js";
+import {
+  LLM_PROVIDERS,
+  LLM_APIS,
+  LLM_REASONING_EFFORTS as PROVIDER_EFFORTS,
+  isKnownProvider,
+  endpointFor,
+  clampEffortForProvider,
+  buildResponsesBody,
+  responsesToChatCompletion,
+  stripProviderInternals
+} from "./llm-providers.js";
 import { buildStaticChatSystemPrompt, renderDynamicContext } from "./chat-prompt.js";
 import {
   fnv1aHex,
@@ -69,13 +80,16 @@ function coalesceServiceData(args, nestedKey) {
 //   1. DO storage override  — set live via the /llm_config route (no deploy)
 //   2. env vars             — LLM_ENDPOINT / LLM_MODEL / LLM_REASONING_MODE /
 //                             LLM_REASONING_EFFORT (picked up by a fresh isolate)
-//   3. baked-in defaults    — HAWebSocketV29._defaultLLMConfig()
+//   3. baked-in defaults    — HAWebSocketV30._defaultLLMConfig()
 // These helpers are pure and module-level for unit testing; keep the stub in
 // test/llm-config.test.js in sync.
 // ===========================================================================
 
 const LLM_REASONING_MODES = new Set(["thinking", "effort", "none"]);
-const LLM_REASONING_EFFORTS = new Set(["low", "medium", "high", "none"]);
+// Union across providers; each provider clamps to what it accepts at call
+// time (clampEffortForProvider). Fireworks takes none/low/medium/high; Meta
+// adds minimal and xhigh.
+const LLM_REASONING_EFFORTS = PROVIDER_EFFORTS;
 
 // Pull the env-var layer into a partial config. Only keys actually present in
 // env contribute; everything else falls through to the defaults.
@@ -84,6 +98,8 @@ function llmConfigFromEnv(env) {
   const out = {};
   if (typeof e.LLM_ENDPOINT === "string" && e.LLM_ENDPOINT.trim()) out.endpoint = e.LLM_ENDPOINT.trim();
   if (typeof e.LLM_MODEL === "string" && e.LLM_MODEL.trim()) out.model = e.LLM_MODEL.trim();
+  if (typeof e.LLM_PROVIDER === "string" && isKnownProvider(e.LLM_PROVIDER.trim())) out.provider = e.LLM_PROVIDER.trim();
+  if (typeof e.LLM_API === "string" && LLM_APIS.has(e.LLM_API.trim())) out.api = e.LLM_API.trim();
   if (typeof e.LLM_REASONING_MODE === "string" && LLM_REASONING_MODES.has(e.LLM_REASONING_MODE.trim())) {
     out.reasoning_mode = e.LLM_REASONING_MODE.trim();
   }
@@ -110,18 +126,40 @@ function resolveLLMConfig(stored, env, defaults) {
   const model = pick("model");
   const mode = pick("reasoning_mode");
   const effort = pick("reasoning_effort");
+  const provider = pick("provider");
+  const api = pick("api");
   // Guard against a stored/env value that slipped a bad enum (e.g. config
   // written by an older schema) — fall back to the default for that field.
   const safeMode = LLM_REASONING_MODES.has(mode.value) ? mode.value : base.reasoning_mode;
-  const safeEffort = LLM_REASONING_EFFORTS.has(effort.value) ? effort.value : base.reasoning_effort;
+  const rawEffort = LLM_REASONING_EFFORTS.has(effort.value) ? effort.value : base.reasoning_effort;
+  const safeProvider = isKnownProvider(provider.value) ? provider.value : base.provider;
+  // Only an EXPLICIT api (override or env) pins the wire format. Inheriting it
+  // from the baked defaults would leave a provider switch pointed at the wrong
+  // format — e.g. selecting meta would keep "chat" and never reach the
+  // Responses API. An unset api follows whatever the provider recommends.
+  const explicitApi = api.source === "default" ? null : api.value;
+  const safeApi = (explicitApi && LLM_APIS.has(explicitApi))
+    ? explicitApi
+    : LLM_PROVIDERS[safeProvider].default_api;
+  const safeEffort = clampEffortForProvider(safeProvider, rawEffort);
+  // An endpoint that was never set explicitly follows the provider/api pair,
+  // so switching provider is one field and not three.
+  const explicitEndpoint = endpoint.source === "default" ? null : endpoint.value;
+  const safeEndpoint = endpointFor(safeProvider, safeApi, explicitEndpoint)
+    || base.endpoint;
   return {
-    endpoint: endpoint.value,
+    endpoint: safeEndpoint,
     model: model.value,
+    provider: safeProvider,
+    api: safeApi,
     reasoning_mode: safeMode,
     reasoning_effort: safeEffort,
+    api_key_env: LLM_PROVIDERS[safeProvider].key_env,
     source: {
-      endpoint: endpoint.source,
+      endpoint: explicitEndpoint ? endpoint.source : "derived",
       model: model.source,
+      provider: provider.source,
+      api: explicitApi ? api.source : "derived",
       reasoning_mode: mode.source,
       reasoning_effort: effort.source
     }
@@ -152,7 +190,7 @@ function sanitizeLLMConfigPatch(patch) {
   if (!patch || typeof patch !== "object" || Array.isArray(patch)) {
     return { error: "body must be a JSON object" };
   }
-  const allowed = new Set(["endpoint", "model", "reasoning_mode", "reasoning_effort"]);
+  const allowed = new Set(["endpoint", "model", "reasoning_mode", "reasoning_effort", "provider", "api"]);
   const out = {};
   for (const [k, v] of Object.entries(patch)) {
     if (k === "reset") continue; // handled by the caller
@@ -169,13 +207,19 @@ function sanitizeLLMConfigPatch(patch) {
     } else if (k === "reasoning_effort") {
       if (!LLM_REASONING_EFFORTS.has(v)) return { error: `reasoning_effort must be one of ${[...LLM_REASONING_EFFORTS].join(", ")}` };
       out.reasoning_effort = v;
+    } else if (k === "provider") {
+      if (!isKnownProvider(v)) return { error: `provider must be one of ${Object.keys(LLM_PROVIDERS).join(", ")}` };
+      out.provider = v;
+    } else if (k === "api") {
+      if (!LLM_APIS.has(v)) return { error: `api must be one of ${[...LLM_APIS].join(", ")}` };
+      out.api = v;
     }
   }
   if (Object.keys(out).length === 0) return { error: "no recognized config fields to set" };
   return { value: out };
 }
 
-export class HAWebSocketV29 {
+export class HAWebSocketV30 {
   // Static config for prioritized entity context building
   static CONTEXT_DOMAIN_PRIORITY = [
     "alarm_control_panel", "climate", "lock", "cover", "binary_sensor",
@@ -201,6 +245,12 @@ export class HAWebSocketV29 {
   // via /admin/llm-config; reasoning behavior below is unchanged.
   static LLM_ENDPOINT = "https://api.fireworks.ai/inference/v1/chat/completions";
   static LLM_MODEL = "accounts/fireworks/models/glm-5p3";
+  // Provider + wire format. "fireworks"/"chat" is the baked default; Meta's
+  // Muse Spark runs as provider "meta" over api "responses" and is selected at
+  // runtime via /admin/llm-config (no deploy, no DO rename). See
+  // src/llm-providers.js for the adapters and docs/MUSE-SPARK.md to switch.
+  static LLM_PROVIDER = "fireworks";
+  static LLM_API = "chat";
   // Reasoning control. Fireworks rejects sending `thinking` and
   // `reasoning_effort` together, so exactly one is applied per request based on
   // LLM_REASONING_MODE: "thinking" → thinking:{type:"enabled"}; "effort" →
@@ -218,10 +268,12 @@ export class HAWebSocketV29 {
   // source of truth for the defaults.
   static _defaultLLMConfig() {
     return {
-      endpoint: HAWebSocketV29.LLM_ENDPOINT,
-      model: HAWebSocketV29.LLM_MODEL,
-      reasoning_mode: HAWebSocketV29.LLM_REASONING_MODE,
-      reasoning_effort: HAWebSocketV29.LLM_REASONING_EFFORT
+      endpoint: HAWebSocketV30.LLM_ENDPOINT,
+      model: HAWebSocketV30.LLM_MODEL,
+      provider: HAWebSocketV30.LLM_PROVIDER,
+      api: HAWebSocketV30.LLM_API,
+      reasoning_mode: HAWebSocketV30.LLM_REASONING_MODE,
+      reasoning_effort: HAWebSocketV30.LLM_REASONING_EFFORT
     };
   }
   // Fireworks prompt caching is replica-local. A fixed session-affinity key
@@ -314,7 +366,7 @@ export class HAWebSocketV29 {
     return {
       fired_at_ms: ms,
       fired_at_iso: isoTs,
-      fired_at_central: HAWebSocketV29._formatTimelineTimestamp(isoTs)
+      fired_at_central: HAWebSocketV30._formatTimelineTimestamp(isoTs)
     };
   }
 
@@ -734,7 +786,7 @@ export class HAWebSocketV29 {
       this._llmConfigStored = (await this.state.storage.get("llm_config")) || null;
       this._llmConfigLoaded = true;
     }
-    return resolveLLMConfig(this._llmConfigStored, this.env, HAWebSocketV29._defaultLLMConfig());
+    return resolveLLMConfig(this._llmConfigStored, this.env, HAWebSocketV30._defaultLLMConfig());
   }
 
   // ==========================================================================
@@ -893,12 +945,12 @@ Exception: when the user explicitly says "remember X" or "save a memory" or equi
 
   static climateTriggerMatches(text) {
     if (!text || typeof text !== "string") return false;
-    return HAWebSocketV29.CLIMATE_TRIGGER_RE.test(text);
+    return HAWebSocketV30.CLIMATE_TRIGGER_RE.test(text);
   }
 
   static houseStatusTriggerMatches(text) {
     if (!text || typeof text !== "string") return false;
-    return HAWebSocketV29.HOUSE_STATUS_TRIGGER_RE.test(text);
+    return HAWebSocketV30.HOUSE_STATUS_TRIGGER_RE.test(text);
   }
 
   static _seasonDominant(monthIdx) {
@@ -996,7 +1048,7 @@ Exception: when the user explicitly says "remember X" or "save a memory" or equi
 
   async _buildClimatePreambleIfNeeded(triggerText, source = "chat") {
     if (this.env.CLIMATE_PREAMBLE_ENABLED === "false") return null;
-    if (!HAWebSocketV29.climateTriggerMatches(triggerText)) return null;
+    if (!HAWebSocketV30.climateTriggerMatches(triggerText)) return null;
     if (!this.connected || !this.authenticated) return null;
 
     const ok = await this._fetchClimateData();
@@ -1008,13 +1060,13 @@ Exception: when the user explicitly says "remember X" or "save a memory" or equi
     const nowStr = nowDate.toLocaleString("en-US", { timeZone: "America/Chicago", timeZoneName: "short" });
     const monthFmt = new Intl.DateTimeFormat("en-US", { timeZone: "America/Chicago", month: "numeric" });
     const monthIdx = parseInt(monthFmt.format(nowDate), 10) - 1;
-    const seasonStr = HAWebSocketV29._seasonDominant(monthIdx);
+    const seasonStr = HAWebSocketV30._seasonDominant(monthIdx);
 
     const tempStr = (w.temperature !== null && w.temperature !== undefined) ? `${w.temperature}°F` : "n/a";
     const condStr = w.state || "unknown";
 
-    const hl = HAWebSocketV29._forecastHighLow(w.forecast);
-    const trend = HAWebSocketV29._forecastTrend(w.forecast);
+    const hl = HAWebSocketV30._forecastHighLow(w.forecast);
+    const trend = HAWebSocketV30._forecastTrend(w.forecast);
     const forecastLine = hl
       ? `Forecast next 12h: high ${hl.high}°F, low ${hl.low}°F, trend ${trend || "stable"}`
       : `Forecast next 12h: unavailable (no forecast attribute)`;
@@ -1053,8 +1105,8 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
 
     if (!this._logInitialized) {
       this.aiLog = await this.loadLogFromStorage();
-      if (this.aiLog.length > HAWebSocketV29.LOG_IN_MEMORY_CAP) {
-        this.aiLog = this.aiLog.slice(-HAWebSocketV29.LOG_IN_MEMORY_CAP);
+      if (this.aiLog.length > HAWebSocketV30.LOG_IN_MEMORY_CAP) {
+        this.aiLog = this.aiLog.slice(-HAWebSocketV30.LOG_IN_MEMORY_CAP);
       }
       this._logInitialized = true;
     }
@@ -1123,8 +1175,102 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
             effective,
             stored_override: this._llmConfigStored || null,
             env_layer: llmConfigFromEnv(this.env),
-            defaults: HAWebSocketV29._defaultLLMConfig()
+            defaults: HAWebSocketV30._defaultLLMConfig()
           }, null, 2), { headers });
+        }
+
+        // Prove a provider/model actually works BEFORE the chat path — and
+        // therefore the house — depends on it. Sends one tiny request with one
+        // dummy tool and reports what came back: whether text arrived, whether
+        // a tool call round-trips in the expected shape, whether reasoning is
+        // returned, plus token usage and latency. Accepts an optional config
+        // patch to test a candidate WITHOUT storing it, so a bad model never
+        // becomes the live default.
+        case "/llm_selftest": {
+          const patch = request.method === "POST"
+            ? await request.json().catch(() => null)
+            : null;
+          let cfg = await this._getLLMConfig();
+          if (patch && Object.keys(patch).length) {
+            const parsed = sanitizeLLMConfigPatch(patch);
+            if (parsed.error) {
+              return new Response(JSON.stringify({ error: parsed.error }), { status: 400, headers });
+            }
+            // Resolve the candidate over the stored layer without persisting.
+            cfg = resolveLLMConfig(
+              { ...(this._llmConfigStored || {}), ...parsed.value },
+              this.env,
+              HAWebSocketV30._defaultLLMConfig()
+            );
+          }
+          if (!this._apiKeyFor(cfg)) {
+            return new Response(JSON.stringify({
+              ok: false,
+              error: `${cfg.api_key_env} not configured`,
+              hint: `wrangler secret put ${cfg.api_key_env}`,
+              config: cfg
+            }, null, 2), { status: 400, headers });
+          }
+
+          const probeTools = [{
+            type: "function",
+            function: {
+              name: "get_house_temperature",
+              description: "Return the current indoor temperature in Fahrenheit.",
+              parameters: {
+                type: "object",
+                properties: { floor: { type: "string", description: "main or basement" } },
+                required: ["floor"]
+              }
+            }
+          }];
+          const probeMessages = [
+            { role: "system", content: "You are a test harness. Use the provided tool when asked about temperature." },
+            { role: "user", content: "What is the temperature on the main floor? Use the tool." }
+          ];
+
+          // Swap the resolved config in for the duration of the probe so
+          // callLLMWithTools exercises the real code path, not a copy of it.
+          const savedStored = this._llmConfigStored;
+          const savedLoaded = this._llmConfigLoaded;
+          const t0 = Date.now();
+          let out;
+          try {
+            if (patch && Object.keys(patch).length) {
+              this._llmConfigStored = { ...(savedStored || {}), ...sanitizeLLMConfigPatch(patch).value };
+              this._llmConfigLoaded = true;
+            }
+            const data = await this.callLLMWithTools(probeMessages, probeTools, 512, 30000);
+            const msg = data?.choices?.[0]?.message || {};
+            const calls = Array.isArray(msg.tool_calls) ? msg.tool_calls : [];
+            out = {
+              ok: true,
+              elapsed_ms: Date.now() - t0,
+              config: { provider: cfg.provider, api: cfg.api, model: cfg.model, endpoint: cfg.endpoint, reasoning_mode: cfg.reasoning_mode, reasoning_effort: cfg.reasoning_effort },
+              returned_text: typeof msg.content === "string" ? msg.content.slice(0, 300) : null,
+              tool_call_count: calls.length,
+              tool_call_shape_ok: calls.length > 0
+                && typeof calls[0].id === "string"
+                && typeof calls[0].function?.name === "string"
+                && typeof calls[0].function?.arguments === "string",
+              first_tool_call: calls[0] || null,
+              reasoning_returned: !!msg.reasoning_content,
+              reasoning_chars: (msg.reasoning_content || "").length,
+              reasoning_replay_items: Array.isArray(msg._reasoning_items) ? msg._reasoning_items.length : 0,
+              usage: data?.usage || null
+            };
+          } catch (err) {
+            out = {
+              ok: false,
+              elapsed_ms: Date.now() - t0,
+              config: { provider: cfg.provider, api: cfg.api, model: cfg.model, endpoint: cfg.endpoint },
+              error: err.message
+            };
+          } finally {
+            this._llmConfigStored = savedStored;
+            this._llmConfigLoaded = savedLoaded;
+          }
+          return new Response(JSON.stringify(out, null, 2), { status: out.ok ? 200 : 502, headers });
         }
 
         case "/states": {
@@ -1246,7 +1392,7 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
 
         case "/ai_log": {
           const count = parseInt(url.searchParams.get("count") || "50");
-          if (count > HAWebSocketV29.LOG_IN_MEMORY_CAP) {
+          if (count > HAWebSocketV30.LOG_IN_MEMORY_CAP) {
             const rows = await this._loadAiLogFromD1(count);
             return new Response(JSON.stringify(Array.isArray(rows) ? rows : []), { headers });
           }
@@ -1612,7 +1758,7 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
     if (event.event_type === "automation_triggered" && event.data) {
       const ctx = event.context || {};
       const { fired_at_ms, fired_at_iso, fired_at_central } =
-        HAWebSocketV29._tsFromMs(Date.parse(event.time_fired) || Date.now());
+        HAWebSocketV30._tsFromMs(Date.parse(event.time_fired) || Date.now());
       this._writeAutomationRunToD1({
         automation_id: event.data.entity_id || null,
         automation_name: event.data.name || null,
@@ -1631,7 +1777,7 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
     if (event.event_type === "call_service" && event.data) {
       const ctx = event.context || {};
       const { fired_at_ms, fired_at_iso, fired_at_central } =
-        HAWebSocketV29._tsFromMs(Date.parse(event.time_fired) || Date.now());
+        HAWebSocketV30._tsFromMs(Date.parse(event.time_fired) || Date.now());
       const targets = event.data.service_data ? event.data.service_data.entity_id : null;
       const targetIds = Array.isArray(targets) ? targets.join(",") : (targets || null);
       this._writeServiceCallToD1({
@@ -1670,7 +1816,7 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
       // every real transition lands in the state_changes table.
       if (newState && oldState && newState.state !== oldState.state) {
         const { fired_at_ms, fired_at_iso, fired_at_central } =
-          HAWebSocketV29._tsFromMs(
+          HAWebSocketV30._tsFromMs(
             Date.parse(newState.last_changed || newState.last_updated) || Date.now()
           );
         this._touchLastEventSeen(fired_at_ms);
@@ -1749,25 +1895,25 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
     const out = [];
     for (const [id, s] of this.stateCache) {
       const domain = id.split(".")[0];
-      if (!HAWebSocketV29.SNAPSHOT_DOMAIN_ALLOWLIST.has(domain)) continue;
+      if (!HAWebSocketV30.SNAPSHOT_DOMAIN_ALLOWLIST.has(domain)) continue;
       if (s.state === "unavailable" || s.state === "unknown") continue;
       if (domain === "switch" && isNoisySwitch(id)) continue;
 
       const attrs = s.attributes || {};
       if (domain === "sensor") {
         const deviceClass = attrs.device_class || "";
-        if (HAWebSocketV29.SENSOR_WHITELIST.has(deviceClass)) {
+        if (HAWebSocketV30.SENSOR_WHITELIST.has(deviceClass)) {
           // keep
         } else if (deviceClass === "battery") {
           const pct = parseFloat(s.state);
-          if (isNaN(pct) || pct > HAWebSocketV29.BATTERY_LOW_THRESHOLD) continue;
+          if (isNaN(pct) || pct > HAWebSocketV30.BATTERY_LOW_THRESHOLD) continue;
         } else {
           continue;
         }
       }
 
       const filteredAttrs = {};
-      for (const k of HAWebSocketV29.SNAPSHOT_ATTR_ALLOWLIST) {
+      for (const k of HAWebSocketV30.SNAPSHOT_ATTR_ALLOWLIST) {
         if (attrs[k] !== undefined) {
           filteredAttrs[k] = attrs[k];
         }
@@ -2107,7 +2253,7 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
           attributes_json: this._shouldStoreAttributes(entityId) ? JSON.stringify(curr.attributes || {}) : null,
           fired_at_ms: tsMs,
           fired_at_iso: new Date(tsMs).toISOString(),
-          fired_at_central: HAWebSocketV29._formatTimelineTimestamp(new Date(tsMs).toISOString()),
+          fired_at_central: HAWebSocketV30._formatTimelineTimestamp(new Date(tsMs).toISOString()),
           context_id: null,
           context_parent_id: null,
           context_user_id: null,
@@ -2657,7 +2803,7 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
       if (done) return;
       await this.state.storage.delete("ai_log").catch(() => {});
       await this.state.storage.delete("ai_log_head").catch(() => {});
-      for (let i = 0; i < HAWebSocketV29.LOG_CHUNKS_MAX; i++) {
+      for (let i = 0; i < HAWebSocketV30.LOG_CHUNKS_MAX; i++) {
         await this.state.storage.delete("ai_log_chunk_" + i).catch(() => {});
         await this.state.storage.delete("ai_log_chunk_gen_" + i).catch(() => {});
       }
@@ -2691,8 +2837,8 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
         data: { original_type: entry.type, original_ts: entry.timestamp },
         timestamp: new Date().toISOString(),
       });
-      if (this.aiLog.length > HAWebSocketV29.LOG_IN_MEMORY_CAP) {
-        this.aiLog.splice(0, this.aiLog.length - HAWebSocketV29.LOG_IN_MEMORY_CAP);
+      if (this.aiLog.length > HAWebSocketV30.LOG_IN_MEMORY_CAP) {
+        this.aiLog.splice(0, this.aiLog.length - HAWebSocketV30.LOG_IN_MEMORY_CAP);
       }
     }
   }
@@ -3026,6 +3172,12 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
       if (m.reasoning_content) {
         clean.reasoning_content = m.reasoning_content;
       }
+      // Responses-API reasoning objects, replayed verbatim on the next round
+      // of the same turn. The chat-format branch never sends these; the
+      // adapter consumes them and history strips them (stripProviderInternals).
+      if (Array.isArray(m._reasoning_items) && m._reasoning_items.length) {
+        clean._reasoning_items = m._reasoning_items;
+      }
       return clean;
     });
   }
@@ -3057,9 +3209,9 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
   static _normalizePerf(perf) {
     const p = perf || {};
     return {
-      server_ttft_ms: HAWebSocketV29._parsePerfMs(p["fireworks-server-time-to-first-token"]),
-      server_total_ms: HAWebSocketV29._parsePerfMs(p["fireworks-server-processing-time"]),
-      perf_cached_tokens: HAWebSocketV29._parseIntOrNull(p["fireworks-cached-prompt-tokens"])
+      server_ttft_ms: HAWebSocketV30._parsePerfMs(p["fireworks-server-time-to-first-token"]),
+      server_total_ms: HAWebSocketV30._parsePerfMs(p["fireworks-server-processing-time"]),
+      perf_cached_tokens: HAWebSocketV30._parseIntOrNull(p["fireworks-cached-prompt-tokens"])
     };
   }
 
@@ -3086,9 +3238,18 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
   // ========================================================================
   async callLLM(messages, maxTokens = 32768, jsonMode = false) {
     const cfg = await this._getLLMConfig();
+    const label = (LLM_PROVIDERS[cfg.provider] && LLM_PROVIDERS[cfg.provider].label) || cfg.provider;
+    const apiKey = this._apiKeyFor(cfg);
+    if (!apiKey) throw new Error(`${label}: ${cfg.api_key_env} not configured`);
+    // This legacy, tool-free path always speaks Chat Completions. When the
+    // configured wire format is "responses", target the same provider's chat
+    // endpoint rather than posting a chat body to a responses URL.
+    const endpoint = cfg.api === "responses"
+      ? (endpointFor(cfg.provider, "chat", null) || cfg.endpoint)
+      : cfg.endpoint;
     const body = {
       model: cfg.model,
-      messages: HAWebSocketV29.sanitizeMessagesForLLM(messages),
+      messages: HAWebSocketV30.sanitizeMessagesForLLM(messages),
       max_tokens: maxTokens,
       // The native tool loop (callLLMWithTools) runs at 0. This legacy path
       // backs the iteration-ceiling synthesis, where the job is to restate
@@ -3103,21 +3264,24 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
     if (jsonMode) {
       body.response_format = { type: "json_object" };
     }
-    const response = await fetch(cfg.endpoint, {
+    const _headers = {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${apiKey}`
+    };
+    if (cfg.provider === "fireworks") {
+      _headers["x-session-affinity"] = HAWebSocketV30.SESSION_AFFINITY_KEY;
+    }
+    const response = await fetch(endpoint, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${this.env.FIREWORKS_API_KEY}`,
-        "x-session-affinity": HAWebSocketV29.SESSION_AFFINITY_KEY
-      },
+      headers: _headers,
       body: JSON.stringify(body)
     });
     if (!response.ok) {
       const errText = await response.text();
-      throw new Error(`Fireworks API ${response.status}: ${errText.substring(0, 200)}`);
+      throw new Error(`${label} API ${response.status}: ${errText.substring(0, 200)}`);
     }
     const data = await response.json();
-    data._perf = HAWebSocketV29._extractPerfHeaders(response.headers);
+    data._perf = HAWebSocketV30._extractPerfHeaders(response.headers);
     const msg = data.choices?.[0]?.message;
     if (msg) {
       let text = (msg.content || "").replace(/<think>[\s\S]*?<\/think>/g, "").trim();
@@ -3137,7 +3301,7 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
   // retained so existing call sites (await this.persistLog()) keep resolving.
   // ==========================================================================
   async loadLogFromStorage() {
-    const fromD1 = await this._loadAiLogFromD1(HAWebSocketV29.LOG_IN_MEMORY_CAP);
+    const fromD1 = await this._loadAiLogFromD1(HAWebSocketV30.LOG_IN_MEMORY_CAP);
     return Array.isArray(fromD1) ? fromD1 : [];
   }
 
@@ -3149,7 +3313,7 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
 
   async clearPersistedLog() {
     await this.state.storage.delete("ai_log").catch(() => {});
-    for (let i = 0; i < HAWebSocketV29.LOG_CHUNKS_MAX; i++) {
+    for (let i = 0; i < HAWebSocketV30.LOG_CHUNKS_MAX; i++) {
       await this.state.storage.delete("ai_log_chunk_" + i).catch(() => {});
       await this.state.storage.delete("ai_log_chunk_gen_" + i).catch(() => {});
     }
@@ -3169,8 +3333,8 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
     const entry = { type, message, data, timestamp: new Date().toISOString() };
     if (source) entry.source = source;
     this.aiLog.push(entry);
-    if (this.aiLog.length > HAWebSocketV29.LOG_IN_MEMORY_CAP) {
-      this.aiLog.splice(0, this.aiLog.length - HAWebSocketV29.LOG_IN_MEMORY_CAP);
+    if (this.aiLog.length > HAWebSocketV30.LOG_IN_MEMORY_CAP) {
+      this.aiLog.splice(0, this.aiLog.length - HAWebSocketV30.LOG_IN_MEMORY_CAP);
     }
     console.log("AI LOG [" + type + (source ? "/" + source : "") + "]:", message);
     this.persistLog().catch((err) => console.error("logAI persist:", err.message));
@@ -3184,7 +3348,8 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
   // JSON mode + prose pass-through + targeted retry + honest failure
   // ========================================================================
   async chatWithAgent(message, from = "default", onEvent = null) {
-    if (!this.env.FIREWORKS_API_KEY) return { error: "FIREWORKS_API_KEY not configured" };
+    const _cfg = await this._getLLMConfig();
+    if (!this._apiKeyFor(_cfg)) return { error: `${_cfg.api_key_env} not configured` };
 
     // Phase 2 feature flag — native tool-calling path. Flag off = no-op, legacy runs.
     if (this.env.USE_NATIVE_TOOL_LOOP === "true") {
@@ -3203,7 +3368,7 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
     const timeline = persistentLog
       .filter((e) => ["chat_user", "chat_reply", "action", "action_verified", "notification", "decision", "state_change", "memory_saved", "observation_saved"].includes(e.type))
       .slice(-150)
-      .map((e) => `[${HAWebSocketV29._formatTimelineTimestamp(e.timestamp)}] ${e.type}: ${e.message}`)
+      .map((e) => `[${HAWebSocketV30._formatTimelineTimestamp(e.timestamp)}] ${e.type}: ${e.message}`)
       .join("\n");
 
     // ---- Entity context snapshot ----
@@ -3215,7 +3380,7 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
       if (domain === "switch" && isNoisySwitch(id)) continue;
       if (state.state === "unavailable" || state.state === "unknown") continue;
 
-      if (HAWebSocketV29.CONTEXT_DOMAIN_PRIORITY.includes(domain)) {
+      if (HAWebSocketV30.CONTEXT_DOMAIN_PRIORITY.includes(domain)) {
         const entry = { entity_id: id, friendly_name: attr.friendly_name || id, state: state.state };
         if (domain === "climate") {
           entry.setpoint = attr.temperature ?? null;
@@ -3242,11 +3407,11 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
         byDomain.get(domain).push(entry);
       } else if (domain === "sensor") {
         let include = false;
-        if (HAWebSocketV29.SENSOR_WHITELIST.has(deviceClass)) {
+        if (HAWebSocketV30.SENSOR_WHITELIST.has(deviceClass)) {
           include = true;
         } else if (deviceClass === "battery") {
           const pct = parseFloat(state.state);
-          include = !isNaN(pct) && pct <= HAWebSocketV29.BATTERY_LOW_THRESHOLD;
+          include = !isNaN(pct) && pct <= HAWebSocketV30.BATTERY_LOW_THRESHOLD;
         }
         if (include) {
           const entry = { entity_id: id, friendly_name: attr.friendly_name || id, state: state.state, device_class: deviceClass, unit: attr.unit_of_measurement || null };
@@ -3258,16 +3423,16 @@ ${fmtZone("Main", "climate.t6_pro_z_wave_programmable_thermostat_2", c.main)}`;
 
     const contextEntities = [];
     let sensorCount = 0;
-    for (const domain of [...HAWebSocketV29.CONTEXT_DOMAIN_PRIORITY, "sensor"]) {
+    for (const domain of [...HAWebSocketV30.CONTEXT_DOMAIN_PRIORITY, "sensor"]) {
       for (const entry of (byDomain.get(domain) || [])) {
-        if (contextEntities.length >= HAWebSocketV29.MAX_CONTEXT_ENTITIES) break;
+        if (contextEntities.length >= HAWebSocketV30.MAX_CONTEXT_ENTITIES) break;
         if (domain === "sensor") {
-          if (sensorCount >= HAWebSocketV29.MAX_SENSOR_CONTEXT) break;
+          if (sensorCount >= HAWebSocketV30.MAX_SENSOR_CONTEXT) break;
           sensorCount++;
         }
         contextEntities.push(entry);
       }
-      if (contextEntities.length >= HAWebSocketV29.MAX_CONTEXT_ENTITIES) break;
+      if (contextEntities.length >= HAWebSocketV30.MAX_CONTEXT_ENTITIES) break;
     }
 
     // ---- System prompt ----
@@ -3351,11 +3516,11 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
       let responseText = response.choices?.[0]?.message?.content || response.response || "";
       if (!responseText) {
         const rawReasoning = response.choices?.[0]?.message?.reasoning || "";
-        const jsonFallback = HAWebSocketV29.extractFirstJSON(rawReasoning);
+        const jsonFallback = HAWebSocketV30.extractFirstJSON(rawReasoning);
         if (jsonFallback) responseText = jsonFallback;
       }
       let parsed = null;
-      const jsonMatch = HAWebSocketV29.extractFirstJSON(responseText);
+      const jsonMatch = HAWebSocketV30.extractFirstJSON(responseText);
       if (jsonMatch) {
         try {
           parsed = JSON.parse(jsonMatch);
@@ -4355,40 +4520,86 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
   //
   // Returns the raw API response with the assistant message UNMUTATED.
   // ========================================================================
+  // Resolve the API key for whichever provider the config selects. Returns
+  // null when the key isn't configured, so callers can fail with a message
+  // naming the missing secret rather than a bare 401 from the provider.
+  _apiKeyFor(cfg) {
+    const name = (cfg && cfg.api_key_env) || "FIREWORKS_API_KEY";
+    const key = this.env[name];
+    return typeof key === "string" && key ? key : null;
+  }
+
+  // One request, whichever wire format the resolved config selects. ALWAYS
+  // returns a Chat-Completions-shaped object — the Responses API branch
+  // normalizes on the way out — so runNativeToolLoop stays provider-agnostic.
   async callLLMWithTools(messages, tools, maxTokens = 16384, timeoutMs = 45000) {
     const cfg = await this._getLLMConfig();
-    const body = {
-      model: cfg.model,
-      messages: HAWebSocketV29.sanitizeMessagesForLLM(messages),
-      tools,
-      max_tokens: maxTokens,
-      temperature: 0
+    const label = (LLM_PROVIDERS[cfg.provider] && LLM_PROVIDERS[cfg.provider].label) || cfg.provider;
+    const apiKey = this._apiKeyFor(cfg);
+    if (!apiKey) throw new Error(`${label}: ${cfg.api_key_env} not configured`);
+
+    const clean = HAWebSocketV30.sanitizeMessagesForLLM(messages);
+    const isResponses = cfg.api === "responses";
+
+    let body;
+    if (isResponses) {
+      // "none" means genuinely no reasoning; omit the block entirely rather
+      // than sending an effort the provider would have to interpret.
+      const effort = cfg.reasoning_mode === "none" ? null
+        : (cfg.reasoning_mode === "thinking" ? "high" : cfg.reasoning_effort);
+      body = buildResponsesBody({
+        model: cfg.model,
+        messages: clean,
+        tools,
+        maxTokens,
+        effort
+      });
+    } else {
+      body = {
+        model: cfg.model,
+        // Responses-API reasoning objects are meaningless to a chat-completions
+        // provider and would be rejected as unknown fields, so they never leave
+        // this branch. (They only exist at all after a provider switch inside a
+        // live isolate.)
+        messages: clean.map(stripProviderInternals),
+        tools,
+        max_tokens: maxTokens,
+        temperature: 0
+      };
+      // Reasoning control per the resolved config (see callLLM).
+      applyReasoningToBody(body, cfg);
+    }
+
+    const headers = {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${apiKey}`
     };
-    // Reasoning control per the resolved config (see callLLM).
-    applyReasoningToBody(body, cfg);
+    // Replica pinning is a Fireworks routing hint for its prompt cache; it is
+    // meaningless elsewhere, so don't send it to other providers.
+    if (cfg.provider === "fireworks") {
+      headers["x-session-affinity"] = HAWebSocketV30.SESSION_AFFINITY_KEY;
+    }
+
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
     try {
       const response = await fetch(cfg.endpoint, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${this.env.FIREWORKS_API_KEY}`,
-          "x-session-affinity": HAWebSocketV29.SESSION_AFFINITY_KEY
-        },
+        headers,
         body: JSON.stringify(body),
         signal: controller.signal
       });
       if (!response.ok) {
         const errText = await response.text();
-        throw new Error(`Fireworks API ${response.status}: ${errText.substring(0, 200)}`);
+        throw new Error(`${label} API ${response.status}: ${errText.substring(0, 200)}`);
       }
-      const data = await response.json();
-      data._perf = HAWebSocketV29._extractPerfHeaders(response.headers);
+      const raw = await response.json();
+      const data = isResponses ? responsesToChatCompletion(raw) : raw;
+      data._perf = HAWebSocketV30._extractPerfHeaders(response.headers);
       return data;
     } catch (err) {
       if (err.name === "AbortError") {
-        throw new Error(`Fireworks API timeout after ${timeoutMs}ms`);
+        throw new Error(`${label} API timeout after ${timeoutMs}ms`);
       }
       throw err;
     } finally {
@@ -4524,7 +4735,7 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
           completion_tokens: _usage.completion_tokens || 0,
           cached_tokens: _cached,
           perf: _perf,
-          ...HAWebSocketV29._normalizePerf(_perf)
+          ...HAWebSocketV30._normalizePerf(_perf)
         });
         safeEmit({ type: "reply", text: cleaned });
         return {
@@ -4581,7 +4792,7 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
         completion_tokens: _usage.completion_tokens || 0,
         cached_tokens: _cached,
         perf: _perf,
-        ...HAWebSocketV29._normalizePerf(_perf)
+        ...HAWebSocketV30._normalizePerf(_perf)
       });
       for (const n of _toolNames) _meta.tool_calls_log.push({ name: n, iter });
 
@@ -4678,7 +4889,7 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
         completion_tokens: _synthUsage.completion_tokens || 0,
         cached_tokens: _synthCached,
         perf: _synthPerf,
-        ...HAWebSocketV29._normalizePerf(_synthPerf),
+        ...HAWebSocketV30._normalizePerf(_synthPerf),
         synthesis: true
       });
       const finalMsg = finalResp.choices?.[0]?.message;
@@ -4827,7 +5038,7 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
       if (domain === "switch" && isNoisySwitch(id)) continue;
       if (state.state === "unavailable" || state.state === "unknown") continue;
 
-      if (HAWebSocketV29.CONTEXT_DOMAIN_PRIORITY.includes(domain)) {
+      if (HAWebSocketV30.CONTEXT_DOMAIN_PRIORITY.includes(domain)) {
         const entry = { entity_id: id, friendly_name: attr.friendly_name || id, state: state.state };
         if (domain === "climate") {
           entry.setpoint = attr.temperature ?? null;
@@ -4854,11 +5065,11 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
         byDomain.get(domain).push(entry);
       } else if (domain === "sensor") {
         let include = false;
-        if (HAWebSocketV29.SENSOR_WHITELIST.has(deviceClass)) {
+        if (HAWebSocketV30.SENSOR_WHITELIST.has(deviceClass)) {
           include = true;
         } else if (deviceClass === "battery") {
           const pct = parseFloat(state.state);
-          include = !isNaN(pct) && pct <= HAWebSocketV29.BATTERY_LOW_THRESHOLD;
+          include = !isNaN(pct) && pct <= HAWebSocketV30.BATTERY_LOW_THRESHOLD;
         }
         if (include) {
           const entry = { entity_id: id, friendly_name: attr.friendly_name || id, state: state.state, device_class: deviceClass, unit: attr.unit_of_measurement || null };
@@ -4870,16 +5081,16 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
 
     const contextEntities = [];
     let sensorCount = 0;
-    for (const domain of [...HAWebSocketV29.CONTEXT_DOMAIN_PRIORITY, "sensor"]) {
+    for (const domain of [...HAWebSocketV30.CONTEXT_DOMAIN_PRIORITY, "sensor"]) {
       for (const entry of (byDomain.get(domain) || [])) {
-        if (contextEntities.length >= HAWebSocketV29.MAX_CONTEXT_ENTITIES) break;
+        if (contextEntities.length >= HAWebSocketV30.MAX_CONTEXT_ENTITIES) break;
         if (domain === "sensor") {
-          if (sensorCount >= HAWebSocketV29.MAX_SENSOR_CONTEXT) break;
+          if (sensorCount >= HAWebSocketV30.MAX_SENSOR_CONTEXT) break;
           sensorCount++;
         }
         contextEntities.push(entry);
       }
-      if (contextEntities.length >= HAWebSocketV29.MAX_CONTEXT_ENTITIES) break;
+      if (contextEntities.length >= HAWebSocketV30.MAX_CONTEXT_ENTITIES) break;
     }
     return contextEntities;
   }
@@ -4900,7 +5111,7 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
         return isNaN(t) ? true : t >= cutoff;
       })
       .slice(-15)
-      .map((e) => `[${HAWebSocketV29._formatTimelineTimestamp(e.timestamp)}] ${e.type}${e.source ? "/" + e.source : ""}: ${e.message}`)
+      .map((e) => `[${HAWebSocketV30._formatTimelineTimestamp(e.timestamp)}] ${e.type}${e.source ? "/" + e.source : ""}: ${e.message}`)
       .join("\n");
   }
 
@@ -4938,7 +5149,7 @@ Emit ONE JSON object. No markdown fences. No text outside the JSON. If nothing t
     );
     const includeSnapshot =
       !message ||
-      HAWebSocketV29.houseStatusTriggerMatches(message) ||
+      HAWebSocketV30.houseStatusTriggerMatches(message) ||
       highConfidenceEntities.length === 0;
     const snapshot = includeSnapshot ? this._buildHouseStateSnapshot() : "";
     // Only surface gateway health when something is wrong.
@@ -5204,6 +5415,11 @@ ${JSON.stringify({
         if (m.role === "tool" && typeof m.content === "string" && m.content.length > TOOL_CONTENT_CAP) {
           return { ...m, content: m.content.substring(0, TOOL_CONTENT_CAP) + "…[truncated]" };
         }
+        // Drop encrypted reasoning blobs before persisting: they are large,
+        // only meaningful within the turn that produced them, and bound to the
+        // provider that issued them — keeping them would bloat every later
+        // prompt and break a mid-conversation provider switch.
+        if (m.role === "assistant") return stripProviderInternals(m);
         return m;
       });
       while (loopAdditions.length > 0) {

@@ -51,7 +51,7 @@ binding = "CF_VERSION_METADATA"
 
 [[durable_objects.bindings]]
 name = "HA_WS"
-class_name = "HAWebSocketV29"
+class_name = "HAWebSocketV30"
 
 [[migrations]]
 tag = "v1"
@@ -439,6 +439,24 @@ renamed_classes = [
 tag = "v29"
 renamed_classes = [
   { from = "HAWebSocketV28", to = "HAWebSocketV29" }
+]
+
+# v30 — provider adapters. callLLMWithTools can now speak either OpenAI-style
+# wire format: "chat" (POST /v1/chat/completions, Fireworks) or "responses"
+# (POST /v1/responses, Meta Model API / Muse Spark). The resolved config gained
+# `provider` and `api`; the endpoint follows that pair unless set explicitly,
+# and the API key is selected per provider (FIREWORKS_API_KEY vs MODEL_API_KEY).
+# Translation lives in src/llm-providers.js and normalizes Responses output back
+# into Chat Completions shape, so runNativeToolLoop and the stored chat_history
+# format are unchanged and a provider can be switched mid-conversation.
+# Baked default stays Fireworks/GLM 5.3; Muse Spark is selected at runtime via
+# /admin/llm-config after /admin/llm-selftest passes. DO-side code, so the
+# persistent HA WS would otherwise pin the live isolate to stale V29 — this
+# rename forces a fresh isolate. Storage preserved, llm_config override included.
+[[migrations]]
+tag = "v30"
+renamed_classes = [
+  { from = "HAWebSocketV29", to = "HAWebSocketV30" }
 ]
 
 # Two cron triggers:
