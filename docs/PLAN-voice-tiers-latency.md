@@ -21,7 +21,8 @@ Sections: 0 Decisions · 1 Where the time goes · 2 Latency · 3 Reasoning tiers
 | Temperatures | "Take them down some" | Chat loop is already at 0; the legacy `callLLM` 0.3/0.4 comes down (§2 L2) |
 | Voice safety policy | N/A for now | No confirm-first class; unlock and night-time garage stay on the LLM path as today |
 | Toggle persistence | **Reset to Quick** each session | No localStorage for tier; High is per-session opt-in |
-| Spoken replies | **ElevenLabs voice**; **auto-send when recording stops** | `/tts` proxy, audio playback in voice mode, silence auto-stop → send |
+| Spoken replies | **ElevenLabs voice, behind a "Speak replies" toggle, default off** (John expects to use it rarely); **auto-send when recording stops** | `/tts` proxy, playback only when the toggle is on, silence auto-stop → send |
+| Keyboard after a voice send | **Must never pop up. Top priority.** | First item in Phase 0; mechanics pinned in §5 V3 |
 | Is 3 s too slow in the car | **Yes** | The deterministic command grammar moves to Phase 1, ahead of streaming |
 | Goodnight / leaving macros | Probably exist; not important now | Deferred |
 
@@ -313,12 +314,27 @@ override; a tap during the "sending…" moment cancels.
 Voice mode is on by default when the UA is the Tesla browser and toggleable
 elsewhere (persisted; tier is not). In voice mode:
 
-- **No textarea focus** (set `suppressRefocus` in the mic `onstop` path,
-  `chat-ui.html.js:1256`). Fixes the keyboard pop.
+- **No keyboard after a voice send — the top-priority item.** Root cause:
+  `send()` ends every path with `refocusInput()` (`chat-ui.html.js:989` early
+  error return, `:1085` iOS retry success, `:1100` normal), which calls
+  `input.focus()` (`:826`) and pops the on-screen keyboard over the Tesla
+  screen. The cover buttons already dodge this with a one-shot
+  `suppressRefocus = true` before `send()` (`:815-822`); the mic `onstop` path
+  (`:1256`) does not set it. Fix in two layers so it can't regress: (1) set
+  `suppressRefocus = true` in the mic path before `send()`, exactly like
+  `sendQuick`; (2) make `refocusInput()` also return early whenever voice mode
+  is on, so no code path in voice mode ever focuses the textarea. Each `send()`
+  flow calls `refocusInput()` exactly once, so the one-shot flag is consumed
+  correctly and can't leak. Nothing else on the page focuses the input
+  (no `autofocus`; the only `.focus()` call is `:826`). Verify on the Tesla
+  after Phase 0 ships, since it's the only browser that matters.
 - **`source: "voice"`** on the request → the DO prepends `[voice]` to the user
   turn and a static prompt rule says: ≤ 2 sentences, no markdown, no lists,
   spell out times, say the entity's friendly name not its id. Grammar and
   status fast-path replies are already speech-shaped.
+- **"Speak replies" toggle, default off**, persisted in localStorage,
+  shown next to the mic. When off, nothing below in this list runs and no
+  TTS call is made. When on:
 - **`/tts` Worker route** proxying ElevenLabs
   `POST /v1/text-to-speech/{voice_id}/stream` with `eleven_flash_v2_5`
   (~75 ms model latency), `optimize_streaming_latency`, `output_format`
@@ -334,8 +350,8 @@ elsewhere (persisted; tier is not). In voice mode:
   events complete sentences and queue them, so speech starts ~1 s after the
   first token instead of after the whole reply.
 - Cost is one TTS call per spoken reply; replies are short by rule, so this
-  stays well inside ElevenLabs' plan character budget. Speak only in voice
-  mode.
+  stays well inside ElevenLabs' plan character budget. Speak only when the
+  toggle is on.
 - Larger type, bigger mic target, transcript shown in the user bubble.
 
 ### V4 — Command grammar (deterministic, no LLM) — **Phase 1, ahead of streaming**
@@ -385,9 +401,10 @@ open) and Scribe v2 Realtime (only if L7 shows batch STT > 1.5 s).
 - **Tier control**: a two-position toggle in the composer (Quick · High),
   **resets to Quick on every page load**, sent as `tier` on every request.
   The reply footer shows what ran: "1.8 s · Quick" or "↑ escalated to High".
-- **Voice mode** (V3): mic-first layout on the Tesla, spoken replies,
-  transcript in the user bubble, a small "sending…" cancel window after
-  auto-stop.
+- **Voice mode** (V3): mic-first layout on the Tesla, no keyboard after a
+  voice send, transcript in the user bubble, a small "sending…" cancel
+  window after auto-stop, and a separate "Speak replies" toggle (default
+  off).
 - **Streaming bubble** (L1) with a live reasoning panel; the final `reply`
   event replaces the text.
 - **Persistent tool trace**: today `showStatus` (`chat-ui.html.js:964`) reuses
@@ -436,7 +453,7 @@ Worker/UI-side changes go live on push. Group so each phase is one deploy.
 
 | Phase | Scope | Rename? |
 |---|---|---|
-| **0 — Worker + UI, no rename** | Tesla refocus fix; keyterms + STT timing in `/transcribe`; `/tts` route + ElevenLabs playback + autoplay unlock; VAD auto-stop → auto-send; voice-mode toggle (Tesla UA default); Quick/High toggle (sent, ignored until Phase 1); neutral typing indicator; SSE reader de-dup; latency badge; `callLLM` temperatures to 0.1. | no |
+| **0 — Worker + UI, no rename** | **Keyboard-pop fix first** (ship it alone if need be); VAD auto-stop → auto-send; keyterms + STT timing in `/transcribe`; voice-mode toggle (Tesla UA default); "Speak replies" toggle + `/tts` route + ElevenLabs playback + autoplay unlock; Quick/High toggle (sent, ignored until Phase 1); neutral typing indicator; SSE reader de-dup; latency badge; `callLLM` temperatures to 0.1. | no |
 | **1 — V30: grammar, tiers, correctness** | Intent grammar classes 1–7 + tests; L5 status fast path; A3 entity pre-flight + alias table; A4 field validation; two tiers + router + escalation + per-request `tier` (web and MCP `ai_chat`); `[voice]` prompt rule; A1 history fix + L6 reasoning strip + MAX_TURNS reconcile; L3 parallel context; L4 short-circuit extension; A5 registry via WS; telemetry fields. | **yes** |
 | **2 — V31: streaming and polish** | L1 streaming deltas; sentence-chunked TTS; status bar + chips; `/admin/latency`; golden-utterance live eval; A7 prompt trims; macros once scripts are confirmed. | **yes** |
 
