@@ -1,5 +1,7 @@
 import { HAWebSocketV31 } from "./ha-websocket.js";
 import { CHAT_HTML } from "./chat-ui.html.js";
+import { handleTTS } from "./tts.js";
+import { handleTranscribe, refreshSTTKeyterms } from "./stt.js";
 import {
   ALL_KINDS,
   fnv1aHex,
@@ -802,17 +804,11 @@ async function doFetch(env, path, body) {
 }
 
 // Render a bugs[] array as Markdown ready to prepend to BUGS.md.
-// Newest first (the storage order is append, so reverse). Each entry is an
-// H2 with id + Central timestamp + short title, followed by metadata,
-// the user's words as a blockquote, captured entity states, and a recent
-// timeline slice. The format is designed for visual scanning and direct
-// paste into BUGS.md.
 function formatBugsAsMarkdown(bugs) {
   if (!Array.isArray(bugs) || bugs.length === 0) {
     return "<!-- no new bugs -->\n";
   }
   const lines = [];
-  // Newest first
   const ordered = [...bugs].reverse();
   for (const b of ordered) {
     const desc = (b.description || "").trim();
@@ -821,17 +817,14 @@ function formatBugsAsMarkdown(bugs) {
     const sev = b.severity || "low";
     const channel = b.channel || "default";
     const entityIds = (b.entities || []).join(", ") || "(none)";
-
     lines.push(`## #${b.id} — ${ts} — ${title || "(no description)"}`);
     lines.push("");
     lines.push(`**Severity:** ${sev}  •  **Source:** chat (${channel})  •  **Entities:** ${entityIds}`);
     lines.push("");
     if (desc) {
-      // Quote the user's words / model framing as the primary record
       lines.push(`> ${desc.replace(/\n/g, "\n> ")}`);
       lines.push("");
     }
-
     const states = b.entity_states || {};
     const stateKeys = Object.keys(states);
     if (stateKeys.length > 0) {
@@ -854,7 +847,6 @@ function formatBugsAsMarkdown(bugs) {
       }
       lines.push("");
     }
-
     const log = Array.isArray(b.last_log_entries) ? b.last_log_entries : [];
     if (log.length > 0) {
       lines.push(`**Recent timeline (last ${log.length} ai_log entries):**`);
@@ -866,7 +858,6 @@ function formatBugsAsMarkdown(bugs) {
       }
       lines.push("");
     }
-
     lines.push("---");
     lines.push("");
   }
@@ -918,13 +909,11 @@ async function getStates(env, force) {
 }
 async function getEntityState(env, entity_id, force) {
   if (force) {
-    // Bypass stateCache and KV: issue a fresh WebSocket get_states via the DO.
     const fresh = await doFetch(env, "/state_force_refresh?entity_id=" + encodeURIComponent(entity_id));
     if (fresh && !fresh.error) {
       await cacheSet(env, CK.state(entity_id), fresh, CACHE_TTL.ENTITY_STATE);
       return fresh;
     }
-    // DO unavailable or WebSocket error — fall through to REST API.
     const data = await haRequest(env, "GET", "/api/states/" + entity_id);
     if (data && !data.error) await cacheSet(env, CK.state(entity_id), data, CACHE_TTL.ENTITY_STATE);
     return data;
@@ -1059,173 +1048,15 @@ async function getDashboardList(env, force) {
   if (result && result.error && result.status === 404) return [{ url_path: null, title: "Home", mode: "storage" }];
   return result;
 }
-// ── Speech-to-text keyterm biasing ──────────────────────────────────────────
-// ElevenLabs Scribe accepts a keyterm list that biases recognition toward
-// domain vocabulary. Without it the model hears "beside lamp" for "bedside
-// lamp" and the agent then burns a full LLM round failing to resolve it.
-//
-// The list is built from live HA data (entity friendly names + area names)
-// plus fixed household vocabulary, and cached in KV. /transcribe only ever
-// READS the cache — building it inline would put a DO round-trip on the
-// critical path of every voice command.
-var STT_KEYTERM_DOMAINS = new Set([
-  "light", "switch", "lock", "cover", "climate", "scene", "script",
-  "fan", "media_player", "input_boolean", "vacuum", "person"
-]);
-// Vocabulary the transcriber has no way to learn from entity names.
-var STT_FIXED_KEYTERMS = [
-  "Ranger", "John", "Sabrina",
-  "Tesla", "Model Y", "precondition", "sentry mode", "charge limit", "charge port",
-  "garage", "main garage", "basement bay", "left basement", "garage entry",
-  "back porch", "front door", "basement door", "basement porch", "deadbolt",
-  "thermostat", "setpoint", "main level", "basement", "upstairs", "downstairs",
-  "drop lights", "bedside lamp", "porch light", "dining room", "living room"
-];
-var STT_KEYTERM_MAX = 1000;
-var STT_KEYTERM_MAXLEN = 50;
-
-function normalizeKeyterm(raw) {
-  if (typeof raw !== "string") return null;
-  const t = raw.replace(/\s+/g, " ").trim();
-  if (t.length < 3 || t.length > STT_KEYTERM_MAXLEN) return null;
-  // Entity ids, MACs, bare numbers and hex blobs are noise, not vocabulary.
-  if (!/[a-z]/i.test(t)) return null;
-  if (/^[0-9a-f]{6,}$/i.test(t)) return null;
-  if (t.includes("_") || t.includes(".")) return null;
-  return t;
-}
-
-async function buildSTTKeyterms(env) {
-  const terms = [];
-  const seen = /* @__PURE__ */ new Set();
-  const push = (raw) => {
-    const t = normalizeKeyterm(raw);
-    if (!t) return;
-    const k = t.toLowerCase();
-    if (seen.has(k)) return;
-    seen.add(k);
-    terms.push(t);
+// ── Speech engines live in ./stt.js (STT) and ./tts.js (TTS) ────────────────
+// worker.js only delegates + adds CORS. Edit voices, models, cleaning there.
+function sttDeps(env) {
+  return {
+    cacheGet: (k) => cacheGet(env, k),
+    cacheSet: (k, v, ttl) => cacheSet(env, k, v, ttl),
+    getAreas: () => getAreaRegistry(env),
+    getStates: () => getStates(env),
   };
-
-  for (const t of STT_FIXED_KEYTERMS) push(t);
-
-  try {
-    const areas = await getAreaRegistry(env);
-    if (Array.isArray(areas)) for (const a of areas) push(a && a.name);
-  } catch {}
-
-  try {
-    const states = await getStates(env);
-    if (Array.isArray(states)) {
-      for (const s of states) {
-        const id = s && s.entity_id;
-        if (typeof id !== "string") continue;
-        const domain = id.split(".")[0];
-        if (!STT_KEYTERM_DOMAINS.has(domain)) continue;
-        push(s.attributes && s.attributes.friendly_name);
-      }
-    }
-  } catch {}
-
-  return terms.slice(0, STT_KEYTERM_MAX);
-}
-
-// ── Text-to-speech shaping ──────────────────────────────────────────────────
-// The agent writes for a screen (markdown, entity ids, bullet lists). Spoken
-// aloud those become "asterisk asterisk" and "light dot bedside underscore
-// lamp", so strip them before synthesis.
-var DEFAULT_TTS_VOICE_ID = "21m00Tcm4TlvDq8ikWAM";
-var TTS_MAX_CHARS = 600;
-
-function stripForSpeech(raw) {
-  if (typeof raw !== "string") return "";
-  let t = raw;
-  t = t.replace(/```[\s\S]*?```/g, " ");
-  t = t.replace(/`([^`]*)`/g, "$1");
-  t = t.replace(/\*\*(.+?)\*\*/g, "$1");
-  t = t.replace(/(^|\s)[*_]([^*_\n]+)[*_](?=\s|$)/g, "$1$2");
-  t = t.replace(/^\s*#{1,6}\s*/gm, "");
-  t = t.replace(/^\s*[-*•]\s+/gm, "");
-  // Entity ids read terribly aloud — say the object name instead. Both sides
-  // need 3+ chars so ordinary prose ("7 p.m.", "e.g.") survives untouched.
-  t = t.replace(/\b[a-z_]{3,}\.[a-z0-9_]{3,}\b/g, (m) => m.split(".")[1].replace(/_/g, " "));
-  t = t.replace(/\s*\n+\s*/g, ". ");
-  t = t.replace(/\.\s*\./g, ".");
-  t = t.replace(/\s{2,}/g, " ").trim();
-  if (t.length > TTS_MAX_CHARS) {
-    const cut = t.slice(0, TTS_MAX_CHARS);
-    const lastStop = Math.max(cut.lastIndexOf(". "), cut.lastIndexOf("! "), cut.lastIndexOf("? "));
-    t = lastStop > 120 ? cut.slice(0, lastStop + 1) : cut;
-  }
-  return t;
-}
-
-function cleanForSpeech(s) {
-  if (!s) return "";
-  let t = " " + String(s) + " ";
-  t = t.replace(/\*\*(.+?)\*\*/g, "$1");           // **bold** -> bold
-  t = t.replace(/\[([^\]]+)\]\([^\)]+\)/g, "$1");  // [label](url) -> label
-  t = t.replace(/https?:\/\/\S+/g, " ");           // urls -> silence
-  t = t.replace(/[#>*`_~|]/g, " ");
-  t = t.replace(/[⚡✓✗▶▼▲•]/g, " ");
-  t = t.replace(/\n\s*[-0-9]+\.?\s*/g, ". ");
-  t = t.replace(/\n+/g, ". ");
-  t = t.replace(/\s{2,}/g, " ").trim();
-  if (t.length > 900) {
-    const cut = t.slice(0, 900);
-    const dot = Math.max(cut.lastIndexOf(". "), cut.lastIndexOf("! "), cut.lastIndexOf("? "));
-    t = dot > 200 ? cut.slice(0, dot + 1) : cut;
-  }
-  return t;
-}
-
-async function handleTTS(request, env) {
-  let body;
-  try { body = await request.json(); } catch { return new Response('bad json', { status: 400 }); }
-  let text = cleanForSpeech(body.text || "").slice(0, 1000);
-  if (!text) return new Response('empty', { status: 400 });
-
-  const voiceId = env.ELEVENLABS_VOICE_ID || DEFAULT_TTS_VOICE_ID;
-  const elevResp = await fetch(
-    "https://api.elevenlabs.io/v1/text-to-speech/" + voiceId + "?output_format=mp3_44100_128",
-    {
-      method: "POST",
-      headers: {
-        "xi-api-key": env.ELEVENLABS_API_KEY,
-        "Content-Type": "application/json",
-        "Accept": "audio/mpeg"
-      },
-      body: JSON.stringify({
-        text: text,
-        model_id: "eleven_multilingual_v2",
-        voice_settings: {
-          stability: 0.5,
-          similarity_boost: 0.75,
-          style: 0.0,
-          use_speaker_boost: true
-        }
-      })
-    }
-  );
-
-  if (!elevResp.ok || !elevResp.body) {
-    const detail = await elevResp.text().catch(() => "");
-    return new Response(JSON.stringify({
-      error: "ElevenLabs TTS error",
-      detail: detail.slice(0, 500)
-    }), { status: 502, headers: { "Content-Type": "application/json" } });
-  }
-
-  const audioBuf = await elevResp.arrayBuffer();
-  return new Response(audioBuf, {
-    headers: { "Content-Type": "audio/mpeg", "Cache-Control": "no-store" }
-  });
-}
-
-async function refreshSTTKeyterms(env) {
-  const terms = await buildSTTKeyterms(env);
-  if (terms.length > 0) await cacheSet(env, CK.STT_KEYTERMS, terms, CACHE_TTL.STT_KEYTERMS);
-  return terms;
 }
 
 async function invalidateStates(env) {
@@ -1256,7 +1087,6 @@ function normalizeAutomationConfig(config) {
 }
 async function handleTool(env, name, args) {
   switch (name) {
-    // ---- States ----
     case "list_entities": {
       if (args.area) {
         const safeArea = sanitizeForTemplate(args.area);
@@ -1286,7 +1116,6 @@ async function handleTool(env, name, args) {
       const template = '{% set ns = namespace(entities=[]) %}{% for state in states %}{% set area = area_name(state.entity_id) %}{% if area and area|lower == "' + safeArea.toLowerCase() + '" %}{% set ns.entities = ns.entities +[{"entity_id": state.entity_id, "state": state.state, "friendly_name": state.attributes.friendly_name}] %}{% endif %}{% endfor %}{{ ns.entities | to_json }}';
       return await haRequest(env, "POST", "/api/template", { template });
     }
-    // ---- Services ----
     case "call_service": {
       const result = await callServiceWS(env, args.domain, args.service, args.data);
       await invalidateStates(env);
@@ -1297,7 +1126,6 @@ async function handleTool(env, name, args) {
       if (args.domain) return services.filter((s) => s.domain === args.domain);
       return services.map((s) => ({ domain: s.domain, services: Object.keys(s.services) }));
     }
-    // ---- Areas & Devices ----
     case "list_areas":
       return await getAreaRegistry(env, args.force_refresh);
     case "get_area": {
@@ -1314,7 +1142,6 @@ async function handleTool(env, name, args) {
       if (!device) return { error: "Device not found" };
       return { device, entities: Array.isArray(entities) ? entities.filter((e) => e.device_id === device.id) : [] };
     }
-    // ---- Entity Registry ----
     case "get_entity_registry":
       return await getEntityRegistry(env, args.force_refresh);
     case "list_disabled_entities": {
@@ -1351,7 +1178,6 @@ async function handleTool(env, name, args) {
       await invalidateRegistry(env);
       return results;
     }
-    // ---- Automations ----
     case "list_automations": {
       const states = await getStates(env, args.force_refresh);
       return states.filter((s) => s.entity_id.startsWith("automation.")).map((s) => ({
@@ -1420,7 +1246,6 @@ async function handleTool(env, name, args) {
       await invalidateStates(env);
       return result;
     }
-    // ---- Scripts & Scenes ----
     case "list_scripts": {
       const states = await getStates(env, args.force_refresh);
       return states.filter((s) => s.entity_id.startsWith("script.")).map((s) => ({ entity_id: s.entity_id, state: s.state, friendly_name: s.attributes.friendly_name }));
@@ -1439,7 +1264,6 @@ async function handleTool(env, name, args) {
       await invalidateStates(env);
       return result;
     }
-    // ---- History & Logbook ----
     case "get_history": {
       let path = "/api/history/period/" + encodeURIComponent(args.start_time) + "?filter_entity_id=" + encodeURIComponent(args.entity_ids);
       if (args.end_time) path += "&end_time=" + encodeURIComponent(args.end_time);
@@ -1453,7 +1277,6 @@ async function handleTool(env, name, args) {
       if (params.length) path += "?" + params.join("&");
       return await haRequest(env, "GET", path);
     }
-    // ---- System ----
     case "get_config":
       return await haRequest(env, "GET", "/api/config");
     case "check_config":
@@ -1468,14 +1291,12 @@ async function handleTool(env, name, args) {
       if (result && result.error && result.status === 404) return { error: "error_log not available via remote access." };
       return result;
     }
-    // ---- Notifications ----
     case "send_notification": {
       const svc = args.service || "notify";
       const data = { message: args.message };
       if (args.title) data.title = args.title;
       return await callServiceWS(env, "notify", svc, data);
     }
-    // ---- Helpers ----
     case "set_input_boolean": {
       const svc = args.state ? "turn_on" : "turn_off";
       const r = await callServiceWS(env, "input_boolean", svc, { entity_id: args.entity_id });
@@ -1501,14 +1322,12 @@ async function handleTool(env, name, args) {
       await invalidateStates(env);
       return r;
     }
-    // ---- Climate ----
     case "set_climate": {
       if (args.temperature !== void 0) await callServiceWS(env, "climate", "set_temperature", { entity_id: args.entity_id, temperature: args.temperature });
       if (args.hvac_mode) await callServiceWS(env, "climate", "set_hvac_mode", { entity_id: args.entity_id, hvac_mode: args.hvac_mode });
       await invalidateStates(env);
       return await getEntityState(env, args.entity_id, true);
     }
-    // ---- Covers ----
     case "control_cover": {
       const data = { entity_id: args.entity_id };
       if (args.position !== void 0) data.position = args.position;
@@ -1516,13 +1335,11 @@ async function handleTool(env, name, args) {
       await invalidateStates(env);
       return r;
     }
-    // ---- Locks ----
     case "control_lock": {
       const r = await callServiceWS(env, "lock", args.command, { entity_id: args.entity_id });
       await invalidateStates(env);
       return r;
     }
-    // ---- Media Players ----
     case "control_media_player": {
       const cmdMap = { play: "media_play", pause: "media_pause", stop: "media_stop", next: "media_next_track", previous: "media_previous_track", volume_set: "volume_set", turn_on: "turn_on", turn_off: "turn_off" };
       const svc = cmdMap[args.command] || args.command;
@@ -1532,7 +1349,6 @@ async function handleTool(env, name, args) {
       await invalidateStates(env);
       return r;
     }
-    // ---- Lights ----
     case "control_light": {
       const data = { entity_id: args.entity_id };
       if (args.brightness !== void 0) data.brightness = args.brightness;
@@ -1543,31 +1359,26 @@ async function handleTool(env, name, args) {
       await invalidateStates(env);
       return r;
     }
-    // ---- Templates ----
     case "render_template":
       return await haRequest(env, "POST", "/api/template", { template: args.template });
-    // ---- Floors & Labels ----
     case "list_floors":
       return await getFloorRegistry(env, args.force_refresh);
     case "list_labels":
       return await getLabelRegistry(env, args.force_refresh);
-    // ---- Weather & Presence ----
     case "get_persons":
       return (await getStates(env)).filter((s) => s.entity_id.startsWith("person."));
     case "get_sun":
       return await getEntityState(env, "sun.sun", true);
     case "get_weather":
       return (await getStates(env)).find((s) => s.entity_id.startsWith("weather.")) || { error: "No weather entity" };
-    // ---- Calendars ----
     case "list_calendars":
       return await getCalendars(env, args.force_refresh);
     case "get_calendar_events": {
-      const now = /* @__PURE__ */ new Date();
+      const now = new Date();
       const start = args.start || now.toISOString();
       const end = args.end || new Date(now.getTime() + 7 * 864e5).toISOString();
       return await haRequest(env, "GET", "/api/calendars/" + args.entity_id + "?start=" + encodeURIComponent(start) + "&end=" + encodeURIComponent(end));
     }
-    // ---- Todo ----
     case "list_todo_lists": {
       const states = await getStates(env);
       return states.filter((s) => s.entity_id.startsWith("todo.")).map((s) => ({ entity_id: s.entity_id, state: s.state, friendly_name: s.attributes.friendly_name }));
@@ -1582,7 +1393,6 @@ async function handleTool(env, name, args) {
       await invalidateStates(env);
       return r;
     }
-    // ---- Dashboard ----
     case "get_dashboard_list":
       return await getDashboardList(env, args.force_refresh);
     case "get_dashboard_config": {
@@ -1601,7 +1411,7 @@ async function handleTool(env, name, args) {
       const path = args.dashboard_id ? "/api/lovelace/config/" + args.dashboard_id : "/api/lovelace/config";
       const config = await haRequest(env, "GET", path);
       if (config && !config.error) {
-        const ts = (/* @__PURE__ */ new Date()).toISOString().replace(/[:.]/g, "-");
+        const ts = (new Date()).toISOString().replace(/[:.]/g, "-");
         const label = args.dashboard_id || "default";
         await haRequest(env, "POST", "/api/services/persistent_notification/create", {
           title: "Dashboard Backup: " + label + " (" + ts + ")",
@@ -1612,19 +1422,16 @@ async function handleTool(env, name, args) {
       }
       return config;
     }
-    // ---- WebSocket Status ----
     case "websocket_status": {
       const status = await doFetch(env, "/status");
       if (status) return status;
       return { connected: false, reason: "HA_WS not configured or not responding" };
     }
-    // ---- Search Related ----
     case "search_related": {
       const r = await doFetch(env, "/search_related", { item_type: args.item_type, item_id: args.item_id });
       if (r) return r;
       return { error: "search_related requires WebSocket Durable Object" };
     }
-    // ---- Vector Search ----
     case "vector_search": {
       const body = {
         query: args.query,
@@ -1640,7 +1447,6 @@ async function handleTool(env, name, args) {
       if (r) return r;
       return { error: "vector_search requires Durable Object" };
     }
-    // ---- AI Agent (read-only inspection of chat-path state) ----
     case "ai_log": {
       const count = args.count || 50;
       return await doFetch(env, "/ai_log?count=" + count) || { error: "DO not responding" };
@@ -1661,10 +1467,8 @@ async function handleTool(env, name, args) {
       if (result) return result;
       return { error: "Durable Object not responding" };
     }
-    // ---- Events ----
     case "fire_event":
       return await haRequest(env, "POST", "/api/events/" + args.event_type, args.event_data || {});
-    // ---- Agent State ----
     case "save_memory": {
       const r = await doFetch(env, "/ai_memory_append", { memory: args.memory });
       return r || { error: "DO not responding" };
@@ -1687,7 +1491,6 @@ async function handleTool(env, name, args) {
       });
       return result;
     }
-    // ---- Bug Report (parity with chat agent) ----
     case "report_bug": {
       const r = await doFetch(env, "/report_bug", {
         description: args.description,
@@ -1696,14 +1499,12 @@ async function handleTool(env, name, args) {
       });
       return r || { error: "DO not responding" };
     }
-    // ---- Forensic Queries (parity with chat agent) ----
     case "query_state_history":
     case "query_automation_runs":
     case "query_causal_chain": {
       const r = await doFetch(env, "/" + name, args || {});
       return r || { error: "DO not responding" };
     }
-    // ---- Ephemeral one-shot scheduler ----
     case "schedule_action": {
       const r = await doFetch(env, "/schedule_action", {
         delay_seconds: args.delay_seconds,
@@ -1723,7 +1524,6 @@ async function handleTool(env, name, args) {
       const r = await doFetch(env, "/cancel_scheduled_action", { task_id: args.task_id });
       return r || { error: "DO not responding" };
     }
-    // ---- Cache Management ----
     case "cache_status": {
       if (!env.HA_CACHE) return { error: "HA_CACHE not bound" };
       const staticKeys = Object.entries(CK).filter(([, v]) => typeof v === "string").map(([label, key]) => ({ label, key }));
@@ -1746,17 +1546,6 @@ async function handleTool(env, name, args) {
   }
 }
 
-// ============================================================================
-// Knowledge backfill — multi-kind unified Vectorize index (`ha-knowledge`).
-//
-// Replaces the entity-only backfillEntityVectors. Pulls source data per kind,
-// builds canonical-schema docs, hashes embed text for change detection, then
-// embeds in batches of 50 (cls pooling — index was created that way) and
-// upserts in batches of 1000.
-//
-// kinds: an optional array; omitted means all of ALL_KINDS.
-// ============================================================================
-
 async function fetchAutomationConfigSafe(env, internalId) {
   if (!internalId) return null;
   try {
@@ -1765,7 +1554,6 @@ async function fetchAutomationConfigSafe(env, internalId) {
   } catch {}
   return null;
 }
-
 async function fetchScriptConfigSafe(env, scriptObjectId) {
   if (!scriptObjectId) return null;
   try {
@@ -1774,7 +1562,6 @@ async function fetchScriptConfigSafe(env, scriptObjectId) {
   } catch {}
   return null;
 }
-
 async function fetchSceneConfigSafe(env, sceneObjectId) {
   if (!sceneObjectId) return null;
   try {
@@ -1783,7 +1570,6 @@ async function fetchSceneConfigSafe(env, sceneObjectId) {
   } catch {}
   return null;
 }
-
 async function buildEntityDocs(env) {
   const [entityRegistry, areaRegistry, deviceRegistry, states] = await Promise.all([
     getEntityRegistry(env, false),
@@ -1792,7 +1578,6 @@ async function buildEntityDocs(env) {
     getStates(env, false)
   ]);
   if (!Array.isArray(entityRegistry) || entityRegistry.length === 0) return [];
-
   const areaById = new Map();
   if (Array.isArray(areaRegistry)) {
     for (const a of areaRegistry) if (a && a.area_id) areaById.set(a.area_id, a.name || "");
@@ -1807,7 +1592,6 @@ async function buildEntityDocs(env) {
   if (Array.isArray(states)) {
     for (const s of states) if (s && s.entity_id) stateById.set(s.entity_id, s);
   }
-
   const deviceMetaById = new Map();
   if (Array.isArray(deviceRegistry)) {
     for (const d of deviceRegistry) {
@@ -1818,15 +1602,11 @@ async function buildEntityDocs(env) {
       });
     }
   }
-
   const docs = [];
   for (const e of entityRegistry) {
     const entity_id = e && e.entity_id;
     if (!entity_id) continue;
     const domain = entity_id.split(".")[0] || "";
-    // Skip automation/script/scene entities — they're already covered by their
-    // dedicated kinds. Indexing them here was producing 2-3 vectors per
-    // automation (see /admin/cleanup-stale-vectors for the legacy cleanup).
     if (domain === "automation" || domain === "script" || domain === "scene") continue;
     const state = stateById.get(entity_id);
     const dev = e.device_id ? deviceById.get(e.device_id) : null;
@@ -1842,7 +1622,6 @@ async function buildEntityDocs(env) {
     const manufacturer = (devMeta && devMeta.manufacturer) || "";
     const model = (devMeta && devMeta.model) || "";
     const aliases = Array.isArray(e.aliases) ? e.aliases : [];
-
     const text = buildEntityEmbedText({
       friendly_name, entity_id, area, device_name, manufacturer, model,
       domain, device_class, aliases
@@ -1852,7 +1631,6 @@ async function buildEntityDocs(env) {
     const vector_id = vectorIdFor("entity", ref_id);
     const category = entityCategoryFor(e, state);
     const noisy = isNoisyEntity(e, state);
-
     docs.push({
       kind: "entity",
       ref_id,
@@ -1875,14 +1653,11 @@ async function buildEntityDocs(env) {
   }
   return docs;
 }
-
 async function buildAutomationDocs(env) {
   const states = await getStates(env, false);
   if (!Array.isArray(states)) return [];
   const automations = states.filter((s) => s.entity_id.startsWith("automation."));
-
   const docs = [];
-  // Bounded concurrency to avoid hammering HA's REST API.
   const BATCH = 8;
   for (let i = 0; i < automations.length; i += BATCH) {
     const slice = automations.slice(i, i + BATCH);
@@ -1890,19 +1665,16 @@ async function buildAutomationDocs(env) {
       const internalId = s.attributes && s.attributes.id;
       return internalId ? fetchAutomationConfigSafe(env, internalId) : Promise.resolve(null);
     }));
-
     for (let j = 0; j < slice.length; j++) {
       const s = slice[j];
       const cfg = configs[j];
       const internalId = (s.attributes && s.attributes.id) || s.entity_id;
       const friendly_name = (s.attributes && s.attributes.friendly_name) || s.entity_id;
-
       let triggerSummary = "";
       let actionSummary = "";
       let description = "";
       let aliases = [];
       let mode = "single";
-
       if (cfg && typeof cfg === "object") {
         description = cfg.description || "";
         aliases = Array.isArray(cfg.aliases) ? cfg.aliases : [];
@@ -1912,7 +1684,6 @@ async function buildAutomationDocs(env) {
         if (Array.isArray(triggers)) triggerSummary = summarizeTriggers(triggers);
         if (Array.isArray(actions)) actionSummary = summarizeActions(actions);
       }
-
       const text = buildAutomationEmbedText({
         friendly_name,
         alias: cfg && cfg.alias,
@@ -1926,7 +1697,6 @@ async function buildAutomationDocs(env) {
       const hash = fnv1aHex(text);
       const ref_id = String(internalId);
       const vector_id = vectorIdFor("automation", ref_id);
-
       docs.push({
         kind: "automation",
         ref_id,
@@ -1950,12 +1720,10 @@ async function buildAutomationDocs(env) {
   }
   return docs;
 }
-
 async function buildScriptDocs(env) {
   const states = await getStates(env, false);
   if (!Array.isArray(states)) return [];
   const scripts = states.filter((s) => s.entity_id.startsWith("script."));
-
   const docs = [];
   const BATCH = 8;
   for (let i = 0; i < scripts.length; i += BATCH) {
@@ -1964,12 +1732,10 @@ async function buildScriptDocs(env) {
       const objectId = s.entity_id.split(".")[1];
       return objectId ? fetchScriptConfigSafe(env, objectId) : Promise.resolve(null);
     }));
-
     for (let j = 0; j < slice.length; j++) {
       const s = slice[j];
       const cfg = configs[j];
       const friendly_name = (s.attributes && s.attributes.friendly_name) || s.entity_id;
-
       let description = "";
       let actionSummary = "";
       if (cfg && typeof cfg === "object") {
@@ -1977,7 +1743,6 @@ async function buildScriptDocs(env) {
         const sequence = cfg.sequence || cfg.actions || cfg.action;
         if (Array.isArray(sequence)) actionSummary = summarizeActions(sequence);
       }
-
       const text = buildScriptEmbedText({
         friendly_name,
         entity_id: s.entity_id,
@@ -1987,7 +1752,6 @@ async function buildScriptDocs(env) {
       const hash = fnv1aHex(text);
       const ref_id = s.entity_id;
       const vector_id = vectorIdFor("script", ref_id);
-
       docs.push({
         kind: "script",
         ref_id,
@@ -2010,12 +1774,10 @@ async function buildScriptDocs(env) {
   }
   return docs;
 }
-
 async function buildSceneDocs(env) {
   const states = await getStates(env, false);
   if (!Array.isArray(states)) return [];
   const scenes = states.filter((s) => s.entity_id.startsWith("scene."));
-
   const docs = [];
   const BATCH = 8;
   for (let i = 0; i < scenes.length; i += BATCH) {
@@ -2024,7 +1786,6 @@ async function buildSceneDocs(env) {
       const objectId = s.entity_id.split(".")[1];
       return objectId ? fetchSceneConfigSafe(env, objectId) : Promise.resolve(null);
     }));
-
     for (let j = 0; j < slice.length; j++) {
       const s = slice[j];
       const cfg = configs[j];
@@ -2035,7 +1796,6 @@ async function buildSceneDocs(env) {
       } else if (s.attributes && Array.isArray(s.attributes.entity_id)) {
         entities = s.attributes.entity_id;
       }
-
       const text = buildSceneEmbedText({
         friendly_name,
         entity_id: s.entity_id,
@@ -2044,7 +1804,6 @@ async function buildSceneDocs(env) {
       const hash = fnv1aHex(text);
       const ref_id = s.entity_id;
       const vector_id = vectorIdFor("scene", ref_id);
-
       docs.push({
         kind: "scene",
         ref_id,
@@ -2067,7 +1826,6 @@ async function buildSceneDocs(env) {
   }
   return docs;
 }
-
 async function buildAreaDocs(env) {
   const [areas, floors] = await Promise.all([
     getAreaRegistry(env, false),
@@ -2078,7 +1836,6 @@ async function buildAreaDocs(env) {
   if (Array.isArray(floors)) {
     for (const f of floors) if (f && f.floor_id) floorById.set(f.floor_id, f.name || "");
   }
-
   const docs = [];
   for (const a of areas) {
     if (!a || !a.area_id) continue;
@@ -2086,7 +1843,6 @@ async function buildAreaDocs(env) {
     const friendly_name = a.name || ref_id;
     const aliases = Array.isArray(a.aliases) ? a.aliases : [];
     const floor_name = a.floor_id ? (floorById.get(a.floor_id) || "") : "";
-
     const text = buildAreaEmbedText({
       name: friendly_name,
       floor_name,
@@ -2094,7 +1850,6 @@ async function buildAreaDocs(env) {
     });
     const hash = fnv1aHex(text);
     const vector_id = vectorIdFor("area", ref_id);
-
     docs.push({
       kind: "area",
       ref_id,
@@ -2116,7 +1871,6 @@ async function buildAreaDocs(env) {
   }
   return docs;
 }
-
 async function buildDeviceDocs(env) {
   const [deviceRegistry, areaRegistry, entityRegistry] = await Promise.all([
     getDeviceRegistry(env, false),
@@ -2128,7 +1882,6 @@ async function buildDeviceDocs(env) {
   if (Array.isArray(areaRegistry)) {
     for (const a of areaRegistry) if (a && a.area_id) areaById.set(a.area_id, a.name || "");
   }
-  // Count entities per device + collect a small sample per device.
   const entitiesByDevice = new Map();
   if (Array.isArray(entityRegistry)) {
     for (const e of entityRegistry) {
@@ -2138,7 +1891,6 @@ async function buildDeviceDocs(env) {
       bucket.push(e.entity_id);
     }
   }
-
   const docs = [];
   for (const d of deviceRegistry) {
     if (!d || !d.id) continue;
@@ -2146,7 +1898,6 @@ async function buildDeviceDocs(env) {
     const friendly_name = d.name || d.id;
     const area = d.area_id ? (areaById.get(d.area_id) || "") : "";
     const ents = entitiesByDevice.get(ref_id) || [];
-
     const text = buildDeviceEmbedText({
       name: friendly_name,
       manufacturer: d.manufacturer || "",
@@ -2157,7 +1908,6 @@ async function buildDeviceDocs(env) {
     });
     const hash = fnv1aHex(text);
     const vector_id = vectorIdFor("device", ref_id);
-
     docs.push({
       kind: "device",
       ref_id,
@@ -2179,7 +1929,6 @@ async function buildDeviceDocs(env) {
   }
   return docs;
 }
-
 async function buildServiceDocs(env) {
   const services = await getServices(env, false);
   if (!Array.isArray(services)) return [];
@@ -2204,7 +1953,6 @@ async function buildServiceDocs(env) {
       const vector_id = vectorIdFor("service", ref_id);
       const noisy = isNoisyService(domain, service);
       const friendly_name = ref_id;
-
       docs.push({
         kind: "service",
         ref_id,
@@ -2227,7 +1975,6 @@ async function buildServiceDocs(env) {
   }
   return docs;
 }
-
 async function buildMemoryDocs(env) {
   const memory = await doFetch(env, "/ai_memory");
   if (!Array.isArray(memory)) return [];
@@ -2240,7 +1987,6 @@ async function buildMemoryDocs(env) {
     const friendly_name = text.slice(0, 80);
     const embedText = buildMemoryEmbedText(text);
     const hash = fnv1aHex(embedText);
-
     docs.push({
       kind: "memory",
       ref_id,
@@ -2257,17 +2003,12 @@ async function buildMemoryDocs(env) {
         is_noisy: false,
         topic_tag: "",
         hash,
-        // Default stamp; backfillKnowledge overlays original created_at
-        // from existing Vectorize metadata when the vector already exists,
-        // so time-decay scoring tracks the actual write time, not rebuild
-        // time. Only applies to memory/observation kinds.
         created_at: nowIso
       })
     });
   }
   return docs;
 }
-
 async function buildObservationDocs(env) {
   const observations = await doFetch(env, "/ai_observations");
   if (!Array.isArray(observations)) return [];
@@ -2281,7 +2022,6 @@ async function buildObservationDocs(env) {
     const embedText = buildObservationEmbedText(text);
     const hash = fnv1aHex(embedText);
     const topic_tag = extractTopicTag(text);
-
     docs.push({
       kind: "observation",
       ref_id,
@@ -2304,7 +2044,6 @@ async function buildObservationDocs(env) {
   }
   return docs;
 }
-
 async function buildKindDocs(env, kind) {
   switch (kind) {
     case "entity": return await buildEntityDocs(env);
@@ -2320,17 +2059,13 @@ async function buildKindDocs(env, kind) {
       throw new Error("Unknown kind: " + kind);
   }
 }
-
 async function backfillKnowledge(env, { force = false, kinds = null } = {}) {
   if (!env.AI || !env.KNOWLEDGE) {
     throw new Error("AI or KNOWLEDGE binding not configured");
   }
-
   const targetKinds = Array.isArray(kinds) && kinds.length > 0
     ? kinds.filter((k) => ALL_KINDS.includes(k))
     : [...ALL_KINDS];
-
-  // Build docs per kind. Failures in one kind are logged and we continue.
   const perKindStats = {};
   const allDocs = [];
   for (const kind of targetKinds) {
@@ -2346,24 +2081,12 @@ async function backfillKnowledge(env, { force = false, kinds = null } = {}) {
     perKindStats[kind] = { found: docs.length, build_ms: Date.now() - t0 };
     for (const d of docs) allDocs.push(d);
   }
-
-  // Friendly-name collision guard. Restricted to kinds where the friendly
-  // name is the canonical identifier and should be unique within HA —
-  // automation aliases, script aliases, scene names, area names. Entities
-  // and devices LEGITIMATELY share friendly_names (e.g., 4 Z-Wave locks all
-  // named "Home Connect 620 Connected Smart Lock" until John overrides them
-  // in HA), so we don't dedup those by friendly_name. For entity/device
-  // kinds, vector_id uniqueness is the guard — different entity_ids produce
-  // different vector_ids and can't collide on upsert.
   const FRIENDLY_NAME_DEDUP_KINDS = new Set(["automation", "script", "scene", "area"]);
   const seenFnKeys = new Set();
   const seenVectorIds = new Set();
   const collisionsByKind = {};
   const dedupedDocs = [];
   for (const d of allDocs) {
-    // vector_id-based dedup runs for ALL kinds — drops accidental duplicates
-    // within a single buildKindDocs call (would overwrite each other on
-    // upsert anyway, but counting them here surfaces the regression).
     if (seenVectorIds.has(d.vector_id)) {
       collisionsByKind[d.kind] = (collisionsByKind[d.kind] || 0) + 1;
       continue;
@@ -2382,16 +2105,6 @@ async function backfillKnowledge(env, { force = false, kinds = null } = {}) {
     }
     dedupedDocs.push(d);
   }
-
-  // Look up existing vectors. We use the result for two purposes:
-  //   1. Skip-by-hash (only when !force) to avoid re-embedding unchanged docs.
-  //   2. Preserving original `created_at` on memory/observation kinds —
-  //      these are stamped with `now` in their docs builders as a default,
-  //      and the overlay below restores the original write time when the
-  //      vector already exists. Without this, every force rebuild would
-  //      reset `created_at` and time-decay scoring would treat the entire
-  //      observation history as fresh.
-  // The lookup runs even when `force` is true (for purpose #2 above).
   const existingHash = new Map();
   const existingCreatedAt = new Map();
   if (typeof env.KNOWLEDGE.getByIds === "function" && dedupedDocs.length > 0) {
@@ -2415,27 +2128,22 @@ async function backfillKnowledge(env, { force = false, kinds = null } = {}) {
       }
     }
   }
-
-  // Overlay preserved created_at onto memory/observation docs.
   for (const d of dedupedDocs) {
     if (d.kind !== "memory" && d.kind !== "observation") continue;
     const orig = existingCreatedAt.get(d.vector_id);
     if (orig) d.metadata.created_at = orig;
   }
-
   const toEmbed = [];
   let skipped = 0;
   for (const d of dedupedDocs) {
     if (!force && existingHash.get(d.vector_id) === d.hash) skipped++;
     else toEmbed.push(d);
   }
-
   const EMBED_BATCH = 50;
   const UPSERT_BATCH = 1000;
   let embedded = 0;
   let errors = 0;
   let pending = [];
-
   const flushUpsert = async () => {
     if (pending.length === 0) return;
     const batch = pending;
@@ -2448,7 +2156,6 @@ async function backfillKnowledge(env, { force = false, kinds = null } = {}) {
       embedded -= batch.length;
     }
   };
-
   for (let i = 0; i < toEmbed.length; i += EMBED_BATCH) {
     const slice = toEmbed.slice(i, i + EMBED_BATCH);
     let aiResult;
@@ -2462,14 +2169,12 @@ async function backfillKnowledge(env, { force = false, kinds = null } = {}) {
       errors += slice.length;
       continue;
     }
-
     const vectors = aiResult && aiResult.data;
     if (!Array.isArray(vectors) || vectors.length !== slice.length) {
       console.error("Embedding batch returned malformed result");
       errors += slice.length;
       continue;
     }
-
     for (let j = 0; j < slice.length; j++) {
       const v = vectors[j];
       if (!Array.isArray(v) || v.length !== 1024) {
@@ -2482,10 +2187,6 @@ async function backfillKnowledge(env, { force = false, kinds = null } = {}) {
     }
   }
   await flushUpsert();
-
-  // Orphan diff: when running with force=1 (full rebuild), compare current ids
-  // against the last-known set in DO storage. Anything stored-but-not-current
-  // is an orphan from a renamed slug, removed entity, etc. — delete it.
   let orphans_deleted = 0;
   if (force) {
     try {
@@ -2500,15 +2201,11 @@ async function backfillKnowledge(env, { force = false, kinds = null } = {}) {
         }
         orphans_deleted = orphans.length;
       }
-      // Persist the new id set for next time.
       await doFetch(env, "/last_indexed_ids_write", { ids: Array.from(currentSet) });
     } catch (err) {
       console.warn("orphan diff failed:", err.message);
     }
   }
-
-  // Persist per-kind counts + collision/orphan stats so /admin/index-stats can
-  // surface them. Kept lightweight — caller passes the summary object back.
   const summary = {
     total_docs: allDocs.length,
     deduped_docs: dedupedDocs.length,
@@ -2530,7 +2227,6 @@ async function backfillKnowledge(env, { force = false, kinds = null } = {}) {
   } catch {}
   return summary;
 }
-
 async function handleMCP(request, env) {
   const { id, method, params } = request;
   try {
@@ -2585,86 +2281,10 @@ var worker_default = {
         });
       }
       try {
-        const audioBlob = await request.blob();
-        if (audioBlob.size === 0) {
-          return new Response(JSON.stringify({ error: "Empty audio body" }), {
-            status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" }
-          });
-        }
-        const ct = (request.headers.get("Content-Type") || "audio/webm").toLowerCase();
-        let filename = "audio.webm";
-        if (ct.includes("mp4") || ct.includes("aac") || ct.includes("m4a")) filename = "audio.m4a";
-        else if (ct.includes("mpeg")) filename = "audio.mp3";
-        else if (ct.includes("wav")) filename = "audio.wav";
-        else if (ct.includes("ogg")) filename = "audio.ogg";
-
-        // Keyterm biasing. Read-only from KV so a cold cache costs nothing on
-        // the voice critical path — it just transcribes unbiased this once and
-        // rebuilds in the background for next time.
-        let keyterms = null;
-        try { keyterms = await cacheGet(env, CK.STT_KEYTERMS); } catch {}
-        if (!Array.isArray(keyterms) || keyterms.length === 0) {
-          keyterms = null;
-          ctx.waitUntil(refreshSTTKeyterms(env).catch(() => {}));
-        }
-
-        const buildForm = (withKeyterms) => {
-          const form = new FormData();
-          form.append("file", audioBlob, filename);
-          form.append("model_id", "scribe_v2");
-          form.append("no_verbatim", "true");
-          form.append("tag_audio_events", "false");
-          form.append("language_code", "eng");
-          form.append("temperature", "0");
-          if (withKeyterms && keyterms) form.append("keyterms", JSON.stringify(keyterms));
-          return form;
-        };
-
-        const callScribe = (withKeyterms) => fetch("https://api.elevenlabs.io/v1/speech-to-text", {
-          method: "POST",
-          headers: { "xi-api-key": env.ELEVENLABS_API_KEY },
-          body: buildForm(withKeyterms)
-        });
-
-        const sttStart = Date.now();
-        let usedKeyterms = !!keyterms;
-        let elevResp = await callScribe(usedKeyterms);
-        let respText = await elevResp.text();
-        // A 4xx while sending keyterms means the bias payload was rejected, not
-        // that the audio was bad. Transcription is more important than biasing,
-        // so drop the keyterms and try once more rather than failing the turn.
-        if (!elevResp.ok && usedKeyterms && elevResp.status >= 400 && elevResp.status < 500) {
-          console.warn("transcribe: keyterms rejected (" + elevResp.status + "), retrying without");
-          usedKeyterms = false;
-          elevResp = await callScribe(false);
-          respText = await elevResp.text();
-        }
-        const sttMs = Date.now() - sttStart;
-
-        if (!elevResp.ok) {
-          return new Response(JSON.stringify({
-            error: "ElevenLabs error",
-            status: elevResp.status,
-            body: respText.slice(0, 500),
-            stt_ms: sttMs
-          }), {
-            status: 502, headers: { ...corsHeaders, "Content-Type": "application/json" }
-          });
-        }
-        let data;
-        try { data = JSON.parse(respText); } catch { data = { text: respText }; }
-        return new Response(JSON.stringify({
-          text: data.text || "",
-          language_code: data.language_code,
-          stt_ms: sttMs,
-          keyterms: usedKeyterms ? keyterms.length : 0
-        }), {
-          headers: {
-            ...corsHeaders,
-            "Content-Type": "application/json",
-            "Server-Timing": "elevenlabs;dur=" + sttMs
-          }
-        });
+        const sttResp = await handleTranscribe(request, env, ctx, sttDeps(env));
+        const headers = new Headers(sttResp.headers);
+        for (const [k, v] of Object.entries(corsHeaders)) headers.set(k, v);
+        return new Response(sttResp.body, { status: sttResp.status, headers });
       } catch (e) {
         return new Response(JSON.stringify({ error: e.message }), {
           status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" }
@@ -2672,8 +2292,6 @@ var worker_default = {
       }
     }
     if (url.pathname === "/tts") {
-      // Text-to-speech via ElevenLabs (eleven_multilingual_v2).
-      // Delegates to handleTTS() + cleanForSpeech() defined above.
       if (request.method !== "POST") {
         return new Response("Method not allowed", { status: 405, headers: corsHeaders });
       }
@@ -2683,7 +2301,6 @@ var worker_default = {
         });
       }
       const ttsResp = await handleTTS(request, env);
-      // Re-wrap to attach CORS headers (handleTTS itself is CORS-agnostic).
       const headers = new Headers(ttsResp.headers);
       for (const [k, v] of Object.entries(corsHeaders)) headers.set(k, v);
       return new Response(ttsResp.body, { status: ttsResp.status, headers });
@@ -2725,8 +2342,6 @@ var worker_default = {
       }
     }
     if (url.pathname === "/covers") {
-      // Live cover states for the chat UI's persistent garage bar. Read-only.
-      // Entity IDs mirror the fast-path targets in ha-websocket.js.
       const COVER_BAR_ENTITIES = [
         { entity_id: "cover.ratgdo32_2b8ecc_door", label: "Main garage" },
         { entity_id: "cover.ratgdo32_b1e618_door", label: "Basement bay" }
@@ -2775,9 +2390,6 @@ var worker_default = {
                 headers: { ...corsHeaders, "Content-Type": "application/json" }
               });
             }
-            // `from` stays "web" — it keys the per-channel chat history, so
-            // splitting it by input method would fork the conversation.
-            // `source` and `tier` ride alongside as hints the DO consumes.
             const streamResp = await stub.fetch("http://do/ai_chat_stream", {
               method: "POST",
               headers: { "Content-Type": "application/json" },
@@ -2824,8 +2436,6 @@ var worker_default = {
           headers: { ...corsHeaders, "Content-Type": "text/xml" }
         });
       }
-
-      // Race against 10s timeout — Twilio requires response within 15s
       let result;
       try {
         const chatPromise = doFetch(env, "/ai_chat", { message: msg, from });
@@ -2837,15 +2447,12 @@ var worker_default = {
         console.error("Twilio doFetch failed:", err.message);
         result = null;
       }
-
       const reply = (result?.reply || "On it — give me a moment and try again.")
         .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-
       return new Response(
         `<Response><Message><Body>${reply}</Body></Message></Response>`,
         { headers: { ...corsHeaders, "Content-Type": "text/xml" } }
       );
-
     } catch (e) {
       console.error("Twilio handler error:", e.message);
       return new Response(
@@ -2855,10 +2462,6 @@ var worker_default = {
     }
   }
 }
-    // Multi-kind knowledge backfill. Body is optional; query params control
-    // behavior:
-    //   ?force=1                    re-embed everything regardless of hash
-    //   ?kinds=entity,automation    comma-separated subset (default: all)
     if (url.pathname === "/admin/bugs") {
       if (request.method !== "GET") {
         return new Response("Method not allowed", { status: 405 });
@@ -2895,9 +2498,6 @@ var worker_default = {
         headers: { ...corsHeaders, "Content-Type": "application/json" }
       });
     }
-    // Plain-text eyeball view of the forensic event log. `?hours=N` (default 1)
-    // sets the window; `?format=json` returns structured rows for tooling.
-    // No LLM involved — straight D1 read.
     if (url.pathname === "/admin/recent_activity") {
       if (request.method !== "GET") {
         return new Response("Method not allowed", { status: 405 });
@@ -2954,16 +2554,6 @@ var worker_default = {
         });
       }
     }
-    // Per-day token usage for the chat agent, aggregated from ai_log
-    // `chat_timing_ms` rows. The native tool loop records the prompt / completion
-    // / cached token totals from each Fireworks `usage` object into the row's
-    // `data` JSON (total_prompt_tokens / total_completion_tokens /
-    // total_cached_tokens); this rolls them up by day. `?days=N` (default 30,
-    // clamp 1–30 — ai_log has 30-day retention) sets the window; `?format=json`
-    // returns structured rows, `?format=markdown` a Markdown table, default is a
-    // plain-text table. No LLM involved — straight D1 read. Day buckets are UTC
-    // (ai_log timestamps are ISO-UTC). Fast-path / error turns log a
-    // `chat_timing_ms` row with no token fields — counted as a turn, 0 tokens.
     if (url.pathname === "/admin/token-usage") {
       if (request.method !== "GET") {
         return new Response("Method not allowed", { status: 405 });
@@ -2977,9 +2567,6 @@ var worker_default = {
       const daysParam = parseInt(url.searchParams.get("days") || "30", 10);
       const days = isNaN(daysParam) ? 30 : Math.max(1, Math.min(30, daysParam));
       try {
-        // substr(timestamp,1,10) is the YYYY-MM-DD (UTC) day key — a string slice
-        // that sidesteps SQLite parsing the ISO `Z`/fractional-seconds suffix and
-        // the T-vs-space pitfall of string-comparing full ISO timestamps.
         const result = await env.DB.prepare(`
           SELECT substr(timestamp,1,10) AS day,
                  SUM(COALESCE(json_extract(data,'$.total_prompt_tokens'),0))     AS prompt_tokens,
@@ -2993,7 +2580,6 @@ var worker_default = {
            GROUP BY day
            ORDER BY day DESC
         `).bind(`-${days - 1} days`).all();
-
         const rows = (result?.results || []).map((r) => {
           const prompt = Number(r.prompt_tokens) || 0;
           const completion = Number(r.completion_tokens) || 0;
@@ -3002,13 +2588,12 @@ var worker_default = {
             day: r.day,
             prompt_tokens: prompt,
             completion_tokens: completion,
-            cached_tokens: cached,             // subset of prompt_tokens (cache hits)
-            total_tokens: prompt + completion, // billed volume (cached is part of prompt)
+            cached_tokens: cached,
+            total_tokens: prompt + completion,
             llm_turns: Number(r.llm_turns) || 0,
             turns: Number(r.turns) || 0
           };
         });
-
         const totals = rows.reduce((a, r) => ({
           prompt_tokens: a.prompt_tokens + r.prompt_tokens,
           completion_tokens: a.completion_tokens + r.completion_tokens,
@@ -3017,8 +2602,7 @@ var worker_default = {
           llm_turns: a.llm_turns + r.llm_turns,
           turns: a.turns + r.turns
         }), { prompt_tokens: 0, completion_tokens: 0, cached_tokens: 0, total_tokens: 0, llm_turns: 0, turns: 0 });
-
-        const dayCount = rows.length || 1; // divisor: days that actually have rows
+        const dayCount = rows.length || 1;
         const averages = {
           prompt_tokens: Math.round(totals.prompt_tokens / dayCount),
           completion_tokens: Math.round(totals.completion_tokens / dayCount),
@@ -3026,7 +2610,6 @@ var worker_default = {
           total_tokens: Math.round(totals.total_tokens / dayCount),
           turns: Math.round(totals.turns / dayCount)
         };
-
         const notes = [
           "Tokens summed from ai_log chat_timing_ms rows (native tool-loop chat path).",
           "total_tokens = prompt + completion; cached_tokens is the cache-hit subset of prompt.",
@@ -3034,7 +2617,6 @@ var worker_default = {
           "Day buckets are UTC. ai_log has 30-day retention, so history is capped at ~30 days.",
           "Averages divide by days-with-data, not calendar days in the window."
         ];
-
         const format = url.searchParams.get("format");
         if (format === "json") {
           return new Response(JSON.stringify({
@@ -3048,9 +2630,6 @@ var worker_default = {
             headers: { ...corsHeaders, "Content-Type": "application/json" }
           });
         }
-
-        // Text/Markdown table. Manual thousands separator — the Workers runtime
-        // has no guaranteed ICU for toLocaleString grouping.
         const fmtInt = (n) => String(Math.round(Number(n) || 0)).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
         const header = ["Day", "Prompt", "Completion", "Cached", "Total", "Turns"];
         const bodyRows = rows.map((r) => [
@@ -3065,7 +2644,6 @@ var worker_default = {
           "AVG/day", fmtInt(averages.prompt_tokens), fmtInt(averages.completion_tokens),
           fmtInt(averages.cached_tokens), fmtInt(averages.total_tokens), String(averages.turns)
         ];
-
         if (format === "markdown") {
           const line = (cells) => `| ${cells.join(" | ")} |`;
           const md = [
@@ -3083,14 +2661,12 @@ var worker_default = {
             headers: { ...corsHeaders, "Content-Type": "text/markdown; charset=utf-8" }
           });
         }
-
-        // Default: fixed-width plain-text table (numbers right-aligned, day left).
         const allRows = [header, ...bodyRows, totalRow, avgRow];
         const widths = header.map((_, i) => Math.max(...allRows.map((row) => String(row[i]).length)));
         const pad = (s, i) => {
           s = String(s);
           const gap = " ".repeat(Math.max(0, widths[i] - s.length));
-          return i === 0 ? s + gap : gap + s; // day left-aligned, counts right-aligned
+          return i === 0 ? s + gap : gap + s;
         };
         const renderRow = (row) => row.map((c, i) => pad(c, i)).join("  ");
         const bar = widths.map((w) => "-".repeat(w)).join("--");
@@ -3136,14 +2712,7 @@ var worker_default = {
         headers: { ...corsHeaders, "Content-Type": "application/json" }
       });
     }
-    // Runtime LLM config. GET returns the effective/stored/default config; POST
-    // (JSON body) sets the stored override and { "reset": true } clears it.
-    // Lets the chat/agent model, endpoint, and reasoning mode be swapped live
-    // (e.g. Qwen ↔ MiniMax) without the DO-rename migration dance.
     if (url.pathname === "/admin/llm-selftest") {
-      // Probe a provider/model with one tiny tool-calling request before
-      // trusting it with the house. POST an optional config patch to test a
-      // candidate without storing it; GET tests whatever is live.
       if (request.method !== "GET" && request.method !== "POST") {
         return new Response("Method not allowed", { status: 405, headers: corsHeaders });
       }
@@ -3207,27 +2776,6 @@ var worker_default = {
       });
     }
     if (url.pathname === "/admin/reindex-observations") {
-      // Wipe + rebuild observation vectors. Handles two pathologies:
-      //   1. Legacy ref_id format. Pre-59c9b69 observation vectors used
-      //      fnv1aHex(text) as ref_id; current code uses topicTagFor(text).
-      //      Old-format vectors are orphaned even though their texts are
-      //      still in D1 — same observation, two vector IDs.
-      //   2. Orphan accumulation. Observations deleted from D1 (during a
-      //      cutover or manual cleanup) leave their vectors behind because
-      //      `last_indexed_ids_v1` orphan-diff has been failing silently
-      //      (BUGS.md #vec-orphan-diff-noop).
-      //
-      // Cleanup strategy:
-      //   a. Pull current observation texts from D1.
-      //   b. Compute canonical keep-set: vectorIdFor(kind, topicTagFor(text)).
-      //   c. Probe Vectorize via similarity query (kind=observation filter)
-      //      using up to 4 distinct probe embeddings to enumerate ID set.
-      //   d. Delete anything not in keep-set.
-      //   e. Force-rebuild observation kind to ensure all keep-set IDs exist
-      //      with current embed text + metadata.
-      //
-      // Idempotent. Safe to re-run if the index has >400 observation vectors
-      // and a single pass misses some.
       if (request.method !== "POST") {
         return new Response("Method not allowed", { status: 405 });
       }
@@ -3242,16 +2790,9 @@ var worker_default = {
         const observations = await doFetch(env, "/ai_observations") || [];
         const texts = (Array.isArray(observations) ? observations : [])
           .filter((t) => typeof t === "string" && t.length > 0);
-
         const canonicalKeepSet = new Set(
           texts.map((t) => vectorIdFor("observation", topicTagFor(t)))
         );
-
-        // Probe Vectorize to enumerate IDs. We need up to 4 distinct probe
-        // vectors to cover up to 400 observation vectors (CF Vectorize tops
-        // out top_k at 100). Probes come from a sample of current observation
-        // embeddings; if no observations exist (table fully wiped) we fall
-        // back to a single zero-ish probe.
         const probeTexts = texts.slice(0, 4);
         if (probeTexts.length === 0) probeTexts.push("orphan probe seed");
         const enumeratedIds = new Set();
@@ -3275,12 +2816,10 @@ var worker_default = {
           }
           probeStats.push({ probe: i, new_ids: enumeratedIds.size - before, total_enumerated: enumeratedIds.size });
         }
-
         const orphanIds = [];
         for (const id of enumeratedIds) {
           if (!canonicalKeepSet.has(id)) orphanIds.push(id);
         }
-
         let deleted = 0;
         const deleteErrors = [];
         if (orphanIds.length > 0 && typeof env.KNOWLEDGE.deleteByIds === "function") {
@@ -3294,7 +2833,6 @@ var worker_default = {
             }
           }
         }
-
         const summary = await backfillKnowledge(env, { force: true, kinds: ["observation"] });
         return new Response(JSON.stringify({
           observations_in_storage: texts.length,
@@ -3338,17 +2876,12 @@ var worker_default = {
             if (!eid) continue;
             const domain = eid.split(".")[0] || "";
             if (domain === "automation" || domain === "script" || domain === "scene") {
-              // The duplicate written under kind:entity for this entity_id.
               idsToDelete.push(vectorIdFor("entity", eid));
-              // Old slug-form ref_id under kind:automation/script/scene
-              // (when buildAutomationDocs/etc fell back to entity_id rather
-              // than the canonical numeric HA-internal id).
               const slug = eid.slice(domain.length + 1);
               if (slug) idsToDelete.push(vectorIdFor(domain, slug));
             }
           }
         }
-        // Dedup the candidate list before sending.
         const unique = Array.from(new Set(idsToDelete));
         let deleted = 0;
         const errors = [];
@@ -3358,9 +2891,6 @@ var worker_default = {
           for (let i = 0; i < unique.length; i += DELETE_BATCH) {
             try {
               const r = await env.KNOWLEDGE.deleteByIds(unique.slice(i, i + DELETE_BATCH));
-              // Vectorize returns a result object — capture its shape so we
-              // can see if "deleted" matches what we asked. Fall back to
-              // assumed-success (count = batch size) when no count returned.
               const shaped = r && typeof r === "object" ? r : null;
               const reported = shaped && (typeof shaped.count === "number" ? shaped.count
                 : typeof shaped.mutationId === "string" ? Math.min(DELETE_BATCH, unique.length - i)
@@ -3431,9 +2961,6 @@ var worker_default = {
     return new Response("Not found", { status: 404 });
   },
   async scheduled(event, env, ctx) {
-    // Cron dispatcher — branch on the matched cron pattern. The minute-level
-    // "* * * * *" trigger runs cache prewarm; "30 8 * * *" runs the heavy
-    // daily knowledge resync. event.cron is the matched pattern.
     if (event && event.cron === "30 8 * * *") {
       ctx.waitUntil(this.dailyKnowledgeResync(env));
       ctx.waitUntil(this.dailyAiLogRetention(env));
@@ -3444,18 +2971,17 @@ var worker_default = {
   },
   async prewarmCache(env, forceAll = false) {
   if (!env.HA_CACHE) return;
-  // Force DO to wake and reconnect if needed
   const doStatus = await doFetch(env, "/status");
   const doConnected = doStatus && doStatus.connected && doStatus.authenticated;
   console.log("Pre-warming cache... DO connected:", !!doConnected);
   if (!doConnected) {
     console.log("DO cold or disconnected — forcing reconnect...");
     await doFetch(env, "/reconnect").catch(() => {});
-    await new Promise(r => setTimeout(r, 2000)); // give HA WS time to auth
+    await new Promise(r => setTimeout(r, 2000));
   }
   try {
     if (!doConnected) await getStates(env, true);
-      const currentMinute = (/* @__PURE__ */ new Date()).getMinutes();
+      const currentMinute = (new Date()).getMinutes();
       if (forceAll || currentMinute % 15 === 0) {
         console.log("Running heavy cache pre-warm...");
         await Promise.all([
@@ -3466,18 +2992,17 @@ var worker_default = {
           getFloorRegistry(env, true),
           getLabelRegistry(env, true)
         ]);
-        // Rebuild after the registries so friendly names are current.
-        await refreshSTTKeyterms(env).catch(() => {});
+        await refreshSTTKeyterms(env, {
+          getAreas: () => getAreaRegistry(env),
+          getStates: () => getStates(env),
+          cacheSet: (k, v, ttl) => cacheSet(env, k, v, ttl),
+        }).catch(() => {});
       }
       console.log("Cache pre-warm completed.");
     } catch (error) {
       console.error("Cache pre-warm failed:", error);
     }
   },
-  // Daily heavy resync — re-embeds the kinds that aren't already covered by
-  // event-driven (entity/device on registry events) or write-through (memory/
-  // observation in executeAIAction) updates. Skips unchanged docs by hash so
-  // a full daily run typically completes with most docs in the skipped column.
   async dailyAiLogRetention(env) {
     if (!env.DB) return;
     try {
@@ -3491,8 +3016,6 @@ var worker_default = {
       console.error("dailyAiLogRetention failed:", err?.message || err);
     }
   },
-  // 90-day rolling window for the forensic event log tables. ~5k state
-  // changes/day × 200B avg × 90d ≈ 90MB total — well under D1's 5GB ceiling.
   async dailyForensicLogRetention(env) {
     if (!env.DB) return;
     const cutoffMs = Date.now() - 90 * 24 * 60 * 60 * 1000;
@@ -3516,8 +3039,6 @@ var worker_default = {
     }
     const t0 = Date.now();
     try {
-      // Dropped "scene" — only one scene exists in this household and the
-      // resync would be wasted work. Add back if scene count grows.
       const summary = await backfillKnowledge(env, {
         force: false,
         kinds: ["automation", "script", "area", "device", "service"]
