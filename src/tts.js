@@ -2,8 +2,8 @@
 
 export const TTS_CONFIG = {
   defaultVoiceId: "21m00Tcm4TlvDq8ikWAM", // Rachel - change me once
-  model_id: "eleven_multilingual_v2",
-  output_format: "mp3_44100_128",
+  model_id: "eleven_flash_v2_5",
+  output_format: "mp3_22050_32",
   maxChars: 900,
   stability: 0.5,
   similarity_boost: 0.75,
@@ -49,7 +49,6 @@ export async function handleTTS(request, env, opts = {}) {
   let text = cleanForSpeech(body.text || "").slice(0, 1000);
   if (!text) return new Response('empty', { status: 400 });
 
-  // opts.voice or body.voice lets you audition: POST /tts { text, voice: "XYZ" }
   const voiceId = opts.voice || body.voice ||
     env.ELEVENLABS_VOICE_ID || TTS_CONFIG.defaultVoiceId;
 
