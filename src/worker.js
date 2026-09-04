@@ -1160,6 +1160,68 @@ function stripForSpeech(raw) {
   return t;
 }
 
+function cleanForSpeech(s) {
+  if (!s) return "";
+  let t = " " + String(s) + " ";
+  t = t.replace(/\*\*(.+?)\*\*/g, "$1");           // **bold** -> bold
+  t = t.replace(/\[([^\]]+)\]\([^\)]+\)/g, "$1");  // [label](url) -> label
+  t = t.replace(/https?:\/\/\S+/g, " ");           // urls -> silence
+  t = t.replace(/[#>*`_~|]/g, " ");
+  t = t.replace(/[⚡✓✗▶▼▲•]/g, " ");
+  t = t.replace(/\n\s*[-0-9]+\.?\s*/g, ". ");
+  t = t.replace(/\n+/g, ". ");
+  t = t.replace(/\s{2,}/g, " ").trim();
+  if (t.length > 900) {
+    const cut = t.slice(0, 900);
+    const dot = Math.max(cut.lastIndexOf(". "), cut.lastIndexOf("! "), cut.lastIndexOf("? "));
+    t = dot > 200 ? cut.slice(0, dot + 1) : cut;
+  }
+  return t;
+}
+
+async function handleTTS(request, env) {
+  let body;
+  try { body = await request.json(); } catch { return new Response('bad json', { status: 400 }); }
+  let text = cleanForSpeech(body.text || "").slice(0, 1000);
+  if (!text) return new Response('empty', { status: 400 });
+
+  const voiceId = env.ELEVENLABS_VOICE_ID || DEFAULT_TTS_VOICE_ID;
+  const elevResp = await fetch(
+    "https://api.elevenlabs.io/v1/text-to-speech/" + voiceId + "?output_format=mp3_44100_128",
+    {
+      method: "POST",
+      headers: {
+        "xi-api-key": env.ELEVENLABS_API_KEY,
+        "Content-Type": "application/json",
+        "Accept": "audio/mpeg"
+      },
+      body: JSON.stringify({
+        text: text,
+        model_id: "eleven_multilingual_v2",
+        voice_settings: {
+          stability: 0.5,
+          similarity_boost: 0.75,
+          style: 0.0,
+          use_speaker_boost: true
+        }
+      })
+    }
+  );
+
+  if (!elevResp.ok || !elevResp.body) {
+    const detail = await elevResp.text().catch(() => "");
+    return new Response(JSON.stringify({
+      error: "ElevenLabs TTS error",
+      detail: detail.slice(0, 500)
+    }), { status: 502, headers: { "Content-Type": "application/json" } });
+  }
+
+  const audioBuf = await elevResp.arrayBuffer();
+  return new Response(audioBuf, {
+    headers: { "Content-Type": "audio/mpeg", "Cache-Control": "no-store" }
+  });
+}
+
 async function refreshSTTKeyterms(env) {
   const terms = await buildSTTKeyterms(env);
   if (terms.length > 0) await cacheSet(env, CK.STT_KEYTERMS, terms, CACHE_TTL.STT_KEYTERMS);
@@ -2610,9 +2672,8 @@ var worker_default = {
       }
     }
     if (url.pathname === "/tts") {
-      // Text-to-speech proxy for the chat UI's "Speak replies" toggle.
-      // Streams ElevenLabs Flash v2.5 audio straight through to the browser;
-      // the Worker never buffers the whole clip.
+      // Text-to-speech via ElevenLabs (eleven_multilingual_v2).
+      // Delegates to handleTTS() + cleanForSpeech() defined above.
       if (request.method !== "POST") {
         return new Response("Method not allowed", { status: 405, headers: corsHeaders });
       }
@@ -2621,54 +2682,11 @@ var worker_default = {
           status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" }
         });
       }
-      try {
-        const body = await request.json();
-        const raw = typeof body.text === "string" ? body.text : "";
-        const text = stripForSpeech(raw);
-        if (!text) {
-          return new Response(JSON.stringify({ error: "Missing or empty 'text' field" }), {
-            status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" }
-          });
-        }
-        const voiceId = env.ELEVENLABS_VOICE_ID || DEFAULT_TTS_VOICE_ID;
-        const elevResp = await fetch(
-          "https://api.elevenlabs.io/v1/text-to-speech/" + encodeURIComponent(voiceId) +
-            "/stream?output_format=mp3_22050_32",
-          {
-            method: "POST",
-            headers: {
-              "xi-api-key": env.ELEVENLABS_API_KEY,
-              "Content-Type": "application/json"
-            },
-            body: JSON.stringify({
-              text,
-              model_id: "eleven_flash_v2_5",
-              voice_settings: { stability: 0.4, similarity_boost: 0.75 }
-            })
-          }
-        );
-        if (!elevResp.ok || !elevResp.body) {
-          const detail = await elevResp.text().catch(() => "");
-          return new Response(JSON.stringify({
-            error: "ElevenLabs TTS error",
-            status: elevResp.status,
-            body: detail.slice(0, 500)
-          }), {
-            status: 502, headers: { ...corsHeaders, "Content-Type": "application/json" }
-          });
-        }
-        return new Response(elevResp.body, {
-          headers: {
-            ...corsHeaders,
-            "Content-Type": "audio/mpeg",
-            "Cache-Control": "no-store"
-          }
-        });
-      } catch (e) {
-        return new Response(JSON.stringify({ error: e.message }), {
-          status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" }
-        });
-      }
+      const ttsResp = await handleTTS(request, env);
+      // Re-wrap to attach CORS headers (handleTTS itself is CORS-agnostic).
+      const headers = new Headers(ttsResp.headers);
+      for (const [k, v] of Object.entries(corsHeaders)) headers.set(k, v);
+      return new Response(ttsResp.body, { status: ttsResp.status, headers });
     }
     if (url.pathname === "/manifest.json") {
       return new Response(JSON.stringify({
