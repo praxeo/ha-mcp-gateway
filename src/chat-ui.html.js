@@ -985,25 +985,67 @@ export const CHAT_HTML = `<!DOCTYPE html>
     speakBtn.setAttribute('aria-pressed', String(speakOn));
     try { localStorage.setItem('ha_speak_replies', speakOn ? '1' : '0'); } catch {}
     if (speakOn) {
-      unlockAudio(); // this click is a user gesture — spend it
-    } else if (ttsAudio) {
-      try { ttsAudio.pause(); } catch {}
+      unlockAudio();
+    } else {
+      stopSpeaking();
     }
   }
   speakBtn.setAttribute('aria-pressed', String(speakOn));
 
   let ttsObjectUrl = null;
+  let ttsAbort = null;
+
+  function textForSpeech(s) {
+    if (!s) return '';
+    let t = ' ' + s + ' ';
+    t = t.replace(/\\*\\*(.+?)\\*\\*/g, '$1');
+    t = t.replace(/\\[([^\\]]+)\\]\\([^\\)]+\\)/g, '$1');
+    t = t.replace(/https?:\\/\\/\\S+/g, ' ');
+    t = t.replace(/[#>*_~|]/g, ' ');
+    t = t.replace(/[⚡✓✗▶▼▲•]/g, ' ');
+    t = t.replace(/(\\uD83C[\\uDC00-\\uDFFF]|\\uD83D[\\uDC00-\\uDFFF]|\\uD83E[\\uDD00-\\uDDFF]|[\\u2600-\\u27BF])/g, ' ');
+    t = t.replace(/\\n\\s*[-0-9]+\\.?\\s*/g, '. ');
+    t = t.replace(/\\n+/g, '. ');
+    t = t.replace(/\\s{2,}/g, ' ');
+    t = t.replace(/\\s*&\\s*/g, ' and ');
+    t = t.trim();
+    if (t.length > 600) {
+      const cut0 = t.slice(0, 600);
+      const dot = Math.max(cut0.lastIndexOf('. '), cut0.lastIndexOf('! '), cut0.lastIndexOf('? '));
+      if (dot > 200) t = cut0.slice(0, dot + 1);
+      else t = cut0;
+    }
+    return t;
+  }
+
+  function stopSpeaking() {
+    if (ttsAbort) {
+      try { ttsAbort.abort(); } catch {}
+      ttsAbort = null;
+    }
+    if (ttsAudio) {
+      try { ttsAudio.pause(); } catch {}
+      try { ttsAudio.currentTime = 0; } catch {}
+    }
+  }
 
   async function speak(text) {
     if (!speakOn || !text) return;
+    stopSpeaking();
+    const say = textForSpeech(text);
+    if (!say) return;
+    ttsAbort = new AbortController();
+    const sig = ttsAbort.signal;
     try {
       const resp = await fetch('/tts', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text })
+        body: JSON.stringify({ text: say }),
+        signal: sig
       });
-      if (!resp.ok) return; // speech is a nicety; never surface its failures
+      if (!resp.ok) return;
       const blob = await resp.blob();
+      if (sig.aborted) return;
       const el = ensureAudio();
       if (ttsObjectUrl) URL.revokeObjectURL(ttsObjectUrl);
       ttsObjectUrl = URL.createObjectURL(blob);
@@ -1011,6 +1053,9 @@ export const CHAT_HTML = `<!DOCTYPE html>
       const p = el.play();
       if (p && typeof p.catch === 'function') p.catch(() => {});
     } catch {}
+    finally {
+      if (ttsAbort && ttsAbort.signal === sig) ttsAbort = null;
+    }
   }
 
   function makeCopyBtn(text) {
@@ -1162,6 +1207,7 @@ export const CHAT_HTML = `<!DOCTYPE html>
   }
 
   async function send(opts) {
+    stopSpeaking();
     const text = input.value.trim();
     if (!text) return;
 
@@ -1288,6 +1334,7 @@ export const CHAT_HTML = `<!DOCTYPE html>
   }
 
   function clearChat() {
+    stopSpeaking();
     while (msgEl.children.length > 1) {
       msgEl.removeChild(msgEl.lastChild);
     }
@@ -1470,6 +1517,7 @@ export const CHAT_HTML = `<!DOCTYPE html>
   }
 
   micBtn.addEventListener('click', async () => {
+    stopSpeaking();
     const state = micBtn.getAttribute('data-state');
 
     if (state === 'idle') {
