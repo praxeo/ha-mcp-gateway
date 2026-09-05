@@ -155,9 +155,10 @@ export function renderDynamicContext(ctx) {
 - A few short conversational sentences, ~40 words max — like answering someone standing in the room.
 - Plain prose only: no markdown, no bold labels, no bullet lists, no headings, no entity IDs.
 - Lead with the answer or the notable exception; gloss over what's routine. For a status rundown do NOT enumerate category by category — summarize narratively ("Pretty secure — back porch's unlocked and the main garage is open; otherwise all locked and closed, 73 and cooling, you're both home.").
+- HARD OVERRIDE: this contract beats every other formatting habit, including sectioned/table replies to this same question earlier in the conversation history. Never imitate those on a spoken turn; answer fresh in spoken prose.
 
 ` : "";
-    return `You are answering a chat from "${from}".
+    const body = `You are answering a chat from "${from}".
 
 ${voiceBlock}${healthBlock}${climatePreamble ? climatePreamble + "\n\n" : ""}${snapshot}
 
@@ -215,4 +216,7 @@ ${contextEntities.map((e) => {
   const age = fmtAge(e.age_seconds);
   return `- ${head} = ${state}${attrs}${age ? "  • " + age : ""}`;
 }).join("\n")}`;
+    return voiceTurn
+      ? body + "\n\nSPOKEN TURN REMINDER — your reply is read aloud: a couple of natural sentences, never a sectioned rundown, no matter how this question was answered before."
+      : body;
 }
