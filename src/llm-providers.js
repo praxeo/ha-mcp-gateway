@@ -39,7 +39,11 @@ export const LLM_PROVIDERS = {
     endpoints: {
       chat: "https://api.fireworks.ai/inference/v1/chat/completions"
     },
-    // Fireworks rejects efforts outside this set.
+    // Fireworks rejects efforts outside this set. Note: it has no "minimal",
+    // so clampEffortForProvider walks the Quick tier's "minimal" DOWN to
+    // "none" (not up to "low") on a Fireworks rollback — Quick would run
+    // with reasoning off entirely, not just lower. Worth re-checking output
+    // quality if this provider is restored as the default.
     efforts: new Set(["none", "low", "medium", "high"]),
     label: "Fireworks"
   },
@@ -92,8 +96,11 @@ export function clampEffortForProvider(provider, effort) {
 // The UI exposes two positions and the request carries one of them. Quick is
 // the default on every page load; High is a per-session opt-in for forensic
 // and trend questions, where the extra reasoning is worth the wait.
+// Quick was "low"; dropped to "minimal" because effort low was still
+// generating hundreds of reasoning tokens on ordinary commands ("close the
+// garage") that don't need it — see docs/PLAN-voice-tiers-latency.md §1-2.
 export const LLM_TIERS = {
-  quick: "low",
+  quick: "minimal",
   high: "high"
 };
 

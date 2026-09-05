@@ -513,7 +513,7 @@ describe("full tool-calling round trip", () => {
 
 describe("effortForTier", () => {
   it("maps the UI's two positions to reasoning effort", () => {
-    expect(effortForTier("quick")).toBe("low");
+    expect(effortForTier("quick")).toBe("minimal");
     expect(effortForTier("high")).toBe("high");
   });
 
