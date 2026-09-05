@@ -5,11 +5,27 @@ export const TTS_CONFIG = {
   model_id: "eleven_flash_v2_5",
   output_format: "mp3_22050_32",
   maxChars: 900,
+  speed: 1.0, // 1.0 = natural pace; < 1.0 slower, > 1.0 faster (ElevenLabs)
   stability: 0.5,
   similarity_boost: 0.75,
   style: 0.0,
   use_speaker_boost: true,
 };
+
+// ElevenLabs working range for eleven_flash_v2_5: 0.7 = 30% slower,
+// 1.2 = 20% faster. Values outside it are rejected by the API.
+export const TTS_SPEED_MIN = 0.7;
+export const TTS_SPEED_MAX = 1.2;
+
+// Resolution order: per-request body.speed → env.ELEVENLABS_VOICE_SPEED →
+// TTS_CONFIG.speed. Out-of-range values clamp and unparseable values fall
+// back so a bad secret can never 4xx a spoken reply.
+export function resolveVoiceSpeed(body = {}, env = {}) {
+  const raw = body.speed !== undefined ? body.speed : env.ELEVENLABS_VOICE_SPEED;
+  const n = typeof raw === "number" ? raw : parseFloat(raw);
+  if (!Number.isFinite(n)) return TTS_CONFIG.speed;
+  return Math.round(Math.min(TTS_SPEED_MAX, Math.max(TTS_SPEED_MIN, n)) * 100) / 100;
+}
 
 export function cleanForSpeech(s) {
   if (!s) return "";
@@ -25,11 +41,15 @@ export function cleanForSpeech(s) {
   t = t.replace(/°\s*C\b/gi, " degrees Celsius ");
   t = t.replace(/°/g, " degrees ");
   t = t.replace(/(\d)\s*%/g, "$1 percent ");
-  t = t.replace(/\b&\b/g, " and ");
+  t = t.replace(/\s*&\s*/g, " and ");
   t = t.replace(/\+/g, " plus ");
+  // expansions above can strand a space before sentence punctuation
+  t = t.replace(/\s+([.,!?;:])/g, "$1");
 
   t = t.replace(/[#>*`_~|]/g, " ");
   t = t.replace(/[⚡✓✗▶▼▲•]/g, " ");
+  // emoji, pictographs, arrows, box-drawing - silence, not "emoji face"
+  t = t.replace(/[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\u{2190}-\u{21FF}\u{2B00}-\u{2BFF}\u{2500}-\u{25FF}\u{FE0F}\u{200D}]/gu, " ");
   // entity ids read terribly aloud - say object name instead
   t = t.replace(/\b[a-z_]{3,}\.[a-z0-9_]{3,}\b/g, (m) => m.split(".")[1].replace(/_/g, " "));
   t = t.replace(/\n\s*[-0-9]+\.?\s*/g, ". ");
@@ -51,6 +71,7 @@ export async function handleTTS(request, env, opts = {}) {
 
   const voiceId = opts.voice || body.voice ||
     env.ELEVENLABS_VOICE_ID || TTS_CONFIG.defaultVoiceId;
+  const speed = resolveVoiceSpeed(body, env);
 
   const elevResp = await fetch(
     "https://api.elevenlabs.io/v1/text-to-speech/" + encodeURIComponent(voiceId) + "?output_format=" + TTS_CONFIG.output_format,
@@ -68,7 +89,8 @@ export async function handleTTS(request, env, opts = {}) {
           stability: TTS_CONFIG.stability,
           similarity_boost: TTS_CONFIG.similarity_boost,
           style: TTS_CONFIG.style,
-          use_speaker_boost: TTS_CONFIG.use_speaker_boost
+          use_speaker_boost: TTS_CONFIG.use_speaker_boost,
+          speed
         }
       })
     }

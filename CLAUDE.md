@@ -217,9 +217,10 @@ All of it is in `src/tts.js`, whose header says it outright: *edit here, not
 |---|---|
 | **The voice itself** | `TTS_CONFIG.defaultVoiceId` (`tts.js:4`) — currently `21m00Tcm4TlvDq8ikWAM` (Rachel). Resolution order is per-request `body.voice` → `env.ELEVENLABS_VOICE_ID` → this constant, so **setting the `ELEVENLABS_VOICE_ID` secret swaps the voice with no code change and no deploy**. Edit the constant only to move the baked-in default. |
 | TTS model / audio format | `TTS_CONFIG.model_id` (`tts.js:5`, `eleven_flash_v2_5`), `output_format` (`tts.js:6`, `mp3_22050_32`) |
-| How it sounds — delivery | `stability` / `similarity_boost` / `style` / `use_speaker_boost` (`tts.js:8-11`) |
+| **Speaking rate** | `ELEVENLABS_VOICE_SPEED` secret — **no code change, no deploy**. ElevenLabs semantics: `1.0` natural, **< 1.0 slower, > 1.0 faster**, working range `0.7`–`1.2` (clamped by `resolveVoiceSpeed`, `tts.js`). Resolution order is per-request `body.speed` → secret → `TTS_CONFIG.speed` (`tts.js:8`, `1.0`). |
+| How it sounds — delivery | `stability` / `similarity_boost` / `style` / `use_speaker_boost` (`tts.js:19-22`) |
 | How long a spoken reply can run | `TTS_CONFIG.maxChars` (`tts.js:7`, 900). The cut backs up to the last sentence end. |
-| **How text is rewritten before it is spoken** | `cleanForSpeech()` (`tts.js:14`) — strips markdown and URLs, expands `°F` / `%` / `&` / `+` into words, and flattens entity IDs to just the object name (`light.porch_light` → "porch light"), which is the single biggest win for listenability. Covered by `test/speech-shaping.test.js`. |
+| **How text is rewritten before it is spoken** | `cleanForSpeech()` (`tts.js:29`) — strips markdown, URLs, and emoji, expands `°F` / `%` / `&` / `+` into words, and flattens entity IDs to just the object name (`light.porch_light` → "porch light"), which is the single biggest win for listenability. This is the **only** speech shaper — the chat UI posts the raw reply to `/tts` and lets the server shape it. Covered by `test/speech-shaping.test.js`. |
 
 ### What Ranger hears (ElevenLabs Scribe STT)
 
@@ -545,6 +546,8 @@ touching the adapter.
 `MODEL_API_KEY` (**required** — Meta Model API / Muse Spark, the default
 provider since V30), `ELEVENLABS_API_KEY` (optional, for `/transcribe`
 and `/tts`), `ELEVENLABS_VOICE_ID` (optional, picks the spoken-reply voice),
+`ELEVENLABS_VOICE_SPEED` (optional, spoken-reply pace: `0.7` slowest – `1.2`
+fastest, `1.0` natural; < 1 slows, > 1 speeds up),
 `MCP_AUTH_TOKEN` (optional).
 
 **Flags**: `USE_NATIVE_TOOL_LOOP` (`"true"` — the chat path),
