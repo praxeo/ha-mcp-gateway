@@ -168,8 +168,10 @@ Durable Object  HAWebSocketV31  (src/ha-websocket.js)
    │                           automation_runs, service_calls
    ├─► Vectorize "ha-knowledge" — nine-kind semantic index
    ├─► Workers AI            — @cf/baai/bge-large-en-v1.5 embeddings (cls)
-   ├─► Fireworks             — GLM 5.2 Fast chat completions (runtime-configurable)
-   └─► ElevenLabs Scribe     — speech-to-text
+   ├─► Meta Model API        — Muse Spark 1.3 over /v1/responses (default)
+   ├─► Fireworks             — GLM 5.3 chat completions (rollback provider)
+   ├─► ElevenLabs Scribe     — speech-to-text  (src/stt.js)
+   └─► ElevenLabs TTS        — spoken replies  (src/tts.js)
 ```
 
 The Worker is stateless request routing. All long-lived state and all LLM calls
@@ -183,16 +185,125 @@ addresses the same instance by the fixed name `ha-websocket-singleton`.
 | Path | Role |
 |---|---|
 | `src/worker.js` | Worker entry. MCP handler (`TOOLS` — 82 entries — + `handleTool` dispatch, `getAgentToolset`, `DANGEROUS_TOOLS`), HTTP routes, embedded `CHAT_HTML`, ElevenLabs STT proxy, KV cache helpers, per-kind `build*Docs`, `backfillKnowledge`, `scheduled()` cron handler. |
-| `src/ha-websocket.js` | The Durable Object class `HAWebSocketV31`. Persistent HA WS, `stateCache`, chat path (`chatWithAgentNative`), native tool loop (`runNativeToolLoop`), tool dispatch (`executeNativeTool`), action executor (`executeAIAction`), prompt builders, fast path, forensic D1 writers, reconnect backfill, `alarm()` keepalive. `_sanitizeLightServiceData` strips unsupported color descriptors from `light.turn_on` / `light.toggle` calls before they reach HA. ~6000 lines — the bulk of the system. |
+| `src/ha-websocket.js` | The Durable Object class `HAWebSocketV31`. Persistent HA WS, `stateCache`, chat path (`chatWithAgentNative`), native tool loop (`runNativeToolLoop`), tool dispatch (`executeNativeTool`), action executor (`executeAIAction`), prompt builders, fast path, forensic D1 writers, reconnect backfill, `alarm()` keepalive. `_sanitizeLightServiceData` strips unsupported color descriptors from `light.turn_on` / `light.toggle` calls before they reach HA. ~5,700 lines — the bulk of the system. |
 | `src/chat-history.js` | Persisted-history trimming (V31). Real byte accounting against the DO's 131072-byte per-value limit, per-message caps, reasoning stripped from stored turns, and trimming at whole-turn boundaries so a tool result is never orphaned from its call. Both save paths go through `trimChatHistory`. Pure and unit-tested. |
 | `src/llm-providers.js` | Provider adapters (V30). `LLM_PROVIDERS` (fireworks/meta), endpoint derivation, per-provider effort clamping, and the Chat-Completions ↔ Responses-API translation (`chatMessagesToResponsesInput`, `buildResponsesBody`, `responsesToChatCompletion`). Pure and unit-tested. |
+| `src/chat-prompt.js` | The Ranger chat system prompt. `buildStaticChatSystemPrompt()` (the cache-stable half) and `renderDynamicContext()` (the per-request half). **Edit prompt text here, not in the DO.** |
+| `src/chat-ui.html.js` | `CHAT_HTML` — the whole `/chat` web UI as one exported template literal (~1,600 lines): voice capture and VAD tuning, the reasoning-tier toggle, the spoken-replies toggle, the cover bar. |
+| `src/stt.js` | All ElevenLabs Scribe speech-to-text: `STT_CONFIG`, the keyterm vocabulary (`STT_FIXED_KEYTERMS`, `STT_KEYTERM_DOMAINS`), KV keyterm caching, `handleTranscribe`. |
+| `src/tts.js` | All ElevenLabs text-to-speech: `TTS_CONFIG` (voice id, model, delivery settings), `cleanForSpeech()` speech shaping, `handleTTS`. The file header says it plainly — edit here, not `worker.js`. |
 | `src/agent-tools.js` | OpenAI-format tool schemas for the chat agent: `NATIVE_AGENT_TOOLS` (19 = 6 action + 13 read), `CHAT_ALLOWED_TOOL_NAMES`, `NATIVE_ACTION_TOOL_NAMES`. |
 | `src/vectorize-schema.js` | Shared Vectorize schema + helpers: `vectorIdFor`, `topicTagFor`, `fnv1aHex`, per-kind embed-text builders, `isNoisyEntity` / `isNoisySwitch` / `isNoisyService`, `buildMetadata`. Imported by both `worker.js` and `ha-websocket.js`. |
 | `migrations/000{1,2,3}_*.sql` | D1 schema. 0001 indexes legacy tables; 0002 creates the forensic log tables; 0003 de-dupes `state_changes` and adds the backfill-idempotency unique index. |
-| `wrangler.toml` | Bindings, `[build]`, cron triggers, DO migrations v1→v22. |
+| `wrangler.toml` | Bindings, `[build]`, cron triggers, DO migrations v1→v31. |
 | `dist/worker.js` | esbuild output — **build artifact, never edit**. |
 | `BUGS.md` | The iteration backlog — bugs captured via `report_bug`, folded in at iteration time. |
 | `.dev.vars` | Local-dev secrets — never committed. |
+
+---
+
+## Where to change things
+
+A task-to-location map for the knobs that actually get turned. Line numbers are a
+starting offset and drift with every edit — the symbol names are the durable part,
+so `grep -n "<symbol>" src/<file>.js` if a number looks off.
+
+### The voice Ranger speaks in (ElevenLabs TTS)
+
+All of it is in `src/tts.js`, whose header says it outright: *edit here, not
+`worker.js`*.
+
+| To change | Edit |
+|---|---|
+| **The voice itself** | `TTS_CONFIG.defaultVoiceId` (`tts.js:4`) — currently `21m00Tcm4TlvDq8ikWAM` (Rachel). Resolution order is per-request `body.voice` → `env.ELEVENLABS_VOICE_ID` → this constant, so **setting the `ELEVENLABS_VOICE_ID` secret swaps the voice with no code change and no deploy**. Edit the constant only to move the baked-in default. |
+| TTS model / audio format | `TTS_CONFIG.model_id` (`tts.js:5`, `eleven_flash_v2_5`), `output_format` (`tts.js:6`, `mp3_22050_32`) |
+| How it sounds — delivery | `stability` / `similarity_boost` / `style` / `use_speaker_boost` (`tts.js:8-11`) |
+| How long a spoken reply can run | `TTS_CONFIG.maxChars` (`tts.js:7`, 900). The cut backs up to the last sentence end. |
+| **How text is rewritten before it is spoken** | `cleanForSpeech()` (`tts.js:14`) — strips markdown and URLs, expands `°F` / `%` / `&` / `+` into words, and flattens entity IDs to just the object name (`light.porch_light` → "porch light"), which is the single biggest win for listenability. Covered by `test/speech-shaping.test.js`. |
+
+### What Ranger hears (ElevenLabs Scribe STT)
+
+All of it is in `src/stt.js`.
+
+| To change | Edit |
+|---|---|
+| **Words it keeps mishearing** | `STT_FIXED_KEYTERMS` (`stt.js:12`) — the hand-written vocabulary the transcriber cannot learn from entity names: household names, "sentry mode", "basement bay", "deadbolt", "precondition". Add the misheard phrase here first; this is the highest-leverage fix for a voice command that keeps landing wrong. |
+| Which entities contribute their friendly names as keyterms | `STT_KEYTERM_DOMAINS` (`stt.js:6`) |
+| STT model / language / temperature | `STT_CONFIG` (`stt.js:24`) — `scribe_v2`, `eng`, `0` |
+| Keyterm list caps | `STT_KEYTERM_MAX` (1000) / `STT_KEYTERM_MAXLEN` (50) (`stt.js:21-22`) |
+| Keyterm cache | `STT_CACHE_KEY` / `STT_CACHE_TTL` (`stt.js:3-4`, 1h in KV) |
+
+Keyterms are read **read-only** from KV on the transcribe path so a cold cache
+costs nothing on the voice critical path; a miss refreshes in the background via
+`ctx.waitUntil`. If ElevenLabs 4xx-rejects the keyterms, `handleTranscribe` retries
+once without them rather than failing the turn (`stt.js:82`).
+
+### Voice capture behavior in the browser
+
+In `src/chat-ui.html.js` — the UI is one template literal, so grep inside it.
+
+| To change | Edit |
+|---|---|
+| How long a pause ends a clip | `VAD_SILENCE_MS` (`chat-ui.html.js:1409`, 1200ms) |
+| Ignore-too-short threshold | `VAD_MIN_CLIP_MS` (`chat-ui.html.js:1410`, 600ms) |
+| Hard ceiling on a stuck mic | `VAD_MAX_CLIP_MS` (`chat-ui.html.js:1411`, 15s) |
+| Mic sensitivity (what counts as speech) | `VAD_SPEECH_RMS` (`chat-ui.html.js:1412`, 0.045) |
+| Spoken replies on/off + its default | `speakOn` / `toggleSpeak()` (`chat-ui.html.js:954`), persisted per-browser in `localStorage` under `ha_speak_replies`. Default **off**. |
+| Reasoning-tier control | `setTier()` (`chat-ui.html.js:946`). Resets to Quick on every page load **by design** — an ordinary command should never pay for reasoning it does not need. |
+
+### The chat prompt
+
+`src/chat-prompt.js`. **Edit prompt text here, not in `ha-websocket.js`.**
+
+| To change | Edit |
+|---|---|
+| Persona, behavioral rules, tool guidance | `buildStaticChatSystemPrompt()` (`chat-prompt.js:22`) |
+| Anything that varies per request | `renderDynamicContext()` (`chat-prompt.js:134`) |
+
+The split exists for prefix caching: the static half must be **byte-identical** on
+every request. Interpolating one per-request value into it silently destroys the
+cache with no error — so per-request data goes in the dynamic half, always. The
+behavioral rules (TRUTHFULNESS, ACTION CONFIRMATION, TOOL ERROR HANDLING,
+COMMITMENT RULE) encode real past failures; don't trim them casually.
+
+### Model, provider, and reasoning
+
+| To change | Edit |
+|---|---|
+| **Model / provider, live** | `POST /admin/llm-config` — no deploy, no DO rename. This is the normal path; see the LLM configuration section. |
+| The baked-in default | `static LLM_ENDPOINT` / `LLM_MODEL` / `LLM_PROVIDER` / `LLM_API` (`ha-websocket.js:259-262`) |
+| Baseline reasoning effort (the Quick tier) | `static LLM_REASONING_EFFORT` (`ha-websocket.js:276`) |
+| Reasoning summary verbosity | `static LLM_REASONING_SUMMARY` (`ha-websocket.js:285`). `"detailed"` is the only value that ever produced text against the live Meta API; `null` drops the request. |
+| What each UI tier maps to | `LLM_TIERS` (`llm-providers.js:95`) — `quick` → `low`, `high` → `high` |
+| Adding a provider, or its endpoints / key env var / allowed efforts | `LLM_PROVIDERS` (`llm-providers.js:35`) |
+
+Test a candidate model **without** storing it: `POST /admin/llm-selftest` with a
+config patch. It runs one real probe through `callLLMWithTools`.
+
+### Conversation memory
+
+`src/chat-history.js` — how much history survives into the next turn.
+`HISTORY_BYTE_BUDGET` (`:36`, 96000), `MAX_TURNS` (`:41`, 8), and the per-role caps
+`TOOL_CONTENT_CAP` / `ASSISTANT_CONTENT_CAP` / `USER_CONTENT_CAP` (`:44-46`). The
+budget exists because a DO storage value is hard-capped at 131072 bytes
+(`DO_VALUE_LIMIT_BYTES`), and exceeding it used to lose the whole conversation.
+
+### Behavior of the house itself
+
+| To change | Edit |
+|---|---|
+| Which phrases skip the LLM entirely | `_tryDeterministicFastPath` (`ha-websocket.js`) — garage/bay open+close. Always explicit open/close, never `toggle`. |
+| What the agent can *do* in chat | `NATIVE_AGENT_TOOLS` in `src/agent-tools.js`, plus a `case` in `executeNativeTool`; mutating tools must also join `NATIVE_ACTION_TOOL_NAMES` |
+| What external MCP clients can do | `TOOLS` in `src/worker.js`, dispatched by `handleTool`; role-gate via `DANGEROUS_TOOLS` |
+| Which events reach the forensic log | `_shouldLogStateChange` (`ha-websocket.js`) — has unit coverage, update the test with it |
+| What the agent is told about the house right now | `_buildHouseStateSnapshot` and its gate `HOUSE_STATUS_TRIGGER_RE` (`ha-websocket.js`) |
+
+**Before editing anything in `src/ha-websocket.js`, re-read gotcha #1.** A DO-side
+change does not go live without the class rename plus a migration. Everything in
+`worker.js`, `stt.js`, `tts.js`, `chat-ui.html.js`, `chat-prompt.js`,
+`llm-providers.js` and `chat-history.js` is Worker-side and takes effect on deploy
+— which is why the voice and prompt knobs were pulled out into their own modules in
+the first place.
 
 ---
 
@@ -445,7 +556,8 @@ fallback), `CLIMATE_PREAMBLE_ENABLED` (optional), `DUMP_SYSTEM_PROMPT`
 
 ## HTTP routes (Worker)
 
-`/health`, `/transcribe` (ElevenLabs STT proxy), `/refresh`, `/chat` (GET = UI,
+`/health`, `/transcribe` (ElevenLabs STT proxy — `src/stt.js`), `/tts` (ElevenLabs
+spoken replies — `src/tts.js`), `/manifest.json`, `/refresh`, `/chat` (GET = UI,
 POST = SSE chat), `/covers` (GET — live garage/basement-bay cover states for
 the chat UI's persistent cover bar), `/twilio` (dormant), `/mcp` (and `/` —
 MCP JSON-RPC), plus admin endpoints: `/admin/bugs`, `/admin/bugs/clear`, `/admin/recent_activity`,
