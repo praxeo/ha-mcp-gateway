@@ -808,7 +808,7 @@ export const CHAT_HTML = `<!DOCTYPE html>
     </div>
     <div class="input-row">
       <textarea id="input" placeholder="Message your home..." rows="1"></textarea>
-      <button id="sendBtn" type="button" aria-label="Send" onclick="send()">
+      <button id="sendBtn" type="button" aria-label="Send" onclick="requestSend()">
         <svg viewBox="0 0 24 24" fill="currentColor" width="20" height="20">
           <path d="M2 12l20-9-9 20-2-9-9-2z"/>
         </svg>
@@ -900,7 +900,7 @@ export const CHAT_HTML = `<!DOCTYPE html>
   input.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
-      send();
+      requestSend();
     }
   });
 
@@ -925,11 +925,7 @@ export const CHAT_HTML = `<!DOCTYPE html>
   let lastSendWasVoice = false;
 
   function sendQuick(text) {
-    if (sendBtn.disabled) return; // a send is already in flight
-    suppressRefocus = true;
-    lastSendWasVoice = false;
-    input.value = text;
-    send();
+    requestSend({ text, quiet: true });
   }
 
   function refocusInput() {
@@ -1071,12 +1067,11 @@ export const CHAT_HTML = `<!DOCTYPE html>
     btn.type = 'button';
     btn.innerHTML = ICON_RETRY + '<span>retry</span>';
     btn.onclick = () => {
-      if (!lastUserMessage) return;
-      // Remove the error bubble we're attached to
-      const parent = btn.closest('.msg');
-      if (parent && parent.parentNode) parent.parentNode.removeChild(parent);
-      input.value = lastUserMessage;
-      send();
+    if (!lastUserMessage) return;
+    // Remove the error bubble we're attached to
+    const parent = btn.closest('.msg');
+    if (parent && parent.parentNode) parent.parentNode.removeChild(parent);
+    requestSend({ text: lastUserMessage });
     };
     return btn;
   }
@@ -1184,10 +1179,48 @@ export const CHAT_HTML = `<!DOCTYPE html>
     }
   }
 
+  // ── Send queue — one turn at a time ────────────────────────────────────
+  // A send arriving while another turn is still streaming (typed, quick
+  // icon, or dictated) used to race the live stream — interleaved typing
+  // and status state, and on long (high-tier) turns the reply could be
+  // lost entirely, which read on the phone as "the dictated message never
+  // sent". Now it queues: the user bubble appears immediately, and the
+  // request fires when the current turn finishes.
+  let sendInFlight = false;
+  let sendQueue = [];
+
+  function requestSend(opts) {
+    const payload = opts || {};
+    const text = (payload.text != null ? String(payload.text) : input.value).trim();
+    if (!text) return;
+    if (sendInFlight) {
+      sendQueue.push({
+        text,
+        source: payload.source || null,
+        sttMs: payload.sttMs != null ? payload.sttMs : null,
+        quiet: !!payload.quiet
+      });
+      input.value = '';
+      input.style.height = 'auto';
+      addMsg('user', text);
+      scrollToBottom(true);
+      return;
+    }
+    sendInFlight = true;
+    send({ text, source: payload.source, sttMs: payload.sttMs, quiet: payload.quiet }).finally(() => {
+      sendInFlight = false;
+      const next = sendQueue.shift();
+      if (next) requestSend(next);
+    });
+  }
+
   async function send(opts) {
     stopSpeaking();
-    const text = input.value.trim();
+    const text = (opts && opts.text != null ? String(opts.text) : input.value).trim();
     if (!text) return;
+    // A quiet send (quick icon) never brings the keyboard up, even when it
+    // was queued behind a long turn.
+    if (opts && opts.quiet) suppressRefocus = true;
 
     const isVoice = !!(opts && opts.source === 'voice');
     const sttMs = opts && typeof opts.sttMs === 'number' ? opts.sttMs : null;
@@ -1562,7 +1595,7 @@ export const CHAT_HTML = `<!DOCTYPE html>
               input.value = text;
               input.style.height = 'auto';
               setMicState('idle');
-              send({ source: 'voice', sttMs });
+              requestSend({ text, source: 'voice', sttMs });
               return;
             } else {
               addMsg('error', 'No speech detected.');
