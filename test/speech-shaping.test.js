@@ -38,11 +38,21 @@ describe("cleanForSpeech", () => {
     expect(cleanForSpeech("It is 71.5 degrees.")).toBe("It is 71.5 degrees.");
   });
 
-  it("flattens a bulleted list into sentences", () => {
+  it("flattens a bulleted list into narrative prose", () => {
     const out = cleanForSpeech("Two doors are unlocked:\n- Basement Door\n- Back Porch");
-    expect(out).toBe("Two doors are unlocked:. Basement Door. Back Porch");
+    expect(out).toBe("Two doors are unlocked: Basement Door and Back Porch");
     expect(out).not.toContain("-");
     expect(out).not.toContain("\n");
+  });
+
+  it("joins three or more list items with commas and a final and", () => {
+    expect(cleanForSpeech("Open:\n- Garage\n- Basement bay\n- Front door"))
+      .toBe("Open: Garage, Basement bay, and Front door");
+  });
+
+  it("joins numbered lists the same way", () => {
+    expect(cleanForSpeech("1. Close garage\n2. Lock back porch"))
+      .toBe("Close garage and Lock back porch");
   });
 
   it("removes heading markers", () => {

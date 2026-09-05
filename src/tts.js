@@ -4,7 +4,7 @@ export const TTS_CONFIG = {
   defaultVoiceId: "21m00Tcm4TlvDq8ikWAM", // Rachel - change me once
   model_id: "eleven_flash_v2_5",
   output_format: "mp3_22050_32",
-  maxChars: 900,
+  maxChars: 300, // ~45 spoken words; longer replies are cut at a sentence end
   speed: 1.0, // 1.0 = natural pace; < 1.0 slower, > 1.0 faster (ElevenLabs)
   stability: 0.5,
   similarity_boost: 0.75,
@@ -46,6 +46,22 @@ export function cleanForSpeech(s) {
   // expansions above can strand a space before sentence punctuation
   t = t.replace(/\s+([.,!?;:])/g, "$1");
 
+  // consecutive list items -> one narrative sentence ("a, b, and c"),
+  // so spoken replies flow instead of sounding like a staccato rundown
+  t = t.replace(/(?:^[ \t]*(?:[-*•·]|\d+[.)])[ \t]+.*(?:\n|$))+/gm, (block) => {
+    const items = block.split(/\n/)
+      .map((l) => /^[ \t]*(?:[-*•·]|\d+[.)])[ \t]+(.*)$/.exec(l))
+      .filter(Boolean).map((m) => m[1].trim())
+      .filter(Boolean);
+    if (items.length === 0) return "\n";
+    const said = items.length === 1 ? items[0]
+      : items.length === 2 ? items[0] + " and " + items[1]
+      : items.slice(0, -1).join(", ") + ", and " + items[items.length - 1];
+    return " " + said + " ";
+  });
+  // a colon introducing a list keeps the sentence flowing: "unlocked: a and b"
+  t = t.replace(/:[ \t]*\n/g, ": ");
+
   t = t.replace(/[#>*`_~|]/g, " ");
   t = t.replace(/[⚡✓✗▶▼▲•]/g, " ");
   // emoji, pictographs, arrows, box-drawing - silence, not "emoji face"
@@ -54,11 +70,13 @@ export function cleanForSpeech(s) {
   t = t.replace(/\b[a-z_]{3,}\.[a-z0-9_]{3,}\b/g, (m) => m.split(".")[1].replace(/_/g, " "));
   t = t.replace(/\n\s*[-0-9]+\.?\s*/g, ". ");
   t = t.replace(/\n+/g, ". ");
+  // newline flattening above can strand spaces too - tidy once more
+  t = t.replace(/\s+([.,!?;:])/g, "$1");
   t = t.replace(/\s{2,}/g, " ").trim();
   if (t.length > TTS_CONFIG.maxChars) {
     const cut = t.slice(0, TTS_CONFIG.maxChars);
     const dot = Math.max(cut.lastIndexOf(". "), cut.lastIndexOf("! "), cut.lastIndexOf("? "));
-    t = dot > 200 ? cut.slice(0, dot + 1) : cut;
+    t = dot > TTS_CONFIG.maxChars * 0.4 ? cut.slice(0, dot + 1) : cut;
   }
   return t;
 }

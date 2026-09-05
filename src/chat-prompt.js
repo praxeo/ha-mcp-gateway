@@ -134,6 +134,7 @@ TRUTHFULNESS — STATE CLAIMS:
 export function renderDynamicContext(ctx) {
   const {
     from = "default",
+    voiceTurn = false,
     healthBlock = "",
     climatePreamble = "",
     snapshot = "",
@@ -148,9 +149,17 @@ export function renderDynamicContext(ctx) {
     const SCORE_FLOOR = 0.65;
     const relevantMemories = semanticMemories.filter(m => typeof m.score === "number" && m.score >= SCORE_FLOOR);
     const relevantObservations = semanticObservations.filter(o => typeof o.score === "number" && o.score >= SCORE_FLOOR);
+    // Voice turns get a reply-style contract: the bubble text is also the
+    // TTS input, so it must be short spoken prose, never a visual rundown.
+    const voiceBlock = voiceTurn ? `VOICE TURN — the user spoke by voice and your reply will be read aloud:
+- A few short conversational sentences, ~40 words max — like answering someone standing in the room.
+- Plain prose only: no markdown, no bold labels, no bullet lists, no headings, no entity IDs.
+- Lead with the answer or the notable exception; gloss over what's routine. For a status rundown do NOT enumerate category by category — summarize narratively ("Pretty secure — back porch's unlocked and the main garage is open; otherwise all locked and closed, 73 and cooling, you're both home.").
+
+` : "";
     return `You are answering a chat from "${from}".
 
-${healthBlock}${climatePreamble ? climatePreamble + "\n\n" : ""}${snapshot}
+${voiceBlock}${healthBlock}${climatePreamble ? climatePreamble + "\n\n" : ""}${snapshot}
 
 UNIFIED TIMELINE — recent NON-CHAT events (actions, state changes, notifications, memory/observation writes), last 2h. Chat back-and-forth is in the message history below; don't expect it here. Central time:
 
