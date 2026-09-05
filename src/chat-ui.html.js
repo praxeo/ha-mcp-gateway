@@ -995,29 +995,6 @@ export const CHAT_HTML = `<!DOCTYPE html>
   let ttsObjectUrl = null;
   let ttsAbort = null;
 
-  function textForSpeech(s) {
-    if (!s) return '';
-    let t = ' ' + s + ' ';
-    t = t.replace(/\\*\\*(.+?)\\*\\*/g, '$1');
-    t = t.replace(/\\[([^\\]]+)\\]\\([^\\)]+\\)/g, '$1');
-    t = t.replace(/https?:\\/\\/\\S+/g, ' ');
-    t = t.replace(/[#>*_~|]/g, ' ');
-    t = t.replace(/[⚡✓✗▶▼▲•]/g, ' ');
-    t = t.replace(/(\\uD83C[\\uDC00-\\uDFFF]|\\uD83D[\\uDC00-\\uDFFF]|\\uD83E[\\uDD00-\\uDDFF]|[\\u2600-\\u27BF])/g, ' ');
-    t = t.replace(/\\n\\s*[-0-9]+\\.?\\s*/g, '. ');
-    t = t.replace(/\\n+/g, '. ');
-    t = t.replace(/\\s{2,}/g, ' ');
-    t = t.replace(/\\s*&\\s*/g, ' and ');
-    t = t.trim();
-    if (t.length > 600) {
-      const cut0 = t.slice(0, 600);
-      const dot = Math.max(cut0.lastIndexOf('. '), cut0.lastIndexOf('! '), cut0.lastIndexOf('? '));
-      if (dot > 200) t = cut0.slice(0, dot + 1);
-      else t = cut0;
-    }
-    return t;
-  }
-
   function stopSpeaking() {
     if (ttsAbort) {
       try { ttsAbort.abort(); } catch {}
@@ -1029,18 +1006,19 @@ export const CHAT_HTML = `<!DOCTYPE html>
     }
   }
 
+  // Raw reply text goes to /tts — cleanForSpeech() in src/tts.js is the one
+  // speech shaper (markdown/URL/emoji stripping, unit + entity-id expansion,
+  // sentence-boundary truncation), so spoken mode can't drift from it.
   async function speak(text) {
     if (!speakOn || !text) return;
     stopSpeaking();
-    const say = textForSpeech(text);
-    if (!say) return;
     ttsAbort = new AbortController();
     const sig = ttsAbort.signal;
     try {
       const resp = await fetch('/tts', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: say }),
+        body: JSON.stringify({ text }),
         signal: sig
       });
       if (!resp.ok) return;

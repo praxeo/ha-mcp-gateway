@@ -81,7 +81,7 @@ npm test             # vitest run — 9 suites (forensic filter, light sanitizer
    (`src/ha-websocket.js`) do not.** To force a fresh DO isolate you must rename
    the DO class via a `renamed_classes` migration in `wrangler.toml` and update
    `class_name` in the `durable_objects.bindings`. The class is currently
-   `HAWebSocketV31` — it has been renamed 30 times for exactly this reason.
+   `HAWebSocketV33` — it has been renamed 32 times for exactly this reason.
    Procedure for any DO-side change you need live:
    - bump the class name (`HAWebSocketV31` → `HAWebSocketV32`) in the `export
      class` line in `src/ha-websocket.js`, every `HAWebSocketV31.` static
@@ -157,7 +157,7 @@ Cloudflare Worker  (src/worker.js)
    │   CHAT_HTML UI, ElevenLabs STT proxy, multi-kind knowledge backfill,
    │   scheduled() cron handler
    ▼
-Durable Object  HAWebSocketV31  (src/ha-websocket.js)
+Durable Object  HAWebSocketV33  (src/ha-websocket.js)
    │   singleton "ha-websocket-singleton" — persistent HA WebSocket,
    │   in-memory stateCache, hibernation snapshot, chat tool loop,
    │   cover fast path, forensic D1 writers, reconnect backfill
@@ -185,7 +185,7 @@ addresses the same instance by the fixed name `ha-websocket-singleton`.
 | Path | Role |
 |---|---|
 | `src/worker.js` | Worker entry. MCP handler (`TOOLS` — 82 entries — + `handleTool` dispatch, `getAgentToolset`, `DANGEROUS_TOOLS`), HTTP routes, embedded `CHAT_HTML`, ElevenLabs STT proxy, KV cache helpers, per-kind `build*Docs`, `backfillKnowledge`, `scheduled()` cron handler. |
-| `src/ha-websocket.js` | The Durable Object class `HAWebSocketV31`. Persistent HA WS, `stateCache`, chat path (`chatWithAgentNative`), native tool loop (`runNativeToolLoop`), tool dispatch (`executeNativeTool`), action executor (`executeAIAction`), prompt builders, fast path, forensic D1 writers, reconnect backfill, `alarm()` keepalive. `_sanitizeLightServiceData` strips unsupported color descriptors from `light.turn_on` / `light.toggle` calls before they reach HA. ~5,700 lines — the bulk of the system. |
+| `src/ha-websocket.js` | The Durable Object class `HAWebSocketV33`. Persistent HA WS, `stateCache`, chat path (`chatWithAgentNative`), native tool loop (`runNativeToolLoop`), tool dispatch (`executeNativeTool`), action executor (`executeAIAction`), prompt builders, fast path, forensic D1 writers, reconnect backfill, `alarm()` keepalive. `_sanitizeLightServiceData` strips unsupported color descriptors from `light.turn_on` / `light.toggle` calls before they reach HA. ~5,700 lines — the bulk of the system. |
 | `src/chat-history.js` | Persisted-history trimming (V31). Real byte accounting against the DO's 131072-byte per-value limit, per-message caps, reasoning stripped from stored turns, and trimming at whole-turn boundaries so a tool result is never orphaned from its call. Both save paths go through `trimChatHistory`. Pure and unit-tested. |
 | `src/llm-providers.js` | Provider adapters (V30). `LLM_PROVIDERS` (fireworks/meta), endpoint derivation, per-provider effort clamping, and the Chat-Completions ↔ Responses-API translation (`chatMessagesToResponsesInput`, `buildResponsesBody`, `responsesToChatCompletion`). Pure and unit-tested. |
 | `src/chat-prompt.js` | The Ranger chat system prompt. `buildStaticChatSystemPrompt()` (the cache-stable half) and `renderDynamicContext()` (the per-request half). **Edit prompt text here, not in the DO.** |
@@ -195,7 +195,7 @@ addresses the same instance by the fixed name `ha-websocket-singleton`.
 | `src/agent-tools.js` | OpenAI-format tool schemas for the chat agent: `NATIVE_AGENT_TOOLS` (19 = 6 action + 13 read), `CHAT_ALLOWED_TOOL_NAMES`, `NATIVE_ACTION_TOOL_NAMES`. |
 | `src/vectorize-schema.js` | Shared Vectorize schema + helpers: `vectorIdFor`, `topicTagFor`, `fnv1aHex`, per-kind embed-text builders, `isNoisyEntity` / `isNoisySwitch` / `isNoisyService`, `buildMetadata`. Imported by both `worker.js` and `ha-websocket.js`. |
 | `migrations/000{1,2,3}_*.sql` | D1 schema. 0001 indexes legacy tables; 0002 creates the forensic log tables; 0003 de-dupes `state_changes` and adds the backfill-idempotency unique index. |
-| `wrangler.toml` | Bindings, `[build]`, cron triggers, DO migrations v1→v31. |
+| `wrangler.toml` | Bindings, `[build]`, cron triggers, DO migrations v1→v33. |
 | `dist/worker.js` | esbuild output — **build artifact, never edit**. |
 | `BUGS.md` | The iteration backlog — bugs captured via `report_bug`, folded in at iteration time. |
 | `.dev.vars` | Local-dev secrets — never committed. |
@@ -217,9 +217,10 @@ All of it is in `src/tts.js`, whose header says it outright: *edit here, not
 |---|---|
 | **The voice itself** | `TTS_CONFIG.defaultVoiceId` (`tts.js:4`) — currently `21m00Tcm4TlvDq8ikWAM` (Rachel). Resolution order is per-request `body.voice` → `env.ELEVENLABS_VOICE_ID` → this constant, so **setting the `ELEVENLABS_VOICE_ID` secret swaps the voice with no code change and no deploy**. Edit the constant only to move the baked-in default. |
 | TTS model / audio format | `TTS_CONFIG.model_id` (`tts.js:5`, `eleven_flash_v2_5`), `output_format` (`tts.js:6`, `mp3_22050_32`) |
-| How it sounds — delivery | `stability` / `similarity_boost` / `style` / `use_speaker_boost` (`tts.js:8-11`) |
-| How long a spoken reply can run | `TTS_CONFIG.maxChars` (`tts.js:7`, 900). The cut backs up to the last sentence end. |
-| **How text is rewritten before it is spoken** | `cleanForSpeech()` (`tts.js:14`) — strips markdown and URLs, expands `°F` / `%` / `&` / `+` into words, and flattens entity IDs to just the object name (`light.porch_light` → "porch light"), which is the single biggest win for listenability. Covered by `test/speech-shaping.test.js`. |
+| **Speaking rate** | `ELEVENLABS_VOICE_SPEED` secret — **no code change, no deploy**. ElevenLabs semantics: `1.0` natural, **< 1.0 slower, > 1.0 faster**, working range `0.7`–`1.2` (clamped by `resolveVoiceSpeed`, `tts.js`). Resolution order is per-request `body.speed` → secret → `TTS_CONFIG.speed` (`tts.js:8`, `1.0`). |
+| How it sounds — delivery | `stability` / `similarity_boost` / `style` / `use_speaker_boost` (`tts.js:19-22`) |
+| How long a spoken reply can run | `TTS_CONFIG.maxChars` (`tts.js:7`, 300 ≈ 45 words). The cut backs up to the last sentence end. |
+| **How text is rewritten before it is spoken** | `cleanForSpeech()` (`tts.js:29`) — strips markdown, URLs, and emoji, expands `°F` / `%` / `&` / `+` into words, flattens entity IDs to just the object name (`light.porch_light` → "porch light"), and joins consecutive list items into narrative "a, b, and c" prose so spoken replies never sound like a staccato rundown. This is the **only** speech shaper — the chat UI posts the raw reply to `/tts` and lets the server shape it. Covered by `test/speech-shaping.test.js`. |
 
 ### What Ranger hears (ElevenLabs Scribe STT)
 
@@ -259,6 +260,7 @@ In `src/chat-ui.html.js` — the UI is one template literal, so grep inside it.
 |---|---|
 | Persona, behavioral rules, tool guidance | `buildStaticChatSystemPrompt()` (`chat-prompt.js:22`) |
 | Anything that varies per request | `renderDynamicContext()` (`chat-prompt.js:134`) |
+| Voice-reply style (short, narrative, no lists) | The `voiceTurn` block in `renderDynamicContext()` — injected only when the turn originated from the browser mic (`source: "voice"`, forwarded by the DO `/ai_chat` routes). Tells the model the reply will be read aloud and must be a couple of spoken-prose sentences. |
 
 The split exists for prefix caching: the static half must be **byte-identical** on
 every request. Interpolating one per-request value into it silently destroys the
@@ -434,7 +436,7 @@ pure) with three layers, highest precedence first:
 2. **env vars** — `LLM_ENDPOINT` / `LLM_MODEL` / `LLM_PROVIDER` / `LLM_API` /
    `LLM_REASONING_MODE` / `LLM_REASONING_EFFORT` (a fresh isolate picks these up).
 3. **baked-in defaults** — the static class constants in `src/ha-websocket.js`,
-   exposed via `HAWebSocketV31._defaultLLMConfig()`:
+   exposed via `HAWebSocketV33._defaultLLMConfig()`:
 
 ```js
 static LLM_ENDPOINT = "https://api.meta.ai/v1/responses";
@@ -537,7 +539,7 @@ touching the adapter.
 
 ## Bindings, secrets, and flags
 
-**Bindings** (`wrangler.toml`): `HA_WS` (DO `HAWebSocketV31`), `HA_CACHE` (KV),
+**Bindings** (`wrangler.toml`): `HA_WS` (DO `HAWebSocketV33`), `HA_CACHE` (KV),
 `KNOWLEDGE` (Vectorize `ha-knowledge`), `AI` (Workers AI), `DB` (D1 `ha_db`),
 `CF_VERSION_METADATA`.
 
@@ -545,6 +547,8 @@ touching the adapter.
 `MODEL_API_KEY` (**required** — Meta Model API / Muse Spark, the default
 provider since V30), `ELEVENLABS_API_KEY` (optional, for `/transcribe`
 and `/tts`), `ELEVENLABS_VOICE_ID` (optional, picks the spoken-reply voice),
+`ELEVENLABS_VOICE_SPEED` (optional, spoken-reply pace: `0.7` slowest – `1.2`
+fastest, `1.0` natural; < 1 slows, > 1 speeds up),
 `MCP_AUTH_TOKEN` (optional).
 
 **Flags**: `USE_NATIVE_TOOL_LOOP` (`"true"` — the chat path),

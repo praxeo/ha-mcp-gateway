@@ -51,7 +51,7 @@ binding = "CF_VERSION_METADATA"
 
 [[durable_objects.bindings]]
 name = "HA_WS"
-class_name = "HAWebSocketV32"
+class_name = "HAWebSocketV33"
 
 [[migrations]]
 tag = "v1"
@@ -488,6 +488,17 @@ renamed_classes = [
 tag = "v32"
 renamed_classes = [
   { from = "HAWebSocketV31", to = "HAWebSocketV32" }
+]
+
+# Voice-turn narrative replies: /ai_chat and /ai_chat_stream now forward
+# body.source, and the DO passes voiceTurn into renderDynamicContext so
+# voice-origin turns get the short spoken-prose reply contract (chat-prompt.js
+# + ha-websocket.js changes). DO-side code the pinned isolate won't reload
+# without a rename. Storage preserved.
+[[migrations]]
+tag = "v33"
+renamed_classes = [
+  { from = "HAWebSocketV32", to = "HAWebSocketV33" }
 ]
 
 # Two cron triggers:

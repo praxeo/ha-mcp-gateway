@@ -1,109 +1,122 @@
-// Tests for the two pure helpers added for Phase 0 voice work in
-// src/worker.js: stripForSpeech (shapes an agent reply for text-to-speech)
-// and normalizeKeyterm (filters entity names into Scribe keyterm bias).
+// Tests for the voice-pipeline pure helpers:
+//  - cleanForSpeech / resolveVoiceSpeed (src/tts.js) — shapes an agent
+//    reply for text-to-speech and resolves the ElevenLabs speed setting
+//  - normalizeKeyterm (src/stt.js) — filters entity names into Scribe
+//    keyterm bias
 //
-// Per repo convention the helpers are stubbed here in sync with the worker —
-// worker.js has no test-friendly export surface. Keep these copies identical
-// to the originals when either changes.
+// These import the real modules (same convention as llm-providers and
+// chat-history tests), so the suite cannot drift from the shipped code.
 
 import { describe, it, expect } from "vitest";
+import { cleanForSpeech, resolveVoiceSpeed, TTS_CONFIG } from "../src/tts.js";
+import { normalizeKeyterm } from "../src/stt.js";
 
-// ── synced stub: src/worker.js stripForSpeech ────────────────────────────
-const TTS_MAX_CHARS = 600;
-
-function stripForSpeech(raw) {
-  if (typeof raw !== "string") return "";
-  let t = raw;
-  t = t.replace(/```[\s\S]*?```/g, " ");
-  t = t.replace(/`([^`]*)`/g, "$1");
-  t = t.replace(/\*\*(.+?)\*\*/g, "$1");
-  t = t.replace(/(^|\s)[*_]([^*_\n]+)[*_](?=\s|$)/g, "$1$2");
-  t = t.replace(/^\s*#{1,6}\s*/gm, "");
-  t = t.replace(/^\s*[-*•]\s+/gm, "");
-  t = t.replace(/\b[a-z_]{3,}\.[a-z0-9_]{3,}\b/g, (m) => m.split(".")[1].replace(/_/g, " "));
-  t = t.replace(/\s*\n+\s*/g, ". ");
-  t = t.replace(/\.\s*\./g, ".");
-  t = t.replace(/\s{2,}/g, " ").trim();
-  if (t.length > TTS_MAX_CHARS) {
-    const cut = t.slice(0, TTS_MAX_CHARS);
-    const lastStop = Math.max(cut.lastIndexOf(". "), cut.lastIndexOf("! "), cut.lastIndexOf("? "));
-    t = lastStop > 120 ? cut.slice(0, lastStop + 1) : cut;
-  }
-  return t;
-}
-
-// ── synced stub: src/worker.js normalizeKeyterm ──────────────────────────
-const STT_KEYTERM_MAXLEN = 50;
-
-function normalizeKeyterm(raw) {
-  if (typeof raw !== "string") return null;
-  const t = raw.replace(/\s+/g, " ").trim();
-  if (t.length < 3 || t.length > STT_KEYTERM_MAXLEN) return null;
-  if (!/[a-z]/i.test(t)) return null;
-  if (/^[0-9a-f]{6,}$/i.test(t)) return null;
-  if (t.includes("_") || t.includes(".")) return null;
-  return t;
-}
-
-describe("stripForSpeech", () => {
-  it("returns empty string for non-string input", () => {
-    expect(stripForSpeech(null)).toBe("");
-    expect(stripForSpeech(undefined)).toBe("");
-    expect(stripForSpeech(42)).toBe("");
+describe("cleanForSpeech", () => {
+  it("returns empty string for empty input", () => {
+    expect(cleanForSpeech(null)).toBe("");
+    expect(cleanForSpeech(undefined)).toBe("");
+    expect(cleanForSpeech("")).toBe("");
   });
 
   it("strips bold markers but keeps the words", () => {
-    expect(stripForSpeech("The **back porch** is unlocked.")).toBe("The back porch is unlocked.");
+    expect(cleanForSpeech("The **back porch** is unlocked.")).toBe("The back porch is unlocked.");
   });
 
   it("speaks an entity id as its object name", () => {
-    expect(stripForSpeech("Turning off light.bedside_lamp now."))
+    expect(cleanForSpeech("Turning off light.bedside_lamp now."))
       .toBe("Turning off bedside lamp now.");
   });
 
   it("handles the cover fast-path entity ids the agent quotes", () => {
-    expect(stripForSpeech("cover.ratgdo32_2b8ecc_door is closing."))
+    expect(cleanForSpeech("cover.ratgdo32_2b8ecc_door is closing."))
       .toBe("ratgdo32 2b8ecc door is closing.");
   });
 
   it("leaves ordinary prose containing periods alone", () => {
-    expect(stripForSpeech("Back by 7 p.m. tonight.")).toBe("Back by 7 p.m. tonight.");
-    expect(stripForSpeech("Warm rooms, e.g. the den.")).toBe("Warm rooms, e.g. the den.");
-    expect(stripForSpeech("It is 71.5 degrees.")).toBe("It is 71.5 degrees.");
+    expect(cleanForSpeech("Back by 7 p.m. tonight.")).toBe("Back by 7 p.m. tonight.");
+    expect(cleanForSpeech("Warm rooms, e.g. the den.")).toBe("Warm rooms, e.g. the den.");
+    expect(cleanForSpeech("It is 71.5 degrees.")).toBe("It is 71.5 degrees.");
   });
 
-  it("flattens a bulleted list into sentences", () => {
-    const out = stripForSpeech("Two doors are unlocked:\n- Basement Door\n- Back Porch");
-    expect(out).toBe("Two doors are unlocked:. Basement Door. Back Porch");
+  it("flattens a bulleted list into narrative prose", () => {
+    const out = cleanForSpeech("Two doors are unlocked:\n- Basement Door\n- Back Porch");
+    expect(out).toBe("Two doors are unlocked: Basement Door and Back Porch");
     expect(out).not.toContain("-");
     expect(out).not.toContain("\n");
   });
 
+  it("joins three or more list items with commas and a final and", () => {
+    expect(cleanForSpeech("Open:\n- Garage\n- Basement bay\n- Front door"))
+      .toBe("Open: Garage, Basement bay, and Front door");
+  });
+
+  it("joins numbered lists the same way", () => {
+    expect(cleanForSpeech("1. Close garage\n2. Lock back porch"))
+      .toBe("Close garage and Lock back porch");
+  });
+
   it("removes heading markers", () => {
-    expect(stripForSpeech("## Status\nAll locked.")).toBe("Status. All locked.");
+    expect(cleanForSpeech("## Status\nAll locked.")).toBe("Status. All locked.");
   });
 
   it("removes code fences and inline code", () => {
-    expect(stripForSpeech("Try `npm test` now.")).toBe("Try npm test now.");
-    expect(stripForSpeech("Before\n```\nsome code\n```\nAfter")).toContain("Before");
-    expect(stripForSpeech("Before\n```\nsome code\n```\nAfter")).not.toContain("`");
+    expect(cleanForSpeech("Try `npm test` now.")).toBe("Try npm test now.");
+    expect(cleanForSpeech("Before\n```\nsome code\n```\nAfter")).toContain("Before");
+    expect(cleanForSpeech("Before\n```\nsome code\n```\nAfter")).not.toContain("`");
+  });
+
+  it("expands spoken units and symbols into words", () => {
+    expect(cleanForSpeech("It is 72°F outside.")).toBe("It is 72 degrees Fahrenheit outside.");
+    expect(cleanForSpeech("Battery at 84% now.")).toBe("Battery at 84 percent now.");
+    expect(cleanForSpeech("Locks & cameras.")).toBe("Locks and cameras.");
+  });
+
+  it("drops URLs entirely rather than reading them", () => {
+    expect(cleanForSpeech("See https://example.com/x for details.")).toBe("See for details.");
+  });
+
+  it("strips emoji so they are not read as garbage", () => {
+    expect(cleanForSpeech("All secure ✅🔒 tonight.")).toBe("All secure tonight.");
+    expect(cleanForSpeech("Heating ♨️ to 70°F.")).toBe("Heating to 70 degrees Fahrenheit.");
   });
 
   it("collapses runs of whitespace", () => {
-    expect(stripForSpeech("Locked.    All   five.")).toBe("Locked. All five.");
+    expect(cleanForSpeech("Locked.    All   five.")).toBe("Locked. All five.");
   });
 
   it("truncates at a sentence boundary when over the cap", () => {
     const sentence = "The house is secure and everything is locked up tight. ";
     const long = sentence.repeat(30);
-    const out = stripForSpeech(long);
-    expect(out.length).toBeLessThanOrEqual(TTS_MAX_CHARS);
+    const out = cleanForSpeech(long);
+    expect(out.length).toBeLessThanOrEqual(TTS_CONFIG.maxChars);
     expect(out.endsWith(".")).toBe(true);
   });
 
   it("leaves short plain replies untouched", () => {
-    expect(stripForSpeech("Done.")).toBe("Done.");
-    expect(stripForSpeech("main garage bay door is opening.")).toBe("main garage bay door is opening.");
+    expect(cleanForSpeech("Done.")).toBe("Done.");
+    expect(cleanForSpeech("main garage bay door is opening.")).toBe("main garage bay door is opening.");
+  });
+});
+
+describe("resolveVoiceSpeed", () => {
+  it("defaults to the config speed when nothing is set", () => {
+    expect(resolveVoiceSpeed({}, {})).toBe(TTS_CONFIG.speed);
+  });
+
+  it("prefers per-request speed over the secret, and the secret over the default", () => {
+    expect(resolveVoiceSpeed({ speed: 1.1 }, { ELEVENLABS_VOICE_SPEED: "0.9" })).toBe(1.1);
+    expect(resolveVoiceSpeed({}, { ELEVENLABS_VOICE_SPEED: "0.9" })).toBe(0.9);
+  });
+
+  it("clamps to the ElevenLabs working range and rounds to 2 decimals", () => {
+    expect(resolveVoiceSpeed({ speed: 5 }, {})).toBe(1.2);
+    expect(resolveVoiceSpeed({ speed: 0.1 }, {})).toBe(0.7);
+    expect(resolveVoiceSpeed({ speed: "1.057" }, {})).toBe(1.06);
+  });
+
+  it("falls back to the default on unparseable values", () => {
+    expect(resolveVoiceSpeed({ speed: "fast" }, {})).toBe(TTS_CONFIG.speed);
+    expect(resolveVoiceSpeed({}, { ELEVENLABS_VOICE_SPEED: null })).toBe(TTS_CONFIG.speed);
   });
 });
 
