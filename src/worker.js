@@ -1,4 +1,4 @@
-import { HAWebSocketV34 } from "./ha-websocket.js";
+import { HAWebSocketV35 } from "./ha-websocket.js";
 import { CHAT_HTML } from "./chat-ui.html.js";
 import { handleTTS } from "./tts.js";
 import { handleTranscribe, refreshSTTKeyterms } from "./stt.js";
@@ -3054,6 +3054,6 @@ var worker_default = {
   }
 };
 export {
-  HAWebSocketV34,
+  HAWebSocketV35,
   worker_default as default
 };
