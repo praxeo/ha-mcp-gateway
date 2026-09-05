@@ -151,7 +151,7 @@ export function renderDynamicContext(ctx) {
     const relevantObservations = semanticObservations.filter(o => typeof o.score === "number" && o.score >= SCORE_FLOOR);
     // Voice turns get a reply-style contract: the bubble text is also the
     // TTS input, so it must be short spoken prose, never a visual rundown.
-    const voiceBlock = voiceTurn ? `VOICE TURN — the user spoke by voice and your reply will be read aloud:
+    const voiceBlock = voiceTurn ? `SPOKEN TURN — your reply will be read aloud (the user may have typed or spoken):
 - A few short conversational sentences, ~40 words max — like answering someone standing in the room.
 - Plain prose only: no markdown, no bold labels, no bullet lists, no headings, no entity IDs.
 - Lead with the answer or the notable exception; gloss over what's routine. For a status rundown do NOT enumerate category by category — summarize narratively ("Pretty secure — back porch's unlocked and the main garage is open; otherwise all locked and closed, 73 and cooling, you're both home.").

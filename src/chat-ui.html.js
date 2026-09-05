@@ -1255,7 +1255,8 @@ export const CHAT_HTML = `<!DOCTYPE html>
     const payload = JSON.stringify({
       message: text,
       tier,
-      source: isVoice ? 'voice' : 'text'
+      source: isVoice ? 'voice' : 'text',
+      speak: speakOn === true
     });
     const reqInit = {
       method: 'POST',

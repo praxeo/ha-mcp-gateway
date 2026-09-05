@@ -1,4 +1,4 @@
-import { HAWebSocketV33 } from "./ha-websocket.js";
+import { HAWebSocketV34 } from "./ha-websocket.js";
 import { CHAT_HTML } from "./chat-ui.html.js";
 import { handleTTS } from "./tts.js";
 import { handleTranscribe, refreshSTTKeyterms } from "./stt.js";
@@ -2397,6 +2397,7 @@ var worker_default = {
                 message: body.message,
                 from: "web",
                 source: body.source === "voice" ? "voice" : "text",
+                speak: body.speak === true,
                 tier: body.tier === "high" ? "high" : "quick"
               })
             });
@@ -2413,6 +2414,7 @@ var worker_default = {
             message: body.message,
             from: "web",
             source: body.source === "voice" ? "voice" : "text",
+            speak: body.speak === true,
             tier: body.tier === "high" ? "high" : "quick"
           });
           return new Response(JSON.stringify(result || { error: "Agent not responding" }, null, 2), {
@@ -3052,6 +3054,6 @@ var worker_default = {
   }
 };
 export {
-  HAWebSocketV33,
+  HAWebSocketV34,
   worker_default as default
 };

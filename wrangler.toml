@@ -51,7 +51,7 @@ binding = "CF_VERSION_METADATA"
 
 [[durable_objects.bindings]]
 name = "HA_WS"
-class_name = "HAWebSocketV33"
+class_name = "HAWebSocketV34"
 
 [[migrations]]
 tag = "v1"
@@ -499,6 +499,17 @@ renamed_classes = [
 tag = "v33"
 renamed_classes = [
   { from = "HAWebSocketV32", to = "HAWebSocketV33" }
+]
+
+# Spoken-replies toggle now drives speech mode: the UI sends speak: true
+# whenever the Speak Replies button is on, worker + DO routes forward it,
+# and chatWithAgentNative treats source "voice" OR speak true as a spoken
+# turn (SPOKEN TURN prompt block). Typed turns with speech off are
+# unchanged. DO-side code -> fresh isolate required. Storage preserved.
+[[migrations]]
+tag = "v34"
+renamed_classes = [
+  { from = "HAWebSocketV33", to = "HAWebSocketV34" }
 ]
 
 # Two cron triggers:
