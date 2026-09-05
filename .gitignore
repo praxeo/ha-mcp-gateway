@@ -4,7 +4,11 @@ node_modules/
 .env
 .env.*
 dist/
-.claude/
+# .claude/ holds local-only settings (settings.local.json — live API tokens)
+# and scratch worktrees. Ignore all of it EXCEPT skills/, which is checked in
+# so the repo-map navigation skill travels with the repo.
+.claude/*
+!.claude/skills/
 
 # Local-only system-prompt diagnostic dumps (contain household PII)
 .prompt-dump.json
